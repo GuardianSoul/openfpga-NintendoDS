@@ -49,8 +49,9 @@ No BIOS, firmware or game data is included, and none can be shared.
 Each game's save is kept in `Saves/nds/common/<game>.sav`, a raw save that
 works with melonDS and flashcarts. To use an existing save, copy it there
 with the game's name. The core supports EEPROM (512 bytes, 8, 64 and
-128 KiB) and FLASH (256 KiB, 512 KiB, 1 MiB) saves. It picks the type from
-its built-in list of every game's save chip, or from the size of an existing save. The rare 8 MiB NAND saves (WarioWare D.I.Y., Jam with the Band)
+128 KiB) and FLASH (256 KiB, 512 KiB, 1 MiB) saves. Every game's save type
+is detected automatically, from the core's built-in list of each game's save
+chip. The rare 8 MiB NAND saves (WarioWare D.I.Y., Jam with the Band)
 are not supported.
 
 **Quit through the Pocket menu before you turn the Pocket off.** The save is
@@ -86,12 +87,12 @@ Under **Core Settings** in the Pocket menu. Defaults are in bold.
 
 | Setting | Choices | What it does |
 | --- | --- | --- |
+| Screen Rotation | **Off**, Left, Right | Turns the picture for games played with the DS held like a book |
 | SELECT + L/R | **Swap Screens**, Off | The layout combos above; Off sends L and R to the game with Select |
 | SELECT + A/B/X/Y | **Toggle Touch**, Off | The touch mode combo; Off sends the buttons to the game with Select |
 | Touch: Cursor Speed | Slow, **Normal**, Fast | How fast the D-pad moves the touch cursor (1, 3 or 6 pixels a frame) |
-| Touch: A Button | Button, **Touch**, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | What A does in touch mode: the button itself, a touch, or a gesture from the cursor |
-| Touch: B Button, X Button, Y Button | **Button**, Touch, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | The same for B, X and Y |
-| Screen Rotation | **Off**, Left, Right | Turns the picture for games played with the DS held like a book |
+| Touch: A Button | None, **Touch**, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | What A does in touch mode: None sends the button to the game; Touch touches while held; the others run a gesture from the cursor |
+| Touch: B Button, X Button, Y Button | **None**, Touch, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | The same for B, X and Y |
 
 ## Pocket limitations
 
@@ -113,9 +114,7 @@ As of 0.5.1 (2026-11-06):
   highlight shading, fog, edge marking and anti-aliasing. Games draw without
   them. The 2D mosaic effect is off too. These are temporary: the source
   can build them all, and they come back as room is found.
-- **The heaviest 3D scenes can still run a little below full speed.** Most
-  games tested run at full speed. Animal Crossing: Wild World runs at about
-  20 frames a second, which is what the game itself does.
+- **The heaviest 3D scenes can still run a little below full speed.**
 - **Line glitches:** some busy 3D scenes show black lines, and some models
   show glitching vertices.
 - **Loading stutter:** a short stutter can remain when a game loads a lot of

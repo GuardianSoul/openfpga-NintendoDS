@@ -28,10 +28,16 @@ import sys
 # Rotation (id 8) is "Screen Rotation"; menu order : the two SELECT
 # switches, Screen Rotation, Cursor Speed. the maintainer, 2026-11-06: the touch settings
 # together after SELECT + A/B/X/Y (touch mode): Touch: Cursor Speed, Touch:
-# A/B/X/Y Button, then Screen Rotation. The RTL names stay (TAGS).
-GESTURES = [(0, 'Button'), (1, 'Touch'), (2, 'Circle'), (3, 'Big Circle'), (4, 'Swipe Up'),
+# A/B/X/Y Button, then Screen Rotation. The RTL names stay (TAGS). 0.5.1 :
+# Screen Rotation first, and the gesture option Button is "None" (the button
+# reaches the game).
+GESTURES = [(0, 'None'), (1, 'Touch'), (2, 'Circle'), (3, 'Big Circle'), (4, 'Swipe Up'),
             (5, 'Swipe Left'), (6, 'Swipe Down'), (7, 'Swipe Right')]
 SETTINGS = [
+    # Rotation (2026-10-28, docs/screen-orientation.md): the stacked layout through the APF scaler's
+    # rotated modes 2 (Left) and 3 (Right) for book-style games
+    ('Screen Rotation', 8, 0x5000_0010, 4, 2, 0, [
+        (0, 'Off'), (1, 'Left'), (2, 'Right')]),
     # option labels : what the combo does, or Off
     ('SELECT + L/R', 9, 0x5000_0014, 0, 1, 0, [
         (0, 'Swap Screens'), (1, 'Off')]),
@@ -46,12 +52,7 @@ SETTINGS = [
     # Button" etc. (2026-11-06); the RTL keeps the SET_A_IN_TOUCH_MODE_* names (TAGS)
 ] + [(f'Touch: {b} Button', vid, addr, bit, 3, dv, GESTURES)
      for b, vid, addr, bit, dv in [('A', 11, 0x5000_001C, 6, 1), ('B', 12, 0x5000_0020, 9, 0),
-                                   ('X', 13, 0x5000_0024, 12, 0), ('Y', 14, 0x5000_0028, 15, 0)]] + [
-    # Rotation (2026-10-28, docs/screen-orientation.md): the stacked layout through the APF scaler's
-    # rotated modes 2 (Left) and 3 (Right) for book-style games
-    ('Screen Rotation', 8, 0x5000_0010, 4, 2, 0, [
-        (0, 'Off'), (1, 'Left'), (2, 'Right')]),
-]
+                                   ('X', 13, 0x5000_0024, 12, 0), ('Y', 14, 0x5000_0028, 15, 0)]]
 PACKET_BITS = 18
 MAX_LABEL = 19   # 18 until "Touch: Cursor Speed" (2026-11-06); the menu showed 19 in #217
 # RTL names of settings renamed in the menu, so the header's localparams stay put
