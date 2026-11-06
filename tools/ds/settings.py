@@ -26,24 +26,36 @@ import sys
 # #746): SELECT + L/R (previous/next layout) and SELECT + A/B/X/Y (touch
 # mode), each On or Off; Off, those buttons reach the game with SELECT.
 # Rotation (id 8) is "Screen Rotation"; menu order : the two SELECT
-# switches, Screen Rotation, Cursor Speed.
+# switches, Screen Rotation, Cursor Speed. the maintainer, 2026-11-06: the touch settings
+# together after SELECT + A/B/X/Y (touch mode): Touch: Cursor Speed, Touch:
+# A/B/X/Y Button, then Screen Rotation. The RTL names stay (TAGS).
+GESTURES = [(0, 'Button'), (1, 'Touch'), (2, 'Circle'), (3, 'Big Circle'), (4, 'Swipe Up'),
+            (5, 'Swipe Left'), (6, 'Swipe Down'), (7, 'Swipe Right')]
 SETTINGS = [
     # option labels : what the combo does, or Off
     ('SELECT + L/R', 9, 0x5000_0014, 0, 1, 0, [
         (0, 'Swap Screens'), (1, 'Off')]),
     ('SELECT + A/B/X/Y', 10, 0x5000_0018, 1, 1, 0, [
         (0, 'Toggle Touch'), (1, 'Off')]),
+    # Cursor Speed: Slow 1, Normal 3, Fast 6 px/frame (the maintainer wants it faster;
+    # ids 3 and 5 were earlier speed sets, so a new id resets saved positions)
+    ('Touch: Cursor Speed', 6, 0x5000_0008, 2, 2, 1, [
+        (0, 'Slow'), (1, 'Normal'), (2, 'Fast')]),
+    # A/B/X/Y in touch mode (2026-11-06, nds_controls.sv): a game button, the pen, or a gesture drawn
+    # from the cursor; A is the pen and B/X/Y reach the game by default, as before. Named "Touch: A
+    # Button" etc. (2026-11-06); the RTL keeps the SET_A_IN_TOUCH_MODE_* names (TAGS)
+] + [(f'Touch: {b} Button', vid, addr, bit, 3, dv, GESTURES)
+     for b, vid, addr, bit, dv in [('A', 11, 0x5000_001C, 6, 1), ('B', 12, 0x5000_0020, 9, 0),
+                                   ('X', 13, 0x5000_0024, 12, 0), ('Y', 14, 0x5000_0028, 15, 0)]] + [
     # Rotation (2026-10-28, docs/screen-orientation.md): the stacked layout through the APF scaler's
     # rotated modes 2 (Left) and 3 (Right) for book-style games
     ('Screen Rotation', 8, 0x5000_0010, 4, 2, 0, [
         (0, 'Off'), (1, 'Left'), (2, 'Right')]),
-    # Cursor Speed: Slow 1, Normal 3, Fast 6 px/frame (the maintainer wants it faster;
-    # ids 3 and 5 were earlier speed sets, so a new id resets saved positions)
-    ('Cursor Speed', 6, 0x5000_0008, 2, 2, 1, [
-        (0, 'Slow'), (1, 'Normal'), (2, 'Fast')]),
 ]
-PACKET_BITS = 6
-MAX_LABEL = 18
+PACKET_BITS = 18
+MAX_LABEL = 19   # 18 until "Touch: Cursor Speed" (2026-11-06); the menu showed 19 in #217
+# RTL names of settings renamed in the menu, so the header's localparams stay put
+TAGS = {f'Touch: {b} Button': f'{b}_IN_TOUCH_MODE' for b in 'ABXY'} | {'Touch: Cursor Speed': 'CURSOR_SPEED'}
 
 
 def interact_variables():
@@ -62,11 +74,11 @@ def svh():
              f'localparam integer SET_BITS = {PACKET_BITS};']
     default = 0
     for name, _, addr, bit, width, dv, _ in SETTINGS:
-        tag = name.upper().replace(' + ', '_').replace('/', '').replace(' ', '_')
+        tag = TAGS.get(name) or name.upper().replace(' + ', '_').replace('/', '').replace(' ', '_')
         lines.append(f'localparam integer SET_{tag}_IDX = {(addr & 0xFF) >> 2}, SET_{tag}_BIT = {bit}, '
                      f'SET_{tag}_W = {width};   // "{name}"')
         default |= dv << bit
-    lines.append(f"localparam [SET_BITS-1:0] SET_DEFAULT = {PACKET_BITS}'h{default:02X};")
+    lines.append(f"localparam [SET_BITS-1:0] SET_DEFAULT = {PACKET_BITS}'h{default:05X};")
     return '\n'.join(lines) + '\n'
 
 

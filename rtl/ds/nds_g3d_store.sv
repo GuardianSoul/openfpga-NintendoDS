@@ -65,6 +65,7 @@ module nds_g3d_store #(
     input  logic [11:0]  so_count,
     // rasterizer
     output logic         drawing,        // a frame is drawn from the on-chip lists (f_live): a swap's sort output must wait
+    output logic         lists_bld,      // the swap's lists are being built (a frame started now would find none: nds_gpu3d SWHOLD waits)
     input  logic         frame_go,       // a frame starts (line 0 next)
     input  logic         abort,          // the raster restarts unfinished (the clock before its frame_go): this frame stops
     // diagnostics (docs/diag.md): {loader beat, loader granted, loader waiting for the PSRAM grant,
@@ -234,6 +235,7 @@ module nds_g3d_store #(
     logic        rb;                     // bank being drawn
     logic [11:0] rcount;
     logic        ready;                  // lists built, the bank's records in PSRAM
+    assign lists_bld = building;
     typedef enum logic [2:0] { B_IDLE, B_CLR, B_DRAIN, B_ORD, B_YT, B_BK, B_LINK } bst_t;
     bst_t        bst;
     logic [11:0] bpos;
@@ -336,6 +338,10 @@ module nds_g3d_store #(
     lst_t          lst;
     logic [8:0]    ly;                   // line whose arrivals load next; 192 = all loaded
     logic          lgo;                  // this bank's loading has started
+    // the loader started on this bank while no frame was drawing, and no frame has started since: when the
+    // next swap comes first (nds_gpu3d SWPC: a late sort, then the next VBlank's), its slots and chunks come back
+    // at that swap as for an abandoned frame (else the next frame found the pool full and drew nothing)
+    logic          l_undrawn;
     // A bank is drawn once per frame until the next swap (a game at 30 fps shows it twice), and every
     // frame frees the slots and chunks it drew: the loader loads it again for each frame after the
     // first (l_re, from frame_go until it restarts; the fetcher waits). Without this the second frame
@@ -432,6 +438,9 @@ module nds_g3d_store #(
             end
         endcase
     end
+    always_ff @(posedge clk)
+        l_undrawn <= !rst && !so_done && !frame_go &&
+                     (l_undrawn || (lst == L_IDLE && ready && !lgo && !f_clr && !l_re && !f_live));
     assign fs_pop = lst == L_ROOM && fs_ok && fc_n >= {{(CL-3){1'b0}}, lnv};
     assign fc_pop = lst == L_VDAT && l_beat && lw == 2'd3;
     // the loader's lines are loaded once it has passed them (or all are)
@@ -488,7 +497,7 @@ module nds_g3d_store #(
             if (frame_go) begin f_live <= 1'b1; f_dead <= 1'b0; end
             else if (fst == F_END && !fquiet && out_free && fy == 8'd191) f_live <= 1'b0;
             if ((so_we || so_done) && f_live && !frame_go) begin f_live <= 1'b0; f_dead <= 1'b1; end
-            if (so_done && (f_dead || f_live)) f_clr <= 1'b1;
+            if (so_done && (f_dead || f_live || l_undrawn)) f_clr <= 1'b1;
             else if (f_clr_go) f_clr <= 1'b0;
             // the raster restarts on a frame the store still draws (the DS starts every frame at line 215):
             // its slots and chunks come back as for an abandoned frame, once the loader is back at a state that
@@ -659,6 +668,24 @@ module nds_g3d_store #(
     bit sm_on;
     initial sm_on = $test$plusargs("g3dsmon");
     longint sm_fld, sm_flim, sm_fout, sm_fidle, sm_fv, sm_lgnt, sm_ldat, sm_lroom, sm_wr, sm_rec, sm_chk, sm_cy;
+    // ... and why the fetcher waits for the loader (a redraw, loading not started, the loader not past the line)
+    // and the loader for the pool (a slot at the header, a chunk at a vertex), the fewest free slots / chunks
+    longint sm_wre, sm_wlgo, sm_wly, sm_lhs, sm_lvc;
+    int sm_fsmin, sm_fcmin;
+    always_ff @(posedge clk) if (sm_on && !rst) begin
+        if (fst == F_WAIT && l_re) sm_wre <= sm_wre + 1;
+        if (fst == F_WAIT && !l_re && ready && !lgo) sm_wlgo <= sm_wlgo + 1;
+        if (fst == F_WAIT && !l_re && ready && lgo && !l_through && ly <= {1'b0, fy}) sm_wly <= sm_wly + 1;
+        if (lst == L_HREQ && !fs_ok) sm_lhs <= sm_lhs + 1;
+        if (lst == L_VREQ && !fc_ok) sm_lvc <= sm_lvc + 1;
+        if (int'(fs_n) < sm_fsmin) sm_fsmin <= int'(fs_n);
+        if (int'(fc_n) < sm_fcmin) sm_fcmin <= int'(fc_n);
+        if (frame_go) begin
+            $display("g3dsmon2: fetch wait redraw %0d not-started %0d line %0d | load wait slot %0d chunk %0d | free min slots %0d chunks %0d",
+                     sm_wre, sm_wlgo, sm_wly, sm_lhs, sm_lvc, sm_fsmin, sm_fcmin);
+            {sm_wre, sm_wlgo, sm_wly, sm_lhs, sm_lvc} <= '0; sm_fsmin <= 1 << 20; sm_fcmin <= 1 << 20;
+        end
+    end
     always_ff @(posedge clk) if (sm_on && !rst) begin
         sm_cy <= sm_cy + 1;
         if (fst == F_WAIT && {1'b0, fy} > y_lim) sm_flim <= sm_flim + 1;

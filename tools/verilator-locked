@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verilator, one build at a time on this machine (AGENTS.md; sim/pocket_ds/run.py takes the same lock). The Makefile's VERILATOR.
+mkdir -p "$HOME/.cache"
+exec flock "$HOME/.cache/nds-sim-build.lock" "${TOOLS:-build/tools/oss-cad-suite/bin}/verilator" "$@"

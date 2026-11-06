@@ -1,7 +1,7 @@
 # Compatibility
 
-As of 2026-11-06. These are results from
-builds on a Pocket and from simulation of the core against the patched
+As of 2026-11-06. These are results from 0.5.0-era
+builds on a Pocket (0.5.1's speed, streaming and save fixes may improve them) and from simulation of the core against the patched
 melonDS reference. The list will change quickly, so treat it as a snapshot.
 
 ## Tested on a Pocket

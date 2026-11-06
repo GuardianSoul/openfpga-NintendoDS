@@ -9,7 +9,7 @@
  
  namespace melonDS
  {
-@@ -1732,10 +1734,60 @@
+@@ -1732,10 +1734,66 @@
      return ret;
  }
  
@@ -21,7 +21,7 @@
 +struct GxTiming
 +{
 +    bool init = false, cheap = false, stats = false;
-+    s32 tab[512] {};
++    s32 tab[1536] {};
 +    u64 cnt[512] {}, sum[512] {};
 +    std::string statsPath;
 +    void Init()
@@ -30,7 +30,7 @@
 +        if (const char* p = getenv("GX_CHEAP"))
 +        {
 +            FILE* f = fopen(p, "r");
-+            if (f) { int k, v; while (fscanf(f, "%d %d", &k, &v) == 2) if (k >= 0 && k < 512) tab[k] = v; fclose(f); cheap = true; }
++            if (f) { int k, v; while (fscanf(f, "%d %d", &k, &v) == 2) if (k >= 0 && k < 1536) tab[k] = v; fclose(f); cheap = true; }
 +        }
 +        if (const char* p = getenv("GX_STATS")) { stats = true; statsPath = p; }
 +    }
@@ -61,7 +61,13 @@
 +            if (g_gxt.stats) { g_gxt.cnt[key]++; g_gxt.sum[key] += (u64)(g.CycleCount - c0); }
 +            if (g_gxt.cheap)
 +            {
-+                g.CycleCount = c0 + g_gxt.tab[key];
++                // Optional matrix completion keys: 512 + 256*mode + legacy key.
++                // Old 512-row tables retain their original behavior.
++                u32 mk = 512 + 256 * (g.MatrixMode & 3) + key;
++                s32 cost = g_gxt.tab[key];
++                if (cmd >= 0x11 && cmd <= 0x1C && (key & 1) && g_gxt.tab[mk])
++                    cost = g_gxt.tab[mk];
++                g.CycleCount = c0 + cost;
 +                g.VertexPipeline = 0; g.NormalPipeline = 0; g.PolygonPipeline = 0;
 +                g.VertexSlotCounter = 0; g.VertexSlotsFree = 1;
 +            }

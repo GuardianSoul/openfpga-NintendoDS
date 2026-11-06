@@ -30,16 +30,19 @@ EVENTS = ['r_stream', 'r_edge', 'r_pixel', 'r_final', 'r_late', 'r_restart', 'r_
          [f'i_sd_wait{p}' for p in (0, 1, 2, 3, 4, 6)] + ['i_ref_late']
 # logs of builds before the cartridge counters (NDSDiag #638 and earlier: 47 events) lack events 40-41
 EVENTS47 = [e for e in EVENTS if not e.startswith('k_cart')]
+# builds with the 3D ring's underrun causes (53 events): 42-45 before the clk_mem counters
+RING_EV = ['r_ring_rd', 'r_ring_unsafe', 'r_ring_skip', 'r_nx2_hit']
+EVENTS53 = EVENTS[:42] + RING_EV + EVENTS[42:]
 
 
 def event_names(ne):
-    return EVENTS47 if ne == 47 else EVENTS
+    return EVENTS47 if ne == 47 else EVENTS53 if ne == 53 else EVENTS
 
 
 # the header's CONFIG word (core_top_ds g_diag CFG): bit -> option
 CONFIG = ['GPU3D', 'SOUND', 'RING', 'NDS_DEBUG', 'ARM7_CACHE', 'CPU_FAST', 'G3D_AA', 'G3D_TOON', 'G3D_FOG',
           'G3D_ATEST', 'G3D_EDGE', 'G3D_SHADOW', 'G3D_LOWER', 'G3D_TCFAST', 'G3D_TCMIF2', None, None, 'WIFI',
-          'G2D_MOSAIC', 'G3D_TCV2', 'G3D_NXB']
+          'G2D_MOSAIC', 'G3D_TCV2', 'G3D_NXB', 'LEAN']   # LEAN: the lean diag (CPU, cartridge, clk_mem events 0)
 
 
 def config_str(c):
@@ -184,6 +187,9 @@ def main():
 
 def play(rows):
     """the frames the DS ran (a Pocket-model scene's first records are before its import released: all zero)"""
+    # (a build without the CPU events, the lean diag: every a9_retire is 0, keep all)
+    if not any(r.get('a9_retire', 0) for r in rows):
+        return rows
     return [r for r in rows if r.get('a9_retire', 1) > 0]
 
 
@@ -217,7 +223,7 @@ def report(a):
     other = Log(a.compare) if a.compare else None
     ofr = play(Log.deltas(other.frame_recs, other.ne, other.nv)) if other else None
     key = ['frame', 'g_swap', 'r_late', 'r_restart', 'd_late', 'a9_retire', 'a9_wait_main', 'r_tmiss', 'g_stall_bp',
-           'r_first_late', 'i_underruns']
+           'r_first_late', 'i_underruns'] + (['r_ring_under'] + RING_EV if lg.ne == 53 else [])
     if a.seconds or not a.frames:
         table(sr, key, 'per second (whole session; counts per second)')
     if a.frames:

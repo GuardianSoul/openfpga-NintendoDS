@@ -19,12 +19,16 @@ git -C "$out/melonDS" apply "$root/tools/melonds-census/gx-timing.patch"
 # DS-verified rules (AGENTS.md): the real DS wins where hwref pinned a rule
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules.patch"
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-spu.patch"
+git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-spu-capsrc.patch"
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-geom.patch"
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-2d.patch"
+git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-objwork.patch"
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-gxtime.patch"
+git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-gxload.patch"
+git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-gxclip.patch"
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-tmr.patch"
 git -C "$out/melonDS" apply "$root/tools/melonds-census/ds-rules-tmrcnt.patch"
 cmake -S "$root/tools/melonds-census" -B "$out/build" -DCMAKE_BUILD_TYPE=Release \
     -DMELONDS_DIR="$out/melonDS" >/dev/null
-cmake --build "$out/build" -j"$(nproc)"
+cmake --build "$out/build" -j8
 echo "built $out/build/census"

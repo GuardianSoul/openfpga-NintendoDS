@@ -1,0 +1,57 @@
+# Apply after ds-rules-spu.patch; DS31 source selection, odd rounding still unmeasured.
+--- a/src/SPU.cpp
++++ b/src/SPU.cpp
+@@ -893,7 +893,14 @@
+-
++
+         if (Capture[0].Cnt & (1<<7))
+         {
+-            s32 val = left;
++            s32 capture_input = left;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAPSRC)
++            // DS31 S4: channel0/2 after volume/divider, before pan. Exact DC
++            // powers-of-two levels are pinned; odd-source quantization remains
++            // the existing capture fallback pending the staged sndq probe.
++            if (Capture[0].Cnt & 0x02) capture_input = ch0 >> 3;
++#endif
++            s32 val = capture_input;
+-
++
+ #if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAPTURE)
+             // DS rule (docs/hw-reference.md, sndcap v3 DC grid): the capture's
+@@ -913,7 +920,7 @@
+             // eight bits up), saturated; Run takes the 8-bit value as sample >> 8
+             if (Capture[0].Cnt & 0x08)
+             {
+-                s32 v8 = (left >> 15) / 2;
++                s32 v8 = (capture_input >> 15) / 2;
+                 if      (v8 < -0x80) v8 = -0x80;
+                 else if (v8 > 0x7F)  v8 = 0x7F;
+                 val = v8 * 256;
+@@ -925,7 +932,14 @@
+-
++
+         if (Capture[1].Cnt & (1<<7))
+         {
+-            s32 val = right;
++            s32 capture_input = right;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAPSRC)
++            // DS31 S4: channel0/2 after volume/divider, before pan. Exact DC
++            // powers-of-two levels are pinned; odd-source quantization remains
++            // the existing capture fallback pending the staged sndq probe.
++            if (Capture[1].Cnt & 0x02) capture_input = ch2 >> 3;
++#endif
++            s32 val = capture_input;
+-
++
+ #if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAPTURE)
+             // DS rule (docs/hw-reference.md, sndcap v3 DC grid): the capture's
+@@ -945,7 +959,7 @@
+             // eight bits up), saturated; Run takes the 8-bit value as sample >> 8
+             if (Capture[1].Cnt & 0x08)
+             {
+-                s32 v8 = (right >> 15) / 2;
++                s32 v8 = (capture_input >> 15) / 2;
+                 if      (v8 < -0x80) v8 = -0x80;
+                 else if (v8 > 0x7F)  v8 = 0x7F;
+                 val = v8 * 256;

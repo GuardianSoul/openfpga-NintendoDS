@@ -23,7 +23,14 @@ module nds_vram
     // CAP_CHAIN: a captured word pair goes to the SDRAM write FIFO (cw_*, core_top_ds) instead of the
     // serial VRAM port: a line's 128 writes took ~26 clocks each there under the 3D's traffic and the
     // composite pass waited on them (MKDS intro, docs/2d-engine.md). A lone halfword still uses the port.
-    parameter bit CAP_CHAIN = 0
+    parameter bit CAP_CHAIN = 0,
+    // VR_POST (with CAP_CHAIN): a CPU or DMA word write also goes to the write FIFO, so it costs a few clocks
+    // instead of an SDRAM write through the serial port (Golden Sun DD's title: its HBlank row and GX list took
+    // 4 video frames a game frame). Reads and partial writes from this port wait until the FIFO has drained.
+    parameter bit VR_POST = 0,
+    // VR_RDB: this port's reads fill a line of 8 words, one block on the VRAM port, and hit it after that: the
+    // same title's copy of a captured bank took 22 clocks a word through single reads. Any write empties the line.
+    parameter bit VR_RDB = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -52,6 +59,7 @@ module nds_vram
     output logic [23:0] cw_addr,
     output logic [31:0] cw_data,
     input  logic        cw_ack,
+    input  logic        cw_drained,
     // the cartridge's save memory (1 MiB at physical 0x100000) and the WiFi
     // block's memory (0x0F0000), lowest priority
     input  logic        sv_req,
@@ -208,7 +216,7 @@ module nds_vram
     end
 
     // ---- state machine
-    typedef enum logic [2:0] { S_IDLE, S_GBLK, S_GZERO, S_CAP, S_CPU, S_CPUR, S_GRES, S_CRES } st_t;
+    typedef enum logic [3:0] { S_IDLE, S_GBLK, S_GZERO, S_CAP, S_CPU, S_CPUR, S_GRES, S_CRES, S_POST, S_RBLK, S_RFIL } st_t;
     st_t         st;
     logic [20:0] res_q;         // the resolver's answer for the request taken (S_GRES, S_CRES)
     logic [2:0]  beat;          // words received (block)
@@ -241,7 +249,13 @@ module nds_vram
     logic [4:0]  bw_left;       // block words still to come
     logic        bw_odd;        // the next block word is the second of a pair
     logic        bw_acc;        // a block request was accepted this cycle
-    wire         g_go = g_req && bw_left <= 5'd8;
+    logic        post_p, post_d; // VR_POST: a posted word may still be in the FIFO: nothing reads VRAM yet
+    wire         g_go = g_req && bw_left <= 5'd8 && !post_p;
+    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rb [8];  // VR_RDB: the read line (MLAB: an M10K here was the 309th of 308 with MKDS's G3D_SL 9; read in S_IDLE, written in S_RBLK)
+    logic [19:5] rb_tag;
+    logic        rb_v, rb_inv;   // the line is valid; a write came during its fill
+    logic [2:0]  rb_w;
+    wire         any_w;
 
     // One resolver for both, registered: a request waits one clock in S_GRES or
     // S_CRES for its answer (known difference, docs/ds-rules.md). g_ack does not
@@ -254,9 +268,10 @@ module nds_vram
     assign g_ack = st == S_IDLE && g_go;
     assign bw_acc = st == S_GBLK && vm_ack;
     wire cw_pair = CAP_CHAIN && cap_v && cap_w;
-    assign cw_valid = cw_pair;
-    assign cw_addr  = {7'd0, cap_a[17:16], cap_a[15:1]};
-    assign cw_data  = {cap_d, cap_lo};
+    wire cw_post = VR_POST && st == S_POST && !cw_pair;
+    assign cw_valid = cw_pair || cw_post;
+    assign cw_addr  = cw_pair ? {7'd0, cap_a[17:16], cap_a[15:1]} : {6'd0, res_q[19:2]};
+    assign cw_data  = cw_pair ? {cap_d, cap_lo} : c_wdata;
     assign cap_ready = !cap_v && (!cap_p || (cap_addr[0] && cap_addr[17:1] == cap_pa));
 
     always_ff @(posedge clk) begin
@@ -308,10 +323,21 @@ module nds_vram
                 end else if (bw_left == 5'd0) st <= S_GZERO;     // (in order, after the blocks in flight)
             S_CRES:
                 if (!res_q[20]) begin c_ack <= 1'b1; r_q <= 32'd0; st <= S_IDLE; end
+                else if (VR_POST && c_we && c_be == 4'hF) st <= S_POST;
+                else if (VR_RDB && !c_we && rb_v && rb_tag == res_q[19:5]) begin c_ack <= 1'b1; r_q <= rb[res_q[4:2]]; st <= S_IDLE; end
+                else if (post_p) ;
+                else if (VR_RDB && !c_we) begin st <= S_RBLK; va <= {res_q[19:5], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; rb_w <= 3'd0; rb_inv <= 1'b0; end
                 else begin
                     st <= S_CPU; va <= res_q[19:2]; vwe <= c_we; vblk <= 1'b0; vbe <= c_be; vwd <= c_wdata;
                     vsv <= 1'b0;
                 end
+            S_POST: if (cw_post && cw_ack) begin c_ack <= 1'b1; st <= S_IDLE; end
+            S_RBLK: if (vm_ack) st <= S_RFIL;
+            S_RFIL: if (vm_rvalid) begin
+                rb[rb_w] <= vm_rdata; rb_w <= rb_w + 3'd1;
+                if (rb_w == res_q[4:2]) r_q <= vm_rdata;
+                if (rb_w == 3'd7) begin c_ack <= 1'b1; rb_tag <= res_q[19:5]; rb_v <= !rb_inv; st <= S_IDLE; end
+            end
             S_GBLK: if (vm_ack) st <= S_IDLE;     // the words follow (bw_left)
             S_GZERO: begin
                 g_rvalid <= 1'b1; w0 <= 32'd0; w1 <= 32'd0; beat <= beat + 3'd1;
@@ -330,6 +356,17 @@ module nds_vram
                 st <= S_IDLE;
             end
         endcase
+        // VR_RDB: after the state machine, so a write wins over the line's end of fill
+        if (rst || any_w) rb_v <= 1'b0;
+        if (any_w) rb_inv <= 1'b1;
+    end
+
+    assign any_w = (cw_valid && cw_ack) || (vm_req && vm_ack && vwe);
+    always_ff @(posedge clk) begin
+        post_d <= cw_post && cw_ack;
+        if (rst) post_p <= 1'b0;
+        else if (cw_post && cw_ack) post_p <= 1'b1;
+        else if (cw_drained && !post_d) post_p <= 1'b0;
     end
 
     // the capture address is a halfword index in a 128 KiB bank: byte = {bank, idx, 0}
@@ -340,7 +377,7 @@ module nds_vram
         if (!rst && st == S_CPU && vwe && (vsv ? (sv_wdata != vwd || sv_be != vbe) : (c_wdata != vwd || c_be != vbe)))
             $display("nds_vram: ERROR: the %s port's write data changed before the write (%m) at %0t", vsv ? "save" : "CPU", $time);
 `endif
-    assign vm_req   = st == S_GBLK || st == S_CAP || st == S_CPU;
+    assign vm_req   = st == S_GBLK || st == S_CAP || st == S_CPU || st == S_RBLK;
     assign vm_we    = vwe;
     assign vm_blk   = vblk;
     assign vm_addr  = va;

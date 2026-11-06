@@ -242,6 +242,11 @@ module tb_ds_pocket;
         begin
             integer rot;
             if ($value$plusargs("rotation=%d", rot)) write_reg(32'h5000_0010, rot);
+            // +gest_a/b/x/y=N: the Core Settings "A/B/X/Y in Touch Mode" (tools/ds/settings.py)
+            if ($value$plusargs("gest_a=%d", rot)) write_reg(32'h5000_001C, rot);
+            if ($value$plusargs("gest_b=%d", rot)) write_reg(32'h5000_0020, rot);
+            if ($value$plusargs("gest_x=%d", rot)) write_reg(32'h5000_0024, rot);
+            if ($value$plusargs("gest_y=%d", rot)) write_reg(32'h5000_0028, rot);
         end
         // +rtc=DDDDDDDDTTTTTTTT (hex: BCD date 0xYYYYMMDD, time 0x00HHMMSS): the APF RTC command; +rtc2=... a
         // second one after the DS has started (the core keeps the first: core_bridge_cmd_lean). Without +rtc
@@ -404,7 +409,7 @@ module tb_ds_pocket;
     reg [31:0] imp_real [0:(1<<20)-1];
     reg [31:0] imp_vram [0:32'h29000-1];
     reg [31:0] imp_sram [0:32'h6000-1];
-    integer imp_ready9, imp_ready7, imp_vc, imp_ov, imp_ovn, imp_blk, imp_blkn, imp_stubn = 0, imp_frame = -1;
+    integer imp_ready9, imp_ready7, imp_vc, imp_ov, imp_ovn, imp_blk, imp_blkn, imp_stubn = 0, imp_frame = -1, imp_hold;
     bit imp_stub_pend = 0;
     reg [8*256-1:0] imp_f, imp_f2;
     initial if ($value$plusargs("imp_main=%s", imp_f)) begin
@@ -436,6 +441,8 @@ module tb_ds_pocket;
         imp_stub_pend = imp_stubn != 0;
         repeat (400) @(posedge dut.clk_sys);
         release dut.keys;
+        // +hold=HEX: the scene's held keys (scenes.py hold=: core_top's keys, DS order, pressed = 1) from the release on
+        if ($value$plusargs("hold=%h", imp_hold)) force dut.keys = imp_hold[11:0];
         imp_frame = v_frames;
         $display("import: released at %0t, video frame %0d", $time, v_frames);
     end
@@ -587,11 +594,20 @@ module tb_ds_pocket;
         end
     endtask
 
-    initial if ($value$plusargs("dump_pc=%h", dump_pc)) void'($value$plusargs("dump_file=%s", dump_file));
-    always @(posedge dut.clk_sys) if (dump_pc != 0 && dut.dbg_retire && !dut.dbg_tid && dut.dbg_pc == dump_pc) begin
+    // +dump_frame=D +dump_file=F: main RAM the same way at video frame D after an import's release (melonDS's
+    // frame D past the export: sim/pocket_ds/w2load.sh); main RAM only, not lines still dirty in the ARM9's cache
+    integer dump_frame = -1;
+`ifndef IMPORT
+    integer imp_frame = -1;   // (a cold boot has no import release: +dump_frame never fires)
+`endif
+    initial if ($value$plusargs("dump_pc=%h", dump_pc) | $value$plusargs("dump_frame=%d", dump_frame))
+        void'($value$plusargs("dump_file=%s", dump_file));
+    always @(posedge dut.clk_sys) if (dump_pc != 0 && dut.dbg_retire && !dut.dbg_tid && dut.dbg_pc == dump_pc
+                                      || dump_frame >= 0 && imp_frame >= 0 && v_frames == imp_frame + dump_frame) begin
         integer fd;
         reg [31:0] w;
         dump_pc = 0;
+        dump_frame = -1;
         fd = $fopen(dump_file, "wb");
         for (int i = 0; i < (1 << 20); i++) begin
             w = ram_word(i);
@@ -627,6 +643,23 @@ module tb_ds_pocket;
         $display("TOUCH %s", dut.touch && dut.cur_x >= x0 + 8'd12 && dut.cur_y >= y0 + 8'd12
                  && dut.ds.u_spi.tx == dut.cur_x && dut.ds.u_spi.ty == dut.cur_y ? "PASS" : "FAIL");
     end
+    // +gesturetest=F: from video frame F, SELECT+A (touch mode), then B pressed for 2 frames and, from F+20,
+    // X held for 16 (with +gest_b/+gest_x set, two gestures; docs/touch-gestures.md). Prints the pen and the
+    // touchscreen controller's coordinates at each frame from F+2 to F+40 (GEST lines). Touch mode and the
+    // pen need no running DS, so a cold boot can run it from its first frames.
+    integer gt_from = 0;
+    initial void'($value$plusargs("gesturetest=%d", gt_from));
+    initial if (gt_from > 0) begin
+        wait (ds_frame == gt_from);
+        cont1_key[14] = 1'b1; #20us; cont1_key[4] = 1'b1; #200us; cont1_key[4] = 1'b0; #20us; cont1_key[14] = 1'b0;
+        wait (ds_frame == gt_from + 3); cont1_key[5] = 1'b1;
+        wait (ds_frame == gt_from + 5); cont1_key[5] = 1'b0;
+        wait (ds_frame == gt_from + 20); cont1_key[6] = 1'b1;
+        wait (ds_frame == gt_from + 36); cont1_key[6] = 1'b0;
+    end
+    always @(posedge dut.clk_sys) if (gt_from > 0 && dut.frame_pulse && ds_frame >= gt_from + 2 && ds_frame <= gt_from + 40)
+        $display("GEST %0d touch %0d pen %0d cursor %0d,%0d touchscreen %0d,%0d", ds_frame - gt_from, dut.touch, dut.pen,
+                 dut.cur_x, dut.cur_y, dut.ds.u_spi.tx, dut.ds.u_spi.ty);
     // +wwatch=HEX: main-RAM writes to the 64-byte window at that byte
     // address, as the fabric issues them, as the PSRAM port takes them (both
     // clk_sys) and as nds_psram writes them (clk_mem)
@@ -773,6 +806,7 @@ module tb_ds_pocket;
     always @(posedge dut.clk_sys) if (vwatch != 0) begin
         if (dut.ds.u_vram.vm_req && dut.ds.u_vram.vm_ack && dut.ds.u_vram.vm_we && !dut.ds.u_vram.vm_blk
             && dut.ds.u_vram.vm_addr == vwatch[20:2]) vw_n++;
+        else if (dut.cw_ack && dut.cw_addr[18:0] == vwatch[20:2]) vw_n++;
         if (v_frames != vw_f) begin
             if (vw_f >= 0) $display("vwatch f%0d: %0d writes to %h", vw_f, vw_n, vwatch);
             vw_f = v_frames; vw_n = 0;

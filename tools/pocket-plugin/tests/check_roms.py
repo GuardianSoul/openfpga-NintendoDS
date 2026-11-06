@@ -67,7 +67,7 @@ def build(out):
     cache = out / 'nds_cart_cache_scan.sv'
     cache.write_bytes(subprocess.run(['git', 'show', f'{SCAN_REV}:rtl/pocket/nds_cart_cache.sv'], cwd=REPO, check=True,
                                      capture_output=True).stdout)
-    subprocess.run([str(TOOLS / 'verilator'), '--binary', '--timing', '-O2', '-j', '0', '-Wno-fatal', '-Wno-WIDTHEXPAND',
+    subprocess.run([str(TOOLS / 'verilator'), '--binary', '--timing', '-O2', '-j', '8', '-Wno-fatal', '-Wno-WIDTHEXPAND',
                     '-Wno-WIDTHTRUNC', '--top-module', 'tb_cart_table', '-Mdir', str(vdir),
                     str(HERE / 'tb_cart_table.sv'), str(cache)],
                    check=True, stdout=subprocess.DEVNULL)

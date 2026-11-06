@@ -29,7 +29,7 @@ DS_TB    := $(DS_B)/obj/Vnds_top
 DS_VFLAGS := --cc --exe --build -j 8 -O3 --x-assign fast --x-initial fast --threads $(DS_THREADS) --savable \
              -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL -Wno-CASEINCOMPLETE \
              --top-module nds_top -GSOUND=$(DS_SOUND) -GGPU3D=$(DS_3D) -GCPU_FAST=$(DS_FAST) -GARM7_CACHE=$(DS_A7C) -GGX_USORT=$(DS_USORT) $(DS_G)
-BOOT_OBJS := $(BOOT_B)/boot9.o $(BOOT_B)/boot7.o $(BOOT_B)/key1.o $(BOOT_B)/import.o
+BOOT_OBJS := $(BOOT_B)/boot9.o $(BOOT_B)/boot7.o $(BOOT_B)/key1.o $(BOOT_B)/import.o $(BOOT_B)/savelist.o
 
 .PHONY: bootrom ds-sim test-ds test-ds-pocket
 

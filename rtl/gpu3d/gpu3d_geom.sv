@@ -72,6 +72,7 @@ module gpu3d_geom #(
     output logic [10:0]  so_idx,
     output logic         so_done,
     output logic [11:0]  so_count,
+    output logic         sw_busy,       // a swap taken at a VBlank that the engine has not reached, or its sort output not ended
     // test bench
     output logic         dbg_stall,
     output logic         dbg_apply,
@@ -219,6 +220,11 @@ module gpu3d_geom #(
         else swap_n <= swap_n + ((swap_in && swap_n != 4'd15) ? 4'd1 : 4'd0) - (swap_ack ? 4'd1 : 4'd0);
     end
     assign swap_go = swap_n != 4'd0;
+    // sw_busy: from the VBlank that takes a swap until its sort output ends (swap_ack starts the engine's swap:
+    // its prefix sums, the late-swap wait, the walk); nds_gpu3d holds the frame start for it
+    logic sw_sort;
+    always_ff @(posedge clk) sw_sort <= !rst && (swap_ack || (sw_sort && !so_done));
+    assign sw_busy = swap_go || sw_sort;
 
     // ---- engine
     logic        boxres, test_done, mrd_req, mrd_ack, mrd_cap;

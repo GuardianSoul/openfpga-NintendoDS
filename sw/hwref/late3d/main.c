@@ -25,9 +25,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VERSION "late3d 1"
+#define VERSION "late3d 2"
 #define R_RDLINES REG16(0x04000320)
 #define F1 4096
+#define PROGRESS_PATH (hw_new_only ? HWREF_DIR "/late3d_v2_progress.txt" : HWREF_DIR "/late3d_progress.txt")
 
 static void vtx(s32 px, s32 py, s32 z)   // pixel position (w = 1, identity projection)
 {
@@ -39,7 +40,7 @@ static void vtx(s32 px, s32 py, s32 z)   // pixel position (w = 1, identity proj
 static void progress(const char* fmt, ...)
 {
 	if (!hw_fat_ok) return;
-	FILE* f = fopen(HWREF_DIR "/late3d_progress.txt", "a");
+	FILE* f = fopen(PROGRESS_PATH, "a");
 	if (!f) return;
 	va_list ap;
 	va_start(ap, fmt);
@@ -55,7 +56,7 @@ static int s_nskip;
 static bool s_resume;
 static void load_progress(void)
 {
-	FILE* f = fopen(HWREF_DIR "/late3d_progress.txt", "r");
+	FILE* f = fopen(PROGRESS_PATH, "r");
 	if (!f) return;
 	char line[96], open_t[24] = "";
 	bool ours = false, all = false;
@@ -140,9 +141,55 @@ static void test(const char* name, int n, int x0, Buf* csv)
 	gxp_swap(0);
 }
 
+// Direct restart question: submit the light frame while the overloaded frame
+// is still active. No FAT access or extra VBlank waits between the two swaps.
+// Existing v1 cases and their filenames remain unchanged.
+static u16 s_recovery[2][256 * 192];
+static void recovery(void)
+{
+    const char* name = "restart_n192";
+    if (skipped(name)) return;
+    if(hw_new_only && !hw_step_begin("late3d_v2_steps.txt",name))return;
+    progress("start %s", name);
+    clear(0x001F);
+    gxp_reset_geometry();
+    R_DISP3DCNT = (3 << 12);
+    gxp_put(0x60, 0 | (255u << 16) | (191u << 24));
+    gxp_put(0x2A, 0);
+    for (int i = 0; i < 192; i++) {
+        gxp_put(0x29, (31u << 16) | (3u << 6) | ((u32)(i & 63) << 24));
+        gxp_put(0x20, 0x03E0);
+        gxp_put(0x40, 1);
+        s32 z = 0xE00 - i * 32;
+        vtx(0, 0, z); vtx(0, 192, z); vtx(128, 192, z); vtx(128, 0, z);
+    }
+    gxp_put(0x41, 0);
+    gxp_wait_idle();
+    u32 before = gxp_timeouts;
+    gxp_swap(0);                 // overloaded list becomes active
+    u16 overload_line = R_VCOUNT;
+    clear(0x7C00);               // light frame has only a blue rear plane
+    gxp_reset_geometry();
+    gxp_swap(0);                 // next VBlank; no SD writes in between
+    u16 light_line = R_VCOUNT;
+    gxp_capture_start(3);
+    gxp_capture_finish(3, s_recovery[0]);
+    gxp_capture_start(2);
+    gxp_capture_finish(2, s_recovery[1]);
+    bool saved=hw_write("late3d_restart_n192_f0.bin", s_recovery[0], sizeof s_recovery[0]);
+    saved=hw_write("late3d_restart_n192_f1.bin", s_recovery[1], sizeof s_recovery[1]) && saved;
+    Buf csv = {0};
+    buf_printf(&csv, "overload_vcount,light_vcount,timeouts_before,timeouts_after\n%u,%u,%lu,%lu\n",
+               overload_line, light_line, (unsigned long)before, (unsigned long)gxp_timeouts);
+    saved=buf_write(&csv, "late3d_restart.csv") && saved;
+    if(saved && before==gxp_timeouts && hw_new_only)hw_step_done("late3d_v2_steps.txt",name);
+    progress("done %s", name);
+}
+
 int main(void)
 {
 	hw_init(VERSION " - late 3D lines");
+	if(!hw_chain)hw_new_only=true; // standalone defaults to the uncaptured v2 case
 	gxp_console_on_h();
 	iprintf(VERSION " - late 3D lines\n\n");
 	videoSetMode(MODE_0_3D);
@@ -151,6 +198,15 @@ int main(void)
 	R_VRAMCNT(2) = 0x80;   // C, D: LCDC, captures
 	R_VRAMCNT(3) = 0x80;
 	if (hw_fat_ok) load_progress();
+	if(hw_new_only){
+		if(!s_resume)progress("V " VERSION);
+		recovery();
+		progress("all done");
+		Buf info={0};
+		buf_printf(&info,VERSION "; new-only restart_n192; no v1 captures or CSV written; built " __DATE__ " " __TIME__ "\n");
+		buf_write(&info,"late3d_v2_info.txt");
+		hw_done();
+	}
 	Buf csv = {0};
 	if (!s_resume) {
 		remove(HWREF_DIR "/late3d_progress.txt");
@@ -170,11 +226,12 @@ int main(void)
 	test("n192_left", 192, 0, &csv);
 	test("n64_right", 64, 128, &csv);
 	test("n192_right", 192, 128, &csv);
+	recovery();
 	progress("all done");
 	Buf info = {0};
 	buf_printf(&info, "%s\nbuilt %s %s\nframe P clear blue 0x7C00 no polygons (2 frames), then frame B clear red 0x001F with n"
 	           " quads 128 px wide on the given side, colour i = RGB(31i/(n-1), 31, 0); f0/f1 = the first two frames B is"
-	           " shown, 3D only, 256x192 u16\n", VERSION, __DATE__, __TIME__);
+	           " shown, 3D only, 256x192 u16; restart_n192 switches from an overloaded red/green list to an empty blue list, captures first two light frames; no SD writes between swaps\n", VERSION, __DATE__, __TIME__);
 	buf_write(&info, "late3d_info.txt");
 	hw_done();
 }

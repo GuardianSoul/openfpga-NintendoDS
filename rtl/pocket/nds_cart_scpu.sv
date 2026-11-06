@@ -13,7 +13,7 @@
 // RV32I) and does everything else: the start-up (the plugin's table header,
 // clearing the table, owners and reference bits), the miss run (read-ahead
 // fields), CLOCK replacement, evictions, the APF commands with their retries,
-// and the sequential prefetch in the background. SERV's code and data are
+// and the prefetch in the background, per stream (up to 4, woken by the new-block event, write 5 bit 29). SERV's code and data are
 // SDRAM words FW_W + 0.. (nds_boot.bin past the boot ROM's 8 KiB, ID 12, so
 // they arrive with the boot ROM before the cache starts), read and written
 // through this module's SDRAM port; the client has priority on the port.
@@ -26,7 +26,9 @@
 //   write 2    the command: [2:0] blocks, [20:3] first block (fc_data); slots with write 8-12
 //   write 3    the command: [14:0] length (fc_data); bit 31: send it (and forget the last marker), bit 30: a background prefetch
 //   write 4    reference bit: [13:0] slot, [16] value, [17] write (the read of it follows)
-//   write 5    prefetch trigger: [17:0] block, [31] armed, [30] a prefetch is due when the client reaches it
+//   write 5    prefetch trigger: [17:0] block, [31] armed, [30] a prefetch is due when the client reaches it,
+//              [29] new-block mode: every table lookup that hits (the client moved to another cached block) sets
+//              'trigger seen'; read 2's last block is that block (or a later one)
 //   write 6    [0] ready, [1] fail, [2] miss done, [3] forget the last block, [4] trigger seen done,
 //              [6] release the client, [7] a prefetch is due, [8] the prefetch has started, [9] the background
 //              prefetch is finished
@@ -133,7 +135,7 @@ module nds_cart_scpu #(
     reg [SB-1:0] last_slot = 0;
     reg [17:0] last_b = 0;
     reg last_v = 0;
-    reg miss = 0, pf_seen = 0, mk_v = 0, mk_e = 0, pf_trig_v = 0, hold = 0, pf_due = 0, pf_fly = 0, pf_cont = 0, fast = 0;
+    reg miss = 0, pf_seen = 0, mk_v = 0, mk_e = 0, pf_trig_v = 0, hold = 0, pf_due = 0, pf_fly = 0, pf_cont = 0, fast = 0, pf_any = 0;
     reg [17:0] pf_trig = 0;
     wire [17:0] cb = qaddr[29:12];
     wire event_v = miss || pf_seen || hold;
@@ -178,7 +180,7 @@ module nds_cart_scpu #(
                 end
                 4'd4: begin ref_waddr <= db_dat[SB-1:0]; ref_wd <= db_dat[16]; ref_we <= db_dat[17]; end
                 4'd7: begin last_slot <= db_dat[SB-1:0]; last_b <= cb; last_v <= 1; fast <= 1; miss <= 0; end
-                4'd5: begin pf_trig <= db_dat[17:0]; pf_trig_v <= db_dat[31]; pf_cont <= db_dat[30]; end
+                4'd5: begin pf_trig <= db_dat[17:0]; pf_trig_v <= db_dat[31]; pf_cont <= db_dat[30]; pf_any <= db_dat[29]; end
                 4'd6: begin
                     if (db_dat[0]) ready <= 1;
                     if (db_dat[1]) fail <= 1;
@@ -195,7 +197,7 @@ module nds_cart_scpu #(
 
         if (reset || !start) begin
             st <= H_IDLE; m_valid <= 0; mem_busy <= 0; mem_sv <= 0; sv_fly <= 0;
-            ready <= 0; fail <= 0; miss <= 0; last_v <= 0; pf_seen <= 0; pf_trig_v <= 0; mk_v <= 0; hold <= 0; pf_due <= 0; pf_fly <= 0;
+            ready <= 0; fail <= 0; miss <= 0; last_v <= 0; pf_seen <= 0; pf_trig_v <= 0; mk_v <= 0; hold <= 0; pf_due <= 0; pf_fly <= 0; pf_any <= 0;
         end else if (!mem_busy) begin
             case (st)
                 H_IDLE: if (ready && c_valid && !hold) begin
@@ -214,6 +216,7 @@ module nds_cart_scpu #(
                 H_ENTRY: if (m_rdata[16]) begin
                     last_b <= cb; last_slot <= m_rdata[SB-1:0]; last_v <= 1;
                     ref_we <= 1; ref_waddr <= m_rdata[SB-1:0]; ref_wd <= 1;
+                    if (pf_any) pf_seen <= 1;
                     st <= H_READ;
                 end else begin miss <= 1; st <= H_MISS; end
                 H_MISS: if (!miss) begin st <= fast ? H_READ : H_LOOK; fast <= 0; end

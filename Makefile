@@ -2,7 +2,10 @@
 # Test ROM sources are fetched into local-assets/ (gitignored): `make fetch-tests`.
 
 TOOLS     ?= build/tools/oss-cad-suite/bin
-VERILATOR ?= $(TOOLS)/verilator
+# One Verilator build at a time on this machine, at most 8 jobs (AGENTS.md; sim/pocket_ds/run.py takes the same lock)
+VJOBS     ?= 8
+VERILATOR ?= $(CURDIR)/tools/verilator-locked
+export TOOLS
 IVERILOG  ?= $(TOOLS)/iverilog
 VVP       ?= $(TOOLS)/vvp
 YOSYS     ?= $(TOOLS)/yosys
@@ -53,7 +56,7 @@ lcache-test:
 	@sim/ds/lcache_test.sh $(VERILATOR) build/lcache
 # rtl/ds/nds_dsp_add.sv (an adder in a DSP block) against a + b
 dspadd-test:
-	@mkdir -p build && $(VERILATOR) --binary -j 8 -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module tb_dsp_add \
+	@mkdir -p build && $(VERILATOR) --binary -j $(VJOBS) -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC --top-module tb_dsp_add \
 	    -Mdir build/dspadd rtl/ds/nds_dsp_add.sv sim/ds/tb_dsp_add.sv > build/dspadd.log 2>&1 || { tail -20 build/dspadd.log; exit 1; }
 	@build/dspadd/Vtb_dsp_add | grep -E '^(PASS|FAIL)'
 lcache-mutate:
@@ -118,7 +121,7 @@ endef
 # ---- simulators
 $(B)/obj/Vtb_arm: $(ARM_RTL) $(ARM_TB)
 	@mkdir -p $(B)
-	$(VERILATOR) --binary -j 8 -O3 --x-assign fast --x-initial fast \
+	$(VERILATOR) --binary -j $(VJOBS) -O3 --x-assign fast --x-initial fast \
 	    -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL \
 	    --top-module tb_arm -Mdir $(B)/obj $(ARM_RTL) $(ARM_TB) > $(B)/verilator.log 2>&1 \
 	    || (cat $(B)/verilator.log; exit 1)
@@ -126,7 +129,7 @@ $(B)/obj/Vtb_arm: $(ARM_RTL) $(ARM_TB)
 # the 2-way ARM9 caches (the cheaper option; 4-way stays the default)
 $(B)/obj2/Vtb_arm: $(ARM_RTL) $(ARM_TB)
 	@mkdir -p $(B)
-	$(VERILATOR) --binary -j 8 -O3 --x-assign fast --x-initial fast \
+	$(VERILATOR) --binary -j $(VJOBS) -O3 --x-assign fast --x-initial fast \
 	    -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL -GARM9_WAYS=2 \
 	    --top-module tb_arm -Mdir $(B)/obj2 $(ARM_RTL) $(ARM_TB) > $(B)/verilator2.log 2>&1 \
 	    || (cat $(B)/verilator2.log; exit 1)

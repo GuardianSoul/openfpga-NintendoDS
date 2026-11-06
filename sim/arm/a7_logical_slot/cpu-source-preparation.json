@@ -1,0 +1,25 @@
+{
+  "state": "SOURCE PREPARATION ONLY; no compiler/model/runtime/DS timing qualification",
+  "source_SHA256": "662c582fcd2f965185f1018f4adc2eeb12f37dbc7ac4ed6f0b5951ad5c357d4e",
+  "files": {
+    "none.sv": "bfc1ae4208f3804ab82c9dfa51ddec1d35345dc54103a9ace19793b079d66e09",
+    "drop-unaccepted.sv": "f14e827293a47ec79defbdfc4643d197914373cf76edfe8313b3ec0a1533490c",
+    "live-address.sv": "67a2b791dfa878a4e22fbd10d588323b46113a2e2550b9d6faf5648b290033b9"
+  },
+  "qlint": {
+    "command": [
+      "python3",
+      "tools/ds/qlint.py",
+      "build/a7-held-commit/source-only/none.sv",
+      "build/a7-held-commit/source-only/drop-unaccepted.sv",
+      "build/a7-held-commit/source-only/live-address.sv"
+    ],
+    "exit": 0
+  },
+  "transformer_SHA256": {
+    "cpu_trial.py": "ee4bc732edf3473bdc1d1919581aa3a41b1ee3e0502c752c51bc808ad78bc028",
+    "cpu_ledger.svh": "de2a41df706a78d69cfae51330998002303abedc5c5b6f73727edb088fe2a149"
+  },
+  "paired_P7_input_SHA256": "0ce5fbcf4878a4b0603ee85e8a63a88551865f94e4b93ea08778b921404fd457",
+  "runtime_gates": "PENDING: disabled literal behavior, held backpressure/oneaccept, same-edge turnover, pause, IRQ/redirect, CPU-only reset/real physical tail, ARM9 contention, state/data and actual mutation; no lease used"
+}

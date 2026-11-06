@@ -38,7 +38,7 @@ module core_top #(
     parameter integer DMA_B8 = 1,                   // 1: DMA lines of 32 bytes, one PSRAM burst (nds_fabric DMA_B8)
     parameter integer DMA_PACE = 0,
     parameter integer DMA_PACE_GX = 34,             // nds_top DMA_PACE_GX: GX FIFO DMA words at 2.08 system cycles (0-1 FIFO entries, ds-rules row 52)               // nonzero: DMA units at the DS.s measured rate per route (nds_fabric table; 0 off)
-    parameter integer DMA_GX = 1,                   // 1: DMA units post GX FIFO words to the geometry engine (nds_fabric)
+    parameter integer DMA_GX = 3,                   // 1: DMA units post GX FIFO words to the geometry engine (nds_fabric); 3: the ARM9's GX FIFO/command-port writes too
     parameter integer GX_GATH16 = 1,    // nds_top GX_GATH16: the GX spill's gather 16 entries deep
     parameter integer GX_SPAW = 16,     // nds_top GX_SPAW: the GX spill ring, 16,384 entries (128 KiB at SDRAM 0x300000; free to 0x7FFFFF)
     parameter integer DX_SKID = 0,      // nds_top DX_SKID (off: with GATH16 on 72a91f97, mkds-race stops at frame ~21 on nds_g3d_store:557; either alone runs clean): a skid word for posted DMA_GX words
@@ -46,6 +46,8 @@ module core_top #(
     parameter integer BOOT_SRAM = 1,                // 1: the boot ROM from the data slot ID 12 into the external SRAM (nds_top BOOT_SRAM; frees 7 M10K)
     parameter integer OAM_SHARE = 1,                // 1: CPU OAM reads through the 2D engine's OAM, no fabric copy (nds_top OAM_SHARE; frees 2 M10K)
     parameter integer PSRAM_B8 = 1,                 // 1: an ARM9 32-byte block fill as one 8-word PSRAM burst (nds_psram B8)
+    parameter integer VR_POST = 1,                  // 1: CPU and DMA word writes to VRAM through the same FIFO (nds_vram VR_POST)
+    parameter integer VR_RDB = 1,                   // 1: VRAM reads from the CPUs and DMA through an 8-word line (nds_vram VR_RDB)
     parameter integer CAP_CHAIN = 1,                // 1: the display capture's word pairs go through the SDRAM write FIFO (nds_vram CAP_CHAIN)
     parameter integer G3D_STORE_SD = 0,             // 1: the 3D polygon store in SDRAM (mkds-pack: PSRAM -60K clk, but the SDRAM write chain starves the GX spill and the ring: stale rows)
     parameter integer RING = 1,                     // 1: the 3D line ring's SDRAM ports (rg_*: block reads on bus port 6, writes into the write chain)
@@ -53,7 +55,7 @@ module core_top #(
     parameter integer A9_XD = 2,                    // ARM9 D cache: 2^XD times the sets (4 KB x 2^XD; the DS: 4 KB 4-way)
     parameter integer A9_XI = 1,                    // ARM9 I cache: 2^XI times the sets (8 KB x 2^XI)
     parameter integer A9_SOLO = 5,                  // nds_top A9_SOLO (bit 0 solo while the ARM7 is halted; bit 1 sim-only split of the CPUs)
-    parameter integer A9_OPT = 4187107,                  // ARM9 speed options (arm_core / arm9_mem bitmask)
+    parameter integer A9_OPT = 67101667,                 // ARM9 speed options (arm_core / arm9_mem bitmask): 4187107 + early restart (arm9_mem ERI bit 22, ERD bit 23, ERL 3 in bits 26:24)
     parameter integer A9_EARLYD = 1,                // 1: the early fetch release of a refused D access (arm9_mem EARLYD)
     parameter integer A9_EVBW = 0,                  // 1: the eviction buffer drains as a block write (needs PSRAM_BW)
     parameter integer PSRAM_BW = 0,                 // 1: a 32-byte block write (an ARM9 line eviction) as one PSRAM request (nds_psram BW)
@@ -92,7 +94,12 @@ module core_top #(
     parameter integer G3D_EDIV4 = 0,                // 3D edge unit: perspective divider four bits a clock
     parameter integer G3D_EDGE2 = 0,                // 3D: a second edge unit (a polygon's two edges at once)
     parameter integer G3D_EP2 = 1,                  // 3D: the edge unit as two stages (two edges at once)
-    parameter integer G3D_PUMP = 0,                 // 3D: the texture/palette caches' tag stores double-pumped on clk_2x (2 -> 1 M10K each)
+    parameter integer G3D_PUMP = 1,                 // 3D: the texture/palette caches' tag stores double-pumped on clk_2x (2 -> 1 M10K each)
+    parameter integer G3D_SWHOLD = 1,               // 3D: a late swap (the engine behind the DS model) still drawn the next frame (nds_gpu3d SWHOLD)
+    parameter integer G3D_SWPC = 1,                 // 3D: a late sort runs once the started frame is drawn, not at the next VBlank (nds_gpu3d SWPC)
+    parameter integer G3D_SWL = 15,                 // 3D: the late-swap window stays open this many lines past line 215 (nds_gpu3d SWHOLD; MKDS startline: sorts ending up to 118.6K clk, line 220)
+    parameter integer G3D_LEAD = 192,               // 3D: the lines the raster may run ahead of the display (the DS's buffer: 46; 192: the whole frame, MKDS race intro corner)
+    parameter integer G3D_SL = 9,                   // 3D: log2 polygon-store pool slots (MKDS race intro: up to 260 polygons on one line)
     parameter integer G3D_TCWAYS = 1,               // ... texture cache ways (2: budget-3d "cache sizing model")
     parameter integer G3D_TXD = 5,                  // 3D raster: texel request-to-use stages added (budget-3d)
     parameter integer G3D_PXD = 5,                  // 3D raster: palette request-to-use stages added (budget-3d)
@@ -105,7 +112,7 @@ module core_top #(
     parameter integer G3D_RPRI = 1,                 // 3D ring: the needed line's read before a staged line's write
     parameter integer G3D_LLR = 0,                  // 3D ring: late lines show the polygons drawn so far (DS rule)
     parameter integer G3D_TL = 9,                  // 3D texture cache: log2 sets
-    parameter integer G3D_PL = 7,                   // 3D palette cache: log2 lines (MKDS pre-race pan: late lines -26% on TL 9)
+    parameter integer G3D_PL = 8,                   // 3D palette cache: log2 lines (MKDS pre-race pan: late lines -26% on TL 9 at 7; 8: MKDS race intro corner)
     // 1 (the Pocket): main RAM and VRAM power up random, so the boot program clears them.
     // 0 only in sim/pocket_ds's state import (docs/state-import.md): memories as loaded,
     // and the boot ROM's import check enabled
@@ -511,7 +518,7 @@ module core_top #(
     // ---------------- controls (clk_bus) ----------------
     wire [1:0] layout_sel;
     wire touch, cursor, pen;
-    wire [7:0] cur_x, cur_y;
+    wire [7:0] cur_x, cur_y, pen_x, pen_y;
     wire [15:0] ds_keys;
     wire frame_pulse;
     reg frame_b = 0;
@@ -534,15 +541,20 @@ module core_top #(
                 SET_SELECT_ABXY_IDX:   set_a[SET_SELECT_ABXY_BIT +: SET_SELECT_ABXY_W] <= set_v(SET_SELECT_ABXY_W);
                 SET_CURSOR_SPEED_IDX:  set_a[SET_CURSOR_SPEED_BIT +: SET_CURSOR_SPEED_W] <= set_v(SET_CURSOR_SPEED_W);
                 SET_SCREEN_ROTATION_IDX: set_a[SET_SCREEN_ROTATION_BIT +: SET_SCREEN_ROTATION_W] <= set_v(SET_SCREEN_ROTATION_W);
+                SET_A_IN_TOUCH_MODE_IDX: set_a[SET_A_IN_TOUCH_MODE_BIT +: SET_A_IN_TOUCH_MODE_W] <= set_v(SET_A_IN_TOUCH_MODE_W);
+                SET_B_IN_TOUCH_MODE_IDX: set_a[SET_B_IN_TOUCH_MODE_BIT +: SET_B_IN_TOUCH_MODE_W] <= set_v(SET_B_IN_TOUCH_MODE_W);
+                SET_X_IN_TOUCH_MODE_IDX: set_a[SET_X_IN_TOUCH_MODE_BIT +: SET_X_IN_TOUCH_MODE_W] <= set_v(SET_X_IN_TOUCH_MODE_W);
+                SET_Y_IN_TOUCH_MODE_IDX: set_a[SET_Y_IN_TOUCH_MODE_BIT +: SET_Y_IN_TOUCH_MODE_W] <= set_v(SET_Y_IN_TOUCH_MODE_W);
                 default: ;
             endcase
     wire [SET_BITS-1:0] set_b;
     nds_sync #(.W(SET_BITS)) set_sync (.clk(clk_bus), .d(set_a), .q(set_b));
     nds_controls controls (.clk(clk_bus), .reset(rst_bus), .apf_keys(cont1_key[15:0]), .apf_type(cont1_key[31:28]),
         .apf_joy(cont1_joy), .frame(frame_b),
-        .combo_sel({set_b[SET_SELECT_ABXY_BIT], set_b[SET_SELECT_LR_BIT]}), .touch_btn(2'd0),
+        .combo_sel({set_b[SET_SELECT_ABXY_BIT], set_b[SET_SELECT_LR_BIT]}), .gest({set_b[SET_Y_IN_TOUCH_MODE_BIT +: 3], set_b[SET_X_IN_TOUCH_MODE_BIT +: 3],
+               set_b[SET_B_IN_TOUCH_MODE_BIT +: 3], set_b[SET_A_IN_TOUCH_MODE_BIT +: 3]}),
         .speed(set_b[SET_CURSOR_SPEED_BIT +: 2]), .layout_set(2'd0), .set_new(1'b0),
-        .layout(layout_sel), .touch(touch), .cursor(cursor), .pen(pen), .cur_x(cur_x), .cur_y(cur_y), .ds_keys(ds_keys));
+        .layout(layout_sel), .touch(touch), .cursor(cursor), .pen(pen), .cur_x(cur_x), .cur_y(cur_y), .pen_x(pen_x), .pen_y(pen_y), .ds_keys(ds_keys));
     // APF order -> DS order (A B Sel Start Right Left Up Down R L X Y)
     wire [11:0] keys = {ds_keys[7], ds_keys[6], ds_keys[8], ds_keys[9], ds_keys[1], ds_keys[0],
                         ds_keys[2], ds_keys[3], ds_keys[15], ds_keys[14], ds_keys[5], ds_keys[4]};
@@ -610,13 +622,13 @@ module core_top #(
     wire [31:0] diag_r_val;
     wire        diag_t_start, diag_t_stop, diag_l3d_v;
     wire [8:0]  diag_l3d_line;
-    nds_top #(.BOOTROM("bootrom.mif"), .A9_SOLO(A9_SOLO), .SOUND(SOUND), .SND_CAPTURE(SND_CAPTURE), .GPU3D(GPU3D), .G3D_AA(G3D_AA), .G3D_TOON(G3D_TOON), .G3D_FOG(G3D_FOG), .G3D_ATEST(G3D_ATEST), .G3D_EDGE(G3D_EDGE), .G3D_SHADOW(G3D_SHADOW), .G3D_LOWER(G3D_LOWER), .G3D_TCFAST(G3D_TCFAST), .G3D_TCMIF2(G3D_TCMIF2), .G3D_TCWAYS(G3D_TCWAYS), .G3D_TXD(G3D_TXD), .G3D_PXD(G3D_PXD), .G3D_FPSKIP(G3D_FPSKIP), .G3D_TRU(G3D_TRU), .G3D_TRUL(G3D_TRUL), .G3D_FPCLR(G3D_FPCLR), .G3D_YLIM2(G3D_YLIM2), .G3D_LLR(G3D_LLR), .G3D_RPRI(G3D_RPRI), .G3D_NX2(G3D_NX2), .G3D_TL(G3D_TL), .G3D_PL(G3D_PL), .G3D_TCV2(G3D_TCV2), .G3D_NXB(G3D_NXB), .G3D_VREG(G3D_VREG), .G3D_DSHARE(G3D_DSHARE), .G3D_LB2(G3D_LB2), .G3D_LOV(G3D_LOV), .G3D_EDIV4(G3D_EDIV4), .G3D_EDGE2(G3D_EDGE2), .G3D_EP2(G3D_EP2), .G3D_PUMP(G3D_PUMP), .CAP_CHAIN(CAP_CHAIN), .G3D_RING(RING), .G3D_STORE_SD(G3D_STORE_SD), .A9_EVB(A9_EVB), .A9_EVBW(A9_EVBW), .A9_EARLYD(A9_EARLYD), .BOOT_SRAM(BOOT_SRAM), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .A7_IO(A7_IO), .DMA_UNIT(DMA_UNIT), .DMA_RA(DMA_RA), .DMA_B8(DMA_B8), .DMA_PACE(DMA_PACE), .DMA_PACE_GX(DMA_PACE_GX), .DMA_GX(DMA_GX), .GX_GATH16(GX_GATH16), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID), .ARM7_CACHE(ARM7_CACHE), .A7_IL(A7_IL), .A7_DL(A7_DL), .CPU_FAST(CPU_FAST), .WIFI(WIFI), .SYS_PUMP(SYS_PUMP), .G2D_MOSAIC(G2D_MOSAIC), .OAM_SHARE(OAM_SHARE), .G2D_TEX_IDXW(G2D_TEX_IDXW), .G2D_HURRY(DL_PRI != 0 ? G2D_HURRY : 0), .G3D_RH_AT(DL_PRI != 0 && RING != 0 ? G3D_RH_AT : 0)) ds (.hurry2d(ds_hurry2d), .rg_hurry(ds_rg_hurry), .clk(clk_sys), .clk_cpu(clk_cpu), .clk_2x(clk_2x), .rst(rst_sys), .go(go),
+    nds_top #(.BOOTROM("bootrom.mif"), .A9_SOLO(A9_SOLO), .SOUND(SOUND), .SND_CAPTURE(SND_CAPTURE), .GPU3D(GPU3D), .G3D_AA(G3D_AA), .G3D_TOON(G3D_TOON), .G3D_FOG(G3D_FOG), .G3D_ATEST(G3D_ATEST), .G3D_EDGE(G3D_EDGE), .G3D_SHADOW(G3D_SHADOW), .G3D_LOWER(G3D_LOWER), .G3D_TCFAST(G3D_TCFAST), .G3D_TCMIF2(G3D_TCMIF2), .G3D_TCWAYS(G3D_TCWAYS), .G3D_TXD(G3D_TXD), .G3D_PXD(G3D_PXD), .G3D_FPSKIP(G3D_FPSKIP), .G3D_TRU(G3D_TRU), .G3D_TRUL(G3D_TRUL), .G3D_FPCLR(G3D_FPCLR), .G3D_YLIM2(G3D_YLIM2), .G3D_LLR(G3D_LLR), .G3D_RPRI(G3D_RPRI), .G3D_NX2(G3D_NX2), .G3D_TL(G3D_TL), .G3D_PL(G3D_PL), .G3D_TCV2(G3D_TCV2), .G3D_NXB(G3D_NXB), .G3D_VREG(G3D_VREG), .G3D_DSHARE(G3D_DSHARE), .G3D_LB2(G3D_LB2), .G3D_LOV(G3D_LOV), .G3D_EDIV4(G3D_EDIV4), .G3D_EDGE2(G3D_EDGE2), .G3D_EP2(G3D_EP2), .G3D_PUMP(G3D_PUMP), .G3D_SWHOLD(G3D_SWHOLD), .G3D_SWPC(G3D_SWPC), .G3D_SWL(G3D_SWL), .G3D_LEAD(G3D_LEAD), .G3D_SL(G3D_SL), .CAP_CHAIN(CAP_CHAIN), .VR_POST(VR_POST), .VR_RDB(VR_RDB), .G3D_RING(RING), .G3D_STORE_SD(G3D_STORE_SD), .A9_EVB(A9_EVB), .A9_EVBW(A9_EVBW), .A9_EARLYD(A9_EARLYD), .BOOT_SRAM(BOOT_SRAM), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .A7_IO(A7_IO), .DMA_UNIT(DMA_UNIT), .DMA_RA(DMA_RA), .DMA_B8(DMA_B8), .DMA_PACE(DMA_PACE), .DMA_PACE_GX(DMA_PACE_GX), .DMA_GX(DMA_GX), .GX_GATH16(GX_GATH16), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID), .ARM7_CACHE(ARM7_CACHE), .A7_IL(A7_IL), .A7_DL(A7_DL), .CPU_FAST(CPU_FAST), .WIFI(WIFI), .SYS_PUMP(SYS_PUMP), .G2D_MOSAIC(G2D_MOSAIC), .OAM_SHARE(OAM_SHARE), .G2D_TEX_IDXW(G2D_TEX_IDXW), .G2D_HURRY(DL_PRI != 0 ? G2D_HURRY : 0), .G3D_RH_AT(DL_PRI != 0 && RING != 0 ? G3D_RH_AT : 0)) ds (.hurry2d(ds_hurry2d), .rg_hurry(ds_rg_hurry), .clk(clk_sys), .clk_cpu(clk_cpu), .clk_2x(clk_2x), .rst(rst_sys), .go(go),
         .cw_valid(cw_valid), .cw_addr(cw_addr), .cw_data(cw_data), .cw_ack(cw_ack), .rg_wlast(ds_rg_wlast), .rg_wreq(ds_rg_wreq), .rg_waddr(ds_rg_waddr), .rg_wdata(ds_rg_wdata), .rg_wack(rg_wack),
         .rg_rreq(ds_rg_rreq), .rg_raddr(ds_rg_raddr), .rg_rack(rg_rack), .rg_rvalid(rg_rvalid), .rg_rdata(rg_rdata), .rg_wdrained(bw_empty), .rom_size(rom_size_b), .mem_dirty(MEM_DIRTY != 0),
         .wx_req(), .wx_we(), .wx_be(), .wx_addr(), .wx_wdata(), .wx_ack(1'b0), .wx_rdata(32'd0), .wx_irq(1'b0), .wx_power(), .wx_rtl_ack(), .wx_rtl_rdata(), .wx_rtl_irq(),
         .save_info(save_info), .sv_loaded(save_loaded), .save_type(save_type_sys),
         .aud_valid(), .aud_pre(aud_pre), .aud_l(aud_l), .aud_r(aud_r), .snd_late(snd_late), .snd_wait_max(snd_wait_max),
-        .keys(keys), .pen(pen), .pen_x(cur_x), .pen_y(cur_y),
+        .keys(keys), .pen(pen), .pen_x(pen_x), .pen_y(pen_y),
         .rtc_valid(rtc_ok), .rtc_date(rtc_sys[63:32]), .rtc_time(rtc_sys[31:0]),
         .mr_req(mr_req), .mr_we(mr_we), .mr_addr(mr_addr), .mr_be(mr_be), .mr_wdata(mr_wdata),
         .mr_ack(mr_ack), .mr_rvalid(mr_rvalid), .mr_rdata(mr_rdata), .mr_n8(mr_n8), .mr_wnext(mr_wnext),
@@ -710,7 +722,9 @@ module core_top #(
     reg vid_t = 0;                          // nds_video's output phase
     always @(posedge clk_vid) vid_t <= !vid_t;
     nds_video video (.clk(clk_sys), .reset(rst_sys), .vid_t(vid_t), .layout_in(layout_sel), .rotation(set_b[SET_SCREEN_ROTATION_BIT +: 2]), .touch(cursor), .pen(pen),
-        .cur_x(cur_x), .cur_y(cur_y),
+        // the drawn cursor is the pen's point: it follows a gesture and returns to the cursor after it
+        // (docs/touch-gestures.md; pen_x/pen_y are cur_x/cur_y when no gesture runs)
+        .cur_x(pen_x), .cur_y(pen_y),
         .px_valid(px_valid), .px_eng(px_eng), .px_line(px_line), .px_x(px_x), .px_rgb(px_rgb),
         .line_start(line_start), .vcount(vcount), .swap(powcnt1[15]), .frame_pulse(frame_pulse),
         .w_req(vw_req), .w_addr(vw_addr), .w_data(vw_data), .w_ack(vw_ack),

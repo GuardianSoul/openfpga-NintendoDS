@@ -47,6 +47,11 @@
 
 using namespace melonDS;
 
+#include "runtime_export.inc"
+#include "runtime_history.h"
+#include "runtime_history.inc"
+#include "runtime_atomic.inc"
+
 static void WriteBin(const std::string& path, const void* p, size_t n)
 {
     FILE* f = fopen(path.c_str(), "wb");
@@ -79,8 +84,10 @@ static void DumpRegs(FILE* f, const char* n, ARM& a)
     fprintf(f, "%s.fiq_spsr %08x\n", n, a.R_FIQ[7]);
 }
 
-void ExportState(NDS* nds, const std::string& dir, int vcount)
+void ExportState(NDS* nds, const std::string& dir, int vcount, bool runtime)
 {
+    std::optional<RuntimeSourceGuard> runtimeGuard;
+    if (runtime) runtimeGuard.emplace(*nds);
     // vcount: the line the import releases on; -1 = gpu.VCount (a state between frames). --export-clean
     // exports from the start-of-line hook, before line vcount is processed: melonDS then processes it, the core at
     // the release
@@ -297,5 +304,6 @@ void ExportState(NDS* nds, const std::string& dir, int vcount)
         w32(0x04000208, nds->IME[cpu]);
         fclose(o);
     }
+    if (runtime) { ExportRuntime(*nds, dir, vcount); ExportRuntimeHistory(*nds, dir, vcount); ExportRuntimeAtomic(*nds,dir,vcount); runtimeGuard->verify(); }
     fprintf(stderr, "export-state: %s (vcount %u)\n", dir.c_str(), vcount >= 0 ? (u32)vcount : (u32)gpu.VCount);
 }

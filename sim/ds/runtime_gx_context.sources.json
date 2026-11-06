@@ -1,0 +1,18 @@
+{
+  "source": "46900836+4bedd989",
+  "files_sha256": {
+    "tools/gxasm/ucode.py": "de69d50e4b45dbd5d50e6792099b87255ead0921c5b068d3ccb031802c4cbfa8",
+    "rtl/gpu3d/gpu3d_gxu_pkg.sv": "75fd4346d39554d03ed6f7625dac438431d4af5b27bfc1a956216761eaaa849a",
+    "rtl/gpu3d/gpu3d_gxrom_ux.sv": "ccff5fe9ea0e54add85435a4c2dfd5caedfade107c175d54d31719212091c9f8",
+    "rtl/gpu3d/gpu3d_gxeng.sv": "258efe28faac4a1d217ff25694e92d7516bdda8279d0077761f50230eede6c52",
+    "rtl/gpu3d/gpu3d_gxfront.sv": "a720d93d180a9e81800f4231d0a2808dcde1595b30a584b3450d0a3ddcfb0098",
+    "rtl/gpu3d/gpu3d_gxlight.sv": "6800ff71ea31b3fa42719ac7dead1e987b0d6d87edd6cfaf9414e95a0f267df8",
+    "rtl/gpu3d/gpu3d_gxvfin.sv": "2119b123510f5be6c438118a643e9c73f13ac6450a886a541a13b8c751960220",
+    "rtl/gpu3d/gpu3d_ram.sv": "114134703e73d804fede4d2ab59f10112dd7c2e377093a97c18ef28e6a370c96",
+    "rtl/ds/nds_gpu3d.sv": "83c3f1c5fe682b62ded095685017afe9ce06c7d95b53b0b2705dfd38f7863c1a",
+    "rtl/ds/nds_top.sv": "2ee5902268f740b1662f5a866680f758a74fe187e8221630748bc0f1f43c5b80",
+    "rtl/pocket/core_top_ds.sv": "836e94d498f779cf0a6aee9e467784f72636e2455ed4bb5fb2c0009f068e32a0",
+    "tools/gxasm/isa.py": "530799b7a411f558eee11b1d76afa6c823982cb65eb3b4ca69a4c93268b1b4e7"
+  },
+  "portable_semantic_sha256": "2edce70c08ff3b10bf6c883781568dbe1c6cb761289ac038900d169e6fec6a50"
+}

@@ -1,0 +1,11 @@
+{
+  "compact_base": "02ea130215925a85449a3e6961e6995fbb10f1e6",
+  "source_state": "Root working candidate; exact captured bytes pinned, not asserted equal to clean base",
+  "files": {
+    "rtl/ds/nds_top.sv": "893447c6afc280422c72cf3a7419d572db4f61320cb9d51601f6419061f1d045",
+    "rtl/ds/nds_fabric.sv": "2e858bfc5face01336dbe40b677d8259077f68b2818b41182f5f0f566cfe7024",
+    "rtl/ds/nds_io.sv": "548aa3db793c16b64e8fd28c9f0f09af6a100dea4723072300e8fa98fcadbc18",
+    "rtl/ds/nds_ram.sv": "3908d0843e1d169607fba9fac61f0a491fe5b4516e61834587379ade3753b27a",
+    "rtl/gpu2d/gpu2d_ram.sv": "509a9f6545384fb44dea3a48ac873e96eadc88c927190efb5a9af56b3a25982d"
+  }
+}

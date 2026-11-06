@@ -45,13 +45,35 @@ def read_table():
         if p and not p[0].startswith('#'):
             rows.append(dict(name=p[0], rom=p[1], state=p[2], frames=int(p[3]),
                              top=None if p[4] == '-' else int(p[4]), bottom=None if p[5] == '-' else int(p[5]),
-                             known=len(p) > 6 and p[6] == 'known'))
+                             known=len(p) > 6 and p[6] == 'known',
+                             hold=next((x[5:] for x in p[6:] if x.startswith('hold=')), None)))
     return rows
 
 
+KEYS = ('A', 'B', 'SELECT', 'START', 'RIGHT', 'LEFT', 'UP', 'DOWN', 'R', 'L', 'X', 'Y')   # census's names, the DS's bit order
+
+
+def hold_script(s, out):
+    """a scene's held keys (scenes.txt hold=UP+B): melonDS's script, pressed from the state's frame 0 on"""
+    if not s.get('hold'):
+        return '/dev/null'
+    f = Path(out).parent / f'hold-{s["name"]}.txt'
+    f.write_text(f'0 1000000 {" ".join(s["hold"].split("+"))}\n')
+    return str(f)
+
+
+def hold_mask(s):
+    """the same keys for the core: tb_ds_pocket +hold, core_top's keys (pressed = 1) forced from the release on"""
+    m = 0
+    for k in s['hold'].split('+'):
+        m |= 1 << KEYS.index(k)
+    return f'{m:03x}'
+
+
 def census(s, out, *extra):
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
     cmd = [str(census_bin()), '--bios9', str(ROMS / 'bios9.bin'), '--bios7', str(ROMS / 'bios7.bin'),
-           '--firmware', str(ROMS / 'firmware.bin'), '--rom', str(ROMS / s['rom']), '--script', '/dev/null',
+           '--firmware', str(ROMS / 'firmware.bin'), '--rom', str(ROMS / s['rom']), '--script', hold_script(s, out),
            '--out', str(out), '--load-state', str(STATES / s['state']), *extra]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
@@ -147,6 +169,8 @@ def run_scene(s, update, no_run=False):
         cmd += ['--core-param', p]
     for p in OPT['plus']:
         cmd += ['--plus', p]
+    if s.get('hold'):
+        cmd += ['--plus', 'hold=' + hold_mask(s)]
     ndg = d / f'diag{sfx}.ndg'
     if OPT['diag']:
         # the log read back at quit, up to the last frame record (docs/diag.md layout)

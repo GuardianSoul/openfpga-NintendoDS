@@ -3,9 +3,11 @@
 
     package.py apf_top.rbf OUTDIR [--diag] [--desc=TEXT]
 
-Writes OUTDIR/NDS.zip: Cores/GuardianSoul.NintendoDS/ (bit-reversed RBF and the APF JSON)
-and Platforms/nds.json for cards without a DS platform (install it only if
-the card has none). BIOS, firmware and ROMs come from the card's
+Writes OUTDIR/NDS.zip: Cores/GuardianSoul.NintendoDS/ (bit-reversed RBF, the APF JSON and
+icon.bin from support/pocket-art/core-icon.png)
+and Platforms/nds.json with its image Platforms/_images/nds.bin
+(support/pocket-art/ds-banner.png) for cards without a DS platform (install
+it only if the card has none). BIOS, firmware and ROMs come from the card's
 Assets/nds/common/; none is included.
 
 --diag: the NDSDiag core (docs/diag.md; a core_top_ds DIAG = 1 build): Cores/GuardianSoul.NintendoDSDiag/ in
@@ -19,12 +21,25 @@ import shutil
 import sys
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import pocket_image  # noqa: E402
+except ImportError:     # no PIL (the Laptop's fit node): the images encoded beside the PNGs
+    pocket_image = None
+
+
+def art(png, size):
+    """support/pocket-art PNG in the Pocket's image format; without PIL, its committed .bin"""
+    if pocket_image:
+        return pocket_image.encode(ROOT / 'support/pocket-art' / png, size)
+    return (ROOT / 'support/pocket-art' / png).with_suffix('.bin').read_bytes()
+
 ROOT = Path(__file__).resolve().parents[2]
 CORE = 'GuardianSoul.NintendoDS'
-PLATFORM = 'nds'
+PLATFORM = 'nds'  # the maintainer 2026-11-06: as the other cores (gba, n64); the release's platform
 LOG_FILE = 'nds-log.bin'
 LOG_BYTES = 516                 # rtl/pocket/core_top_ds.sv's log: 128 words + 4 spare
-VERSION = '0.2.0'
+VERSION = '0.5.1'   # the 0.5.1 release candidate (the maintainer 2026-11-06); the public zip: package_release.py --version 0.5.1
 
 NOTICE = """The Nintendo DS core for Analogue Pocket is distributed under the GNU General
 Public License, version 3 or (at your option) any later version. It contains
@@ -55,16 +70,6 @@ DIAG_SLOT = {'name': 'Diag log', 'id': 11, 'required': False, 'parameters': '0xA
              'extensions': ['ndg'], 'size_maximum': '0x80000', 'address': '0x70000000'}
 
 
-
-def boot_image():
-    """nds_boot.bin (ID 12): the boot ROM (8 KiB, core_top_ds BOOT_SRAM), then SERV's ROM-cache firmware
-    (4 KiB, core_top_ds SHELL_CPU; nds_cart_scpu reads it at SDRAM byte 0xB02000)"""
-    boot = (ROOT / 'sw/boot/bootrom.bin').read_bytes()
-    fw = (ROOT / 'sw/scpu/cache.bin').read_bytes()
-    assert len(boot) <= 8192, 'bootrom.bin over 8 KiB'
-    assert len(fw) <= 4096, 'sw/scpu/cache.bin over 4 KiB'
-    return boot + bytes(8192 - len(boot)) + fw + bytes(4096 - len(fw))
-
 def main():
     global CORE
     diag = '--diag' in sys.argv[3:]
@@ -85,6 +90,7 @@ def main():
     core = sd / 'Cores' / CORE
     core.mkdir(parents=True)
     (core / 'bitstream.rbf_r').write_bytes(reversed_rbf)
+    (core / 'icon.bin').write_bytes(art('core-icon.png', (36, 36)))
 
     def write(name, value):
         (core / name).write_text(json.dumps(value, indent=2) + '\n')
@@ -155,7 +161,6 @@ def main():
         'NDS_Pocket DS core, Phase 2 (docs/phase2-integration.md)\n'
         '* Pick a .nds ROM in Assets/nds/common. bios9.bin, bios7.bin and firmware.bin\n'
         '  must be there too.\n'
-        '* Assets/nds/' + CORE + '/nds_boot.bin (in this zip) is the core\'s own boot ROM: install it with the core.\n'
         '* Direct boot: the game starts without the firmware menu.\n'
         '* No 3D and no sound in this version; no saves.\n'
         '* SELECT+R: stacked / top only / bottom only; SELECT+L: touch cursor (D-pad, A = pen)\n'
@@ -165,14 +170,16 @@ def main():
     notices.mkdir()
     for name in ('MIRLO64-LICENSE.txt', 'MIRLO64-NOTICE.txt'):
         shutil.copyfile(ROOT / 'rtl/apf' / name, notices / name)
+    shutil.copyfile(ROOT / 'rtl/serv/LICENSE', notices / 'SERV-LICENSE.txt')
+    shutil.copyfile(ROOT / 'LICENSE', notices / 'LICENSE.txt')
     (notices / 'NOTICE.txt').write_text(NOTICE)
     platforms = sd / 'Platforms'
     platforms.mkdir()
     (platforms / f'{PLATFORM}.json').write_text(json.dumps({'platform': {
         'category': 'Handheld', 'name': 'Nintendo DS', 'year': 2004, 'manufacturer': 'Nintendo'}}, indent=2) + '\n')
-    ad = sd / 'Assets' / PLATFORM / CORE
-    ad.mkdir(parents=True, exist_ok=True)
-    (ad / 'nds_boot.bin').write_bytes(boot_image())
+    (platforms / '_images').mkdir()
+    (platforms / '_images' / f'{PLATFORM}.bin').write_bytes(
+        art('ds-banner.png', (521, 165)))
     zpath = out / ('NDSDiag.zip' if diag else 'NDS.zip')
     with zipfile.ZipFile(zpath, 'w', zipfile.ZIP_DEFLATED) as z:
         for p in sorted(sd.rglob('*')):

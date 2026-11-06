@@ -111,6 +111,7 @@ module gpu2d_bg
 
     // pass configuration
     kind_t       c_kind;
+    logic        c_comp, c_3d; // c_kind == K_COMP / K_3D, registered with it (timing: c_kind -> s4.ka, #1562 -0.87 ns)
     logic        c_pf;         // prefetch pass: tile rows only, no pixels
     logic [1:0]  c_bg, c_prio;
     logic        c_mos;
@@ -163,7 +164,7 @@ module gpu2d_bg
     logic [1:0] pk_bg;
     assign pk_bg = plan_k[1:0];
     function automatic logic [3:0] kind_of(input logic [1:0] b, input logic [2:0] m,
-                                           input logic is3d, input logic [15:0] cnt);
+                                           input logic is3d, input logic [13:0] cnt);
         // {valid, kind}
         kind_t ex;
         ex = cnt[7] ? (cnt[2] ? K_BMPD : K_BMP8) : K_EXT16;
@@ -593,7 +594,7 @@ module gpu2d_bg
         s3_col = s3.direct ? {1'b0, s3.dcol[14:0]} : s3.ext ? hw_of(e_q, s3_eaddr_q[2:1])
                                                        : (s3.pal_hi ? pal_rdata[31:16] : pal_rdata[15:0]);
         s3_c18 = c15to18(s3_col);
-        if (c_kind == K_3D) begin
+        if (c_3d) begin
             s3_bg = {s3_l3d[21:16], s3_l3d[13:8], s3_l3d[5:0], s3_l3d[31:24] | 8'h40};
             s3_bgop = s3_l3op && wmask[0];
         end else begin
@@ -602,14 +603,14 @@ module gpu2d_bg
         end
         s3_in = s3_lb;
         objq = st.layer_enable[4] && ob[27] && wmask[4];
-        s3_pre = !s3_in.done && objq && (c_kind == K_COMP || ob[26:25] > c_prio);
+        s3_pre = !s3_in.done && objq && (c_comp || ob[26:25] > c_prio);
         s3_e = s3_in;
         if (s3_pre) begin
             s3_e.sec = s3_e.top;
             s3_e.top = px_t'({c15to18(ob[15:0]), ob[23:16]});
             s3_e.done = 1'b1;
         end
-        if (c_kind != K_COMP && s3_bgop) begin
+        if (!c_comp && s3_bgop) begin
             s3_e.sec = s3_e.top;
             s3_e.top = s3_bg;
         end
@@ -625,15 +626,21 @@ module gpu2d_bg
         return c[i*6 +: 6];
     endfunction
     logic [7:0]  f1, f2;
-    logic        t2;
+    logic        t2, t2_sec, t2_top, t2_ob;
     logic [5:0]  ka, kb;
+    function automatic logic t2_of(input logic [7:0] f, input logic [13:0] cnt);
+        return f[7] ? cnt[12] : f[6] ? cnt[8] : |(cnt[13:8] & f[5:0]);
+    endfunction
     logic        b63;       // brightness up: b = 63
     logic [17:0] eff;
     logic [2:0][12:0] esum;
     logic [17:0] o2d;
     always_comb begin
         f1 = s3_e.top.f; f2 = s3_e.sec.f;
-        t2 = f2[7] ? bldcnt[12] : f2[6] ? bldcnt[8] : |(bldcnt[13:8] & f2[5:0]);
+        // t2 for each pixel S3 can make second, chosen by S3's own selects
+        // (the same value as from f2, a level shorter)
+        t2_sec = t2_of(s3_in.sec.f, bldcnt); t2_top = t2_of(s3_in.top.f, bldcnt); t2_ob = t2_of(ob[23:16], bldcnt);
+        t2 = (!c_comp && s3_bgop) ? (s3_pre ? t2_ob : t2_top) : (s3_pre ? t2_top : t2_sec);
         ka = 6'd32; kb = 6'd0; b63 = 1'b0;
         if (f1[7] && t2) begin
             if (f1[6]) begin ka = {f1[4:0], 1'b0}; kb = 6'(6'd32 - {f1[4:0], 1'b0}); end
@@ -847,6 +854,8 @@ module gpu2d_bg
                 J_PLAN: begin
                     if (pk_ok) begin
                         c_kind <= kind_t'(pk_kind[2:0]);
+                        c_comp <= kind_t'(pk_kind[2:0]) == K_COMP;
+                        c_3d <= kind_t'(pk_kind[2:0]) == K_3D;
                         c_pf <= PREFETCH && kind_t'(pk_kind[2:0]) != K_3D;
                         c_mos <= MOSAIC && pk_cnt[6] && st.bg_mos_w != 4'd0;
                         c_ext <= st.dispcnt[30] && ((kind_t'(pk_kind[2:0]) == K_TEXT && pk_cnt[7]) || kind_t'(pk_kind[2:0]) == K_EXT16);
@@ -867,6 +876,8 @@ module gpu2d_bg
                         js <= J_SETUP;
                     end else if (plan_k[4]) begin
                         c_kind <= K_COMP;
+                        c_comp <= 1'b1;
+                        c_3d <= 1'b0;
                         c_pf <= 1'b0;
                         c_dmode <= j_eng ? {1'b0, st.dispcnt[16]} : st.dispcnt[17:16];
                         c_capline <= cap_hit;

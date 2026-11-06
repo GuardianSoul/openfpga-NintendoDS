@@ -284,12 +284,21 @@ module arm9_mem import arm_pkg::*; #(
   // demand fill's own states (pf_run: they work on pf_a, leave the fetch free to hit other lines and let
   // a demand miss queue behind it). One line ahead, no chaining.
   localparam bit PF = (OPT & 16) != 0;
+  // OPT[22] (ERI) / OPT[23] (ERD): early restart. A demand fill writes the line's words 0..7 in order (k); a fetch
+  // (ERI) or load (ERD) of that line takes word j from the cache RAM once j <= k - 2 (j was written at least a
+  // clock before the RAM read: port B reads the word port A wrote, never the one it writes), or j <= 6 in the
+  // tag-write clock, instead of waiting for the tag write. OPT[26:24] (ERL): a refused load's fetch hold ends
+  // when k + ERL >= j + 2 (and words have begun), so its replay reaches WB about when word j is in
+  localparam bit ERI = (OPT & 4194304) != 0;
+  localparam bit ERD = (OPT & 8388608) != 0;
+  localparam logic [3:0] ERL = 4'((OPT >> 24) & 7);
   // MEM1 (OPT[19], SLOW only): accesses may follow each other every cycle. A store writes the RAMs in its own WB cycle
   // while the next access reads them (port B, same address: undefined, the model inverts it), so that access gets the
   // written bytes merged in (pw); the dirty bits live in flops, since a tag row write would be a read-during-write
   // for any next lookup of the same set.
   localparam bit MEM1 = SLOW && (OPT & 524288) != 0;
   logic        pf_run;
+  logic        ier, der;                    // ERI / ERD: the fetch / load is answered from the line being filled
   logic [26:0] pf_a;
   wire  [31:0] ia = pf_run ? {pf_a, 5'b0} : ip_a;
   // EVB: a read or fill of another line (compared as main-RAM mirrors, address bits 21:5) goes ahead of the
@@ -327,11 +336,12 @@ module arm9_mem import arm_pkg::*; #(
         hit = 1'b1; way = w[WB-1:0];
       end
     i_abort = 1'b0;   // pocket-now: no MPU fetch aborts (known difference)
+    if (ier) way = vway;
     i_rdata = itcm ? itcm_aq : cach ? ic_bq[way] : ibuf_d;
     if (!f_req || i_abort) i_ok = 1'b1;
     else if (itcm)         i_ok = !(MEM1 && itcm_steal);   // MEM1: a data write to the ITCM took port A in the fetch's cycle: fetch again
-    else if (cach)                 i_ok = hit && !busy_i && !col_i &&
-                                   !(pf_run && st == S_IFILL && f_addr[ISB+4:5] == pf_a[ISB-1:0]);
+    else if (cach)                 i_ok = (hit && !busy_i && !col_i &&
+                                   !(pf_run && st == S_IFILL && f_addr[ISB+4:5] == pf_a[ISB-1:0])) || ier;
     else                           i_ok = ibuf_v && ibuf_a[31:2] == f_addr[31:2];
   end
 
@@ -377,6 +387,7 @@ module arm9_mem import arm_pkg::*; #(
       if (dt_bq[w*DLW + DTW + 1] && dt_bq[w*DLW +: DTW] == w_addr[31:DSB+5]) begin
         wd_hit = 1'b1; wd_way = w[WB-1:0];
       end
+    if (der) begin wd_hit = 1'b1; wd_way = vway; end
   end
 
   // read-back MLAB: written by MCR (the values as MRC returns them), read in WB
@@ -503,6 +514,8 @@ module arm9_mem import arm_pkg::*; #(
         wd_tcmw = w_we;
       end else if (wd_dtcm) begin
         wd_tcmw = w_we;
+      end else if (der) begin
+                                            // ERD: the word is in the line being filled
       end else if (busy_d || dp_v || col_d) begin
         d_ok = 1'b0;                        // the machine is busy with the D side
       end else if (!w_we) begin
@@ -559,7 +572,8 @@ module arm9_mem import arm_pkg::*; #(
   // EARLYD: the fetch hold of a refused access ends while the fill's last word is on its way, so the replay's
   // refetch reaches the memory stage about when the line is there (the DS stalls in place and continues at once;
   // the core refuses, flushes and refetches after the fill: ~12 clk exposed per fill). Too early only costs another replay.
-  assign d_wait = (dp_v || busy_d) && !(EARLYD && st == S_FILL && k == 3'd7 && dp_kind == DK_FILL);
+  assign d_wait = (dp_v || busy_d) && !(EARLYD && st == S_FILL && k == 3'd7 && dp_kind == DK_FILL) &&
+                  !(ERD && st == S_FILL && dp_kind == DK_FILL && (k != 3'd0 || b_ack) && {1'b0, k} + ERL >= {1'b0, dp_a[4:2]} + 4'd2);
 
   // Port A address and write muxes
   always_comb begin
@@ -571,6 +585,11 @@ module arm9_mem import arm_pkg::*; #(
   // ---------------------------------------------------------------- state machine
   logic [2:0]  k;                           // word in the line
   logic [WB-1:0] vway;                      // victim way
+  // (main RAM, 0x02000000-0x023FFFFF, is the only cacheable range: address bits 21:5 name the line)
+  assign ier = ERI && f_req && mpu_en && ic_en && f_addr[31:24] == 8'h02 && !pf_run && !iline && f_addr[21:5] == ip_a[21:5] &&
+               ((st == S_IFILL && {1'b0, f_addr[4:2]} + 4'd2 <= {1'b0, k}) || (st == S_ITAGW && f_addr[4:2] != 3'd7));
+  assign der = ERD && wq_e && !w_we && dp_v && dp_kind == DK_FILL && w_addr[31:22] == 10'h008 && w_addr[21:5] == dp_a[21:5] &&
+               ((st == S_FILL && {1'b0, w_addr[4:2]} + 4'd2 <= {1'b0, k}) || (st == S_TAGW && w_addr[4:2] != 3'd7));
   logic [DLW-1:0] tlane;                    // the chosen way's lane (ev_lane)
   logic [WB-1:0] tlru, ilru;                // the set's round-robin counter
   // the chosen way's lane, registered in S_TAG from the lane S_TAG selects (lw) instead of the whole

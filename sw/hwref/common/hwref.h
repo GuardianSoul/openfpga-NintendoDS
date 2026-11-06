@@ -5,7 +5,9 @@
 #include <nds.h>
 #include <stdarg.h>
 
+#ifndef HWREF_DIR
 #define HWREF_DIR "fat:/hwref"
+#endif
 
 #define REG8(a)  (*(vu8*)(a))
 #define REG16(a) (*(vu16*)(a))
@@ -42,6 +44,12 @@ static inline u32 now32(void)
 void hw_init(const char* title);           // console, timers, FAT, mkdir /hwref
 void hw_status(const char* fmt, ...);      // a line on the console
 bool hw_write(const char* name, const void* data, size_t len);  // fat:/hwref/<name>
+bool hw_append(const char* name, const void* data, size_t len);
+bool hw_csv_header(const char* name, const char* header);
+// An interrupted start is skipped on reboot, preserving later independent
+// cases. Completeness checking must still report that case as unmeasured.
+bool hw_step_begin(const char* progress_file, const char* key);
+bool hw_step_done(const char* progress_file, const char* key);
 void hw_done(void) __attribute__((noreturn));
 // Chained mode (hwref.nds runs every program in turn): hw_done() returns to
 // the runner instead of halting, and hw_init() mounts the SD card once.
@@ -56,5 +64,6 @@ extern bool hw_new_only;
 typedef struct { char* p; size_t len, cap; } Buf;
 void buf_printf(Buf* b, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 bool buf_write(Buf* b, const char* name);  // writes and frees
+bool buf_append(Buf* b, const char* name); // appends and frees
 
 void wait_vcount(int line);                // until VCOUNT becomes `line` (edge)

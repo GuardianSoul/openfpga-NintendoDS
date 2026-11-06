@@ -21,10 +21,13 @@
 #include "GPU3D.h"
 #include "SPI_Firmware.h"
 #include "Census.h"
+#include "CensusRuleMode.h"
 #include "Platform.h"
 #include "Savestate.h"
 #include "state2d.h"
 #include "spu_trace.h"
+#include "runtime_history.h"
+#include "runtime_atomic.h"
 
 using namespace melonDS;
 
@@ -35,6 +38,7 @@ extern int MinLogLevel;
 }
 
 static NDS* nds = nullptr;
+static bool runtimeHistory = false;
 static u32 curFrame = 0;
 static u32 curLine = 0;
 
@@ -781,15 +785,16 @@ static void SpuSnapshot(SPU& s)
 
 static void OnSPUMix(SPU& s)
 {
+    if (runtimeHistory) RuntimeHistoryMix(*nds, false);
     if (!SpuActive()) return;
     if (!spuOn) { SpuSnapshot(s); spuOn = true; }
     SpuRec(spu::RecMix, 0, 0, 0);
 }
-static void OnSPUMixEnd(const s16* out) { if (spuOn && SpuActive()) SpuRec(spu::RecOut, 0, (u16)out[0], (u16)out[1]); }
+static void OnSPUMixEnd(const s16* out) { if (runtimeHistory) RuntimeHistoryMix(*nds, true); if (spuOn && SpuActive()) SpuRec(spu::RecOut, 0, (u16)out[0], (u16)out[1]); }
 static void OnSPUWrite(u32 size, u32 addr, u32 val) { if (spuOn && SpuActive()) SpuRec(spu::RecWrite, size, addr, val); }
 static void OnSPUPower(u32 val) { if (spuOn && SpuActive()) SpuRec(spu::RecPower, 0, 0, val); }
 static void OnSPUFetch(u32 addr, u32 val) { if (spuOn && SpuActive()) SpuRec(spu::RecFetch, 0, addr, val); }
-static void OnSPUCapture(u32 addr, u32 val) { if (spuOn && SpuActive()) SpuRec(spu::RecCap, 0, addr, val); }
+static void OnSPUCapture(u32 addr, u32 val) { if (runtimeHistory) RuntimeHistoryCapture(*nds, addr, val); if (spuOn && SpuActive()) SpuRec(spu::RecCap, 0, addr, val); }
 
 // OBJ sizes [shape][size] -> w, h
 static const u8 ObjW[3][4] = {{8, 16, 32, 64}, {16, 32, 32, 64}, {8, 8, 16, 32}};
@@ -917,8 +922,9 @@ static bool mutate = false;
 // engine is idle: no command queued or in the pipe, no swap pending, no polygon or vertex of the next frame yet
 // (docs/state-import.md "A save point is not a 3D frame boundary"). The run goes on: its shots are the
 // reference frames; DIR/clean.txt records the frame and line.
-void ExportState(melonDS::NDS* nds, const std::string& dir, int vcount = -1);     // export_state.cpp
+void ExportState(melonDS::NDS* nds, const std::string& dir, int vcount = -1, bool runtime = false);     // export_state.cpp
 static std::string cleanDir;
+static bool cleanRuntime = false;
 static u32 cleanAfter = 0;
 static int cleanFrame = -1;
 
@@ -940,7 +946,7 @@ static void OnScanline(u32 line)
         GPU3D& g3 = nds->GPU.GPU3D;
         if (g3.CmdFIFO.IsEmpty() && g3.CmdPIPE.IsEmpty() && !g3.FlushRequest && g3.NumPolygons == 0 && g3.NumVertices == 0)
         {
-            ExportState(nds, cleanDir, line);
+            ExportState(nds, cleanDir, line, cleanRuntime);
             cleanFrame = curFrame;
             FILE* f = fopen((cleanDir + "/clean.txt").c_str(), "w");
             fprintf(f, "frame %u line %u\n", curFrame, line);
@@ -1200,6 +1206,7 @@ static u32 ioWatchLen = 4;
 static u32 ioWatchFrom = 0;
 static void OnDataWrite(int cpu, u32 src, u32 addr, u32 val, u32 bytes)
 {
+    if (runtimeHistory) RuntimeHistoryIntent(*nds, cpu, src, addr, val, bytes);
     if (!snapPCs.empty()) SnapWrite(cpu, src, addr, val, bytes);
     if (ioWatch && addr - ioWatch < ioWatchLen && curFrame >= ioWatchFrom)
         fprintf(stderr, "iowatch f%u line %u: arm%d %08x <= %08x (%u bytes)\n", curFrame, curLine, cpu ? 7 : 9, addr, val, bytes);
@@ -1207,6 +1214,12 @@ static void OnDataWrite(int cpu, u32 src, u32 addr, u32 val, u32 bytes)
     if (!traceOn || t.n >= traceMax) return;
     WrRec rec {addr & ~(bytes - 1), val & (bytes == 4 ? ~0u : (1u << (8 * bytes)) - 1), (u8)bytes, (u8)src, 0};
     fwrite(&rec, sizeof(rec), 1, t.wr);
+}
+
+static void (*runtimePreviousRetire)(int,u32,const u32*,u32)=nullptr;
+static void OnRuntimeRetire(int cpu,u32 pc,const u32* r,u32 cpsr) {
+    RuntimeHistoryCompleteTCM(*nds);
+    if(runtimePreviousRetire)runtimePreviousRetire(cpu,pc,r,cpsr);
 }
 
 static void OnIRQEntry(int cpu)
@@ -1329,36 +1342,111 @@ static u64 FramebufferHash()
     return h;
 }
 
+static constexpr const char* FrontendCapabilities[]={"final-state","final-save","save-state-save","clean-runtime","clean-runtime-history"};
+
+static void PrintRuleMode(FILE* f)
+{
+    const auto& m=Census::GetCompiledRuleMode();
+    fprintf(f,"  \"census_mode\": \"%s\", \"declared_mode\": \"%s\",\n",m.mode,Census::DeclaredMode);
+    fprintf(f,"  \"compiled_rule_count\": %u, \"declared_rule_count\": %u, \"compiled_rules\": [",m.count,Census::DeclaredRuleCount);
+    for(unsigned i=0;i<m.count;i++)fprintf(f,"%s\"%s\"",i?", ":"",m.rules[i]);
+    fprintf(f,"], \"frontend_capabilities\": [");
+    for(unsigned i=0;i<sizeof(FrontendCapabilities)/sizeof(FrontendCapabilities[0]);i++)
+        fprintf(f,"%s\"%s\"",i?", ":"",FrontendCapabilities[i]);
+    fprintf(f,"]");
+}
+
+static bool RuleModeCoherent()
+{
+    const auto& m=Census::GetCompiledRuleMode();
+    return m.count==Census::DeclaredRuleCount && !strcmp(m.mode,Census::DeclaredMode);
+}
+
 static void Usage()
 {
     fprintf(stderr,
-        "usage: census --bios9 F --bios7 F --firmware F --rom F --script F --out DIR\n"
+        "usage: census --build-info\n"
+        "       census [--expect-mode ds-rules-23] --bios9 F --bios7 F --firmware F --rom F --script F --out DIR\n"
         "              [--frames N=3600] [--save F] [--shot-every N=300]\n"
         "              [--gx-first FRAME --gx-frames N [--vram-every FLUSHES=30]]\n"
         "              [--vram-trace-first FRAME [--vram-trace-frames N=60]]\n"
         "              [--no-hooks 1] [--mutate 1] [--cart-trace 1]\n"
         "              [--gpu2d-dump F --gpu2d-at FRAME:N[,FRAME:N...] [--gpu2d-name NAME]]\n"
         "              [--sd-dir DIR [--sd-mb N=64]]\n"
-        "              [--load-state F] [--save-state F --save-state-at FRAME]\n"
+        "              [--load-state F] [--save-state F --save-state-at FRAME [--save-state-save F]]\n"
+        "              [--final-state F] [--final-save F]\n"
+        "              [--require-capabilities final-state,final-save,save-state-save]\n"
         "              [--spu-trace F --spu-first FRAME [--spu-frames N=600]]\n"
         "              [--trace-dir DIR [--trace-insns N=20000000] [--trace-from-frame F=0]\n"
         "               [--trace-perturb CYCLES] [--trace-op 1]] [--dump-boot DIR] [--export-state DIR] [--cache-ways N=4]\n"
         "              [--swap-log FILE] (3D swaps per frame, cumulative)\n"
-        "              [--final-bgx 1] [--export-clean DIR [--export-after N]]  (export where the geometry engine is idle; the run goes on)\n"
+        "              [--final-bgx 1] [--export-clean DIR [--export-after N] [--export-runtime 1]]  (export where the geometry engine is idle; the run goes on)\n"
         "              [--snap-pcs A[,B...] --snap-dir DIR [--snap-max N=64] [--snap-from-frame F=0] [--snap-irq 1]\n"
         "               [--snap-cksum [*]ADDR:LEN]]\n"
+        "              [--export-runtime-history 1024 --runtime-history-until SYS] (bound original clean epoch)\n"
         "Frame numbers (script, shots, traces) count from the loaded state.\n");
     exit(2);
 }
 
+// Reference-only observation: cart save bytes paired with a state or final epoch.
+// This runs outside RunFrame and does not change emulated timing/state.
+static bool ExportReferenceSave(NDS* machine, const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const auto size = machine->NDSCartSlot.GetSaveMemoryLength();
+    const bool ok = size == 0 || fwrite(machine->NDSCartSlot.GetSaveMemory(), 1, size, f) == size;
+    const int closed = fclose(f);
+    return ok && closed == 0;
+}
+
 int main(int argc, char** argv)
 {
+    if(argc==2 && !strcmp(argv[1],"--build-info")) {
+        fprintf(stdout,"{\n");PrintRuleMode(stdout);fprintf(stdout,"\n}\n");
+        return RuleModeCoherent()?0:3;
+    }
+    if(!RuleModeCoherent()) {
+        fprintf(stderr,"census declared/compiled rule mode mismatch\n");return 3;
+    }
     std::map<std::string, std::string> opt;
     for (int i = 1; i < argc; i++)
     {
         if (strncmp(argv[i], "--", 2) || i + 1 >= argc) Usage();
         opt[argv[i] + 2] = argv[i + 1];
         i++;
+    }
+    if (opt.count("export-runtime")) {
+        if (opt["export-runtime"] != "1" || !opt.count("export-clean") || opt.count("export-state")) {
+            fprintf(stderr, "--export-runtime 1 requires --export-clean DIR\n"); return 1;
+        }
+        cleanRuntime = true;
+    }
+    if (opt.count("export-atomic")) {
+        if (opt["export-atomic"]!="1" || !cleanRuntime) { fprintf(stderr,"--export-atomic 1 requires --export-runtime 1\n");return 1; }
+        ConfigureRuntimeAtomic(true);
+    }
+    if (opt.count("export-runtime-history")) {
+        if (opt["export-runtime-history"] != "1024" || !opt.count("runtime-history-until") || !opt.count("export-runtime")) {
+            fprintf(stderr,"--export-runtime-history 1024 requires --runtime-history-until SYS and --export-runtime 1\n"); return 1;
+        }
+        ConfigureRuntimeHistory(std::stoull(opt["runtime-history-until"]), 1024);
+        runtimeHistory = true;
+    }
+    if(opt.count("expect-mode") && opt["expect-mode"]!=Census::GetCompiledRuleMode().mode) {
+        fprintf(stderr,"census mode mismatch: expected %s, compiled %s\n",opt["expect-mode"].c_str(),Census::GetCompiledRuleMode().mode);return 3;
+    }
+    if(opt.count("require-capabilities")) {
+        const std::string& required=opt["require-capabilities"];
+        for(size_t pos=0;pos<required.size();) {
+            size_t end=required.find(',',pos);
+            std::string name=required.substr(pos,end==std::string::npos?end:end-pos);
+            bool supported=false;
+            for(const char* capability:FrontendCapabilities)if(name==capability)supported=true;
+            if(!supported){fprintf(stderr,"unsupported required frontend capability: %s\n",name.c_str());return 3;}
+            if(end==std::string::npos)break;
+            pos=end+1;
+        }
     }
     for (const char* req : {"bios9", "bios7", "firmware", "rom", "script", "out"})
         if (!opt.count(req)) Usage();
@@ -1379,7 +1467,7 @@ int main(int argc, char** argv)
     args.Firmware = Firmware(fw.data(), fw.size());
     args.JIT = std::nullopt;
 
-    nds = new NDS(std::move(args));
+    nds = runtimeHistory ? CreateRuntimeHistoryNDS(std::move(args)) : new NDS(std::move(args));
 
     auto rom = ReadFile(opt["rom"]);
     NDSCart::NDSCartArgs cartargs;
@@ -1560,6 +1648,7 @@ int main(int argc, char** argv)
         fprintf(vtrace, "frame,line,unit,bank,bytes,seq8,b32\n");
     }
 
+    if (runtimeHistory) { runtimePreviousRetire=hooks.Retire;hooks.Retire=OnRuntimeRetire;hooks.DataWrite=OnDataWrite; BeginRuntimeHistory(*nds); }
     u64 last9 = nds->ARM9Timestamp, last7 = nds->ARM7Timestamp;
     u64 t0 = Platform::GetMSCount();
 
@@ -1573,6 +1662,7 @@ int main(int argc, char** argv)
             fwrite(s.Buffer(), 1, s.Length(), f);
             fclose(f);
             fprintf(stderr, "state saved at frame %u\n", curFrame);
+            if (opt.count("save-state-save") && !ExportReferenceSave(nds, opt["save-state-save"])) return 1;
         }
         u32 keys = 0;
         int tx = -1, ty = -1;
@@ -1744,6 +1834,7 @@ int main(int argc, char** argv)
 
     FILE* js = fopen((out + "/summary.json").c_str(), "w");
     fprintf(js, "{\n  \"title\": \"%s\", \"gamecode\": \"%s\", \"frames\": %u,\n", title, gamecode, frames);
+    PrintRuleMode(js);fprintf(js,",\n");
     fprintf(js, "  \"flushes\": %u, \"frames_with_flush\": %u, \"overflow_flushes\": %u,\n",
             flushCount, framesWithFlush, overflowFlushes);
     fprintf(js, "  \"cart_reads\": %llu, \"cart_sequential_reads\": %llu,\n",
@@ -1819,6 +1910,16 @@ int main(int argc, char** argv)
         auto& ga = nds->GPU.GPU2D_A;
         printf("final-bgx %u %u %u %u xref %d %d polys %u\n", ga.BGXPos[0], ga.BGXPos[1], ga.BGXPos[2], ga.BGXPos[3],
                ga.BGXRefInternal[0], ga.BGXRefInternal[1], nds->GPU.GPU3D.RenderNumPolygons);
+    }
+    if (opt.count("final-save") && !ExportReferenceSave(nds, opt["final-save"])) return 1;
+    if (opt.count("final-state"))
+    {
+        Savestate state;
+        if (state.Error || !nds->DoSavestate(&state)) return 1;
+        FILE* f = fopen(opt["final-state"].c_str(), "wb");
+        if (!f) return 1;
+        const bool ok = fwrite(state.Buffer(), 1, state.Length(), f) == state.Length();
+        if (fclose(f) != 0 || !ok) return 1;
     }
     delete nds;
     return 0;

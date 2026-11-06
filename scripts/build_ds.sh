@@ -11,6 +11,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=$1 seed=$2
+# Check the complete source before paying for synthesis; Verilator alone
+# accepts module-scope/generate constructs rejected by Quartus Standard.
+python3 "$root/tools/ds/qlint.py"
 # Quartus-settings experiments ride on the seed (the Jenkins job passes only
 # TARGET and SEED): a trailing "a" = OPTIMIZATION_MODE "AGGRESSIVE AREA",
 # "p" = HIGH PERFORMANCE EFFORT plus ALM_REGISTER_PACKING_EFFORT HIGH,
@@ -177,6 +180,18 @@ echo "PROJECT_REVISION = \"$top\"" > $top.qpf
   done
   echo "set_instance_assignment -name FAST_OUTPUT_ENABLE_REGISTER ON -to sram_dq[*]"
   for i in $(seq 0 15); do echo "set_instance_assignment -name FAST_INPUT_REGISTER ON -to sram_dq[$i]"; done
+  # SDRAM (rtl/pocket/nds_sdram_mc.sv, timed by rtl/pocket/nds_sdram_io.sdc; docs/sdram-io.md): Pocket board
+  # timing, not DS behaviour. Command pins from I/O cell registers (#1643: decoded in the core, -2.97 ns setup),
+  # the DQ output enable from its I/O cell register (#1643: dq[10] -0.11 ns), and D1=24 on the DQ inputs (the
+  # input buffer -> capture register delay; #1643: next-beat hold -0.205 ns; openfpga-PlayStation's released setting)
+  for p in ras_n cas_n we_n "a[*]" "ba[*]" "dqm[*]" "dq[*]"; do
+    echo "set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_$p"
+  done
+  echo "set_instance_assignment -name FAST_OUTPUT_ENABLE_REGISTER ON -to dram_dq[*]"
+  for i in $(seq 0 15); do
+    echo "set_instance_assignment -name FAST_INPUT_REGISTER ON -to dram_dq[$i]"
+    echo "set_instance_assignment -name D1_DELAY 24 -to dram_dq[$i]"
+  done
 } > $top.qsf
 
 cat > ds.sdc <<'SDC'
@@ -401,6 +416,8 @@ if {[get_collection_size $fab_fr] > 0 && [get_collection_size $fab_tr] > 0} {
 
 SDC
 sed -i "s|APF_DIR|$apf|" ds.sdc
+# SDRAM pin timing (Pocket board): chip clock on dram_clk, read capture, command/data outputs
+cat "$root/rtl/pocket/nds_sdram_io.sdc" >> ds.sdc
 
 set +e
 quartus_map $top > map.log 2>&1 && quartus_fit $top > fit.log 2>&1 && quartus_asm $top > asm.log 2>&1 && quartus_sta $top > sta.log 2>&1

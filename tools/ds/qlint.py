@@ -19,6 +19,8 @@ loop inside `generate ... endgenerate`. Also flags (nds-fit #350):
   `ifndef SYNTHESIS does not hide it. Put it under `ifndef ALTERA_RESERVED_QIS
   (or synthesis translate_off/on); an `ifdef of a simulation macro (G3D_EQ)
   also hides it.
+- genvar-controlled loops without explicit generate/endgenerate, or without
+  a named begin/end body (nds-fit #1162/#1163). Procedural int loops are legal.
 Exit 1 if anything is flagged.
 """
 import re
@@ -28,14 +30,60 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 files = [Path(a) for a in sys.argv[1:]] or [p for p in (ROOT / 'rtl').rglob('*.sv') if 'study' not in p.parts]
 KEYWORDS = {'if', 'for', 'while', 'case', 'casez', 'casex', 'foreach', 'repeat', 'return', 'assert'}
+
+
+def generate_loop_errors(source):
+    """Check declared-genvar loops, independent of indentation/header wrapping.
+
+    This is a check for known Standard pitfalls, not a SystemVerilog parser.
+    Keep offsets while hiding comments/strings so diagnostics retain line numbers.
+    """
+    source = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
+                    lambda m: re.sub(r'[^\n]', ' ', m[0]), source, flags=re.S)
+    tokens = re.compile(r'\b(module|endmodule|generate|endgenerate)\b|'
+                        r'\bgenvar\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*;|'
+                        r'\bfor\s*\(')
+    names = set()
+    depth = 0
+    for match in tokens.finditer(source):
+        word = match[1]
+        if word in ('module', 'endmodule'):
+            names.clear()
+            depth = 0
+        elif word == 'generate':
+            depth += 1
+        elif word == 'endgenerate':
+            depth -= 1
+        elif match[2]:
+            names.update(re.findall(r'[A-Za-z_]\w*', match[2]))
+        else:
+            start = match.end()
+            var = re.match(r'\s*([A-Za-z_]\w*)\s*=', source[start:])
+            if not var or var[1] not in names:
+                continue  # int-declared procedural loop; inline genvar checked below
+            nesting, end = 1, start
+            while end < len(source) and nesting:
+                nesting += (source[end] == '(') - (source[end] == ')')
+                end += 1
+            line = source.count('\n', 0, match.start()) + 1
+            if depth <= 0:
+                yield line, 'genvar loop outside generate/endgenerate (Quartus Standard rejects it)'
+            if not re.match(r'\s*begin\s*:\s*[A-Za-z_]\w*', source[end:]):
+                yield line, 'genvar loop needs a named begin/end body (Quartus Standard rejects it)'
+
+
 bad = 0
 for f in files:
+    source = f.read_text(errors='replace')
+    for n, message in generate_loop_errors(source):
+        print(f'{f}:{n}: {message}')
+        bad += 1
     gen = 0
     hidden = 0      # inside `ifndef ALTERA_RESERVED_QIS (Quartus does not read it)
     sim = []        # open `ifdef/`ifndef/`else: True where Quartus skips the code
     tr = False      # inside synthesis translate_off
     plist = False   # inside a module's parameter port list
-    for n, line in enumerate(f.read_text(errors='replace').splitlines(), 1):
+    for n, line in enumerate(source.splitlines(), 1):
         if re.search(r'synthesis\s+translate_off', line): tr = True
         if re.search(r'synthesis\s+translate_on', line): tr = False
         code = line.split('//')[0]

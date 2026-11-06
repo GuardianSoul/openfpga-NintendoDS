@@ -106,6 +106,12 @@ def waito():
     I(jc("OBUSY", lb))
 
 
+def d1():
+    """the end of a handler: FF dispatches here (an instruction with no other effect, or an idempotent one:
+    the dispatch stays on it while the hardware takes COLOR, TEXCOORD or NORMAL); else through D1"""
+    return disp(NOENT) if FF else jmp("D1")
+
+
 def ld(a, x=0, fl=False):
     """R = RF[a + Xx] (port A)"""
     return (ra(a, x), op("PASSX", "QA", fl=fl))
@@ -222,23 +228,53 @@ table(0x11, jmp("PUSH"))
 table(0x12, jmp("POP"))
 table(0x13, jmp("STORE"))
 table(0x14, jmp("RESTORE"))
-table(0x15, jmp("IDENTH"))
-table(0x16, jmp("LOAD44"))
+# FF: handlers whose first instruction reads no register-file word start in their table slot (a fixed block:
+# no padding), saving the jump: the MATOP entries and the vertex commands that take their parameter as P
+MATOPS = {0x15: ("IDENTH", 0, "IDENT", 4, 1), 0x16: ("LOAD44", 0, "PARAM", 4, 1), 0x18: ("MUL44", 1, "PARAM", 4, 1),
+          0x1B: ("SCALE", 2, None, 4, 0), 0x1C: ("TRANS", 3, None, 4, 1)}
+
+
+MDIRECT = True                         # FF: these commands' own handlers (mdisp) instead of MATOP's decode
+
+
+def matop_val(kind, src=0, rows=4, vecok=1):
+    return kind | rows << 2 | vecok << 5 | src << 6
+
+
+def tab_matop(c):
+    n, kind, src, rows, vecok = MATOPS[c]
+    if FF and MDIRECT:
+        table(c, jmp(n + "F"))
+    elif FF:
+        table(c, li(matop_val(kind, {"IDENT": IDENT, "PARAM": PARAM, None: 0}[src], rows, vecok)), w(KIND), jmp("MATOP"))
+    else:
+        table(c, jmp(n))
+
+
+tab_matop(0x15)
+tab_matop(0x16)
 table(0x17, jmp("LOAD43"))
-table(0x18, jmp("MUL44"))
+tab_matop(0x18)
 table(0x19, jmp("MUL43"))
 table(0x1A, jmp("MUL33"))
-table(0x1B, jmp("SCALE"))
-table(0x1C, jmp("TRANS"))
+tab_matop(0x1B)
+tab_matop(0x1C)
 table(0x20, jmp("COLOR"))
 table(0x21, jmp("NORMAL"))
 table(0x22, jmp("TEXCOORD"))
 table(0x23, jmp("VTX16"))
-table(0x24, jmp("VTX10"))
-table(0x25, jmp("VTXXY"))
-table(0x26, jmp("VTXXZ"))
-table(0x27, jmp("VTXYZ"))
-table(0x28, jmp("VTXDIFF"))
+if FF:
+    table(0x24, op("SHL", "P", 22), jmp("VTX10b"))
+    table(0x25, op("SX16", "P"), w(CURV), jmp("VTXXYb"))
+    table(0x26, op("SX16", "P"), w(CURV), jmp("VTXXZb"))
+    table(0x27, op("SX16", "P"), w(CURV + 1), jmp("VTXYZb"))
+    table(0x28, op("SHL", "P", 22), jmp("VTXDIFFb"))
+else:
+    table(0x24, jmp("VTX10"))
+    table(0x25, jmp("VTXXY"))
+    table(0x26, jmp("VTXXZ"))
+    table(0x27, jmp("VTXYZ"))
+    table(0x28, jmp("VTXDIFF"))
 table(0x29, op("PASSX", "P"), w(PATTR), jmp("D1"))
 table(0x2A, jmp("TEXPARAM"))
 table(0x2B, op("AND", "P", 0x1FFF), w(TEXPAL), jmp("D1"))
@@ -435,10 +471,10 @@ I(op("ADD", "R", 1))
 I(op("AND", "R", 0x3F), w(PSP), jmp("D1"))
 L("PU0")
 copy16(PROJ, PROJST)
-I(jmp("D1"))
+I(d1())
 L("PU3")
 copy16(TEX, TEXST)
-I(jmp("D1"))
+I(d1())
 
 # pop: PSP -= sx6(param), pos+vec <- stack[PSP & 31]
 L("POP")
@@ -449,24 +485,35 @@ I(rb(PSP), op("RSUB", "R", "QB"))      # PSP - offset
 I(op("AND", "R", 0x3F), w(PSP))
 L("POPK")                              # R = stack index
 I(op("AND", "R", 0x1F))
-I(op("SHL", "R", 4), w(T))
-I(op("ADD", "R", POSST))
-I()
-I(setx(1))
-I(setxi(2, POS), call("COPY16"))
-I(*ld(T))
-I(op("ADD", "R", VECST))
-I()
-I(setx(1))
-I(setxi(2, VEC), call("COPY16"))
+if FF:
+    # both entries' addresses first (a setx reads R two back)
+    I(op("SHL", "R", 4))
+    I(op("ADD", "R", POSST))
+    I(op("ADD", "R", VECST - POSST), w(T))
+    I(setx(1))                         # X1 = POSST + 16 index
+    I(setxi(2, POS), call("COPY16"))
+    I(*ld(T))
+    I(setxi(2, VEC))
+    I(setx(1), call("COPY16"))         # X1 = VECST + 16 index
+else:
+    I(op("SHL", "R", 4), w(T))
+    I(op("ADD", "R", POSST))
+    I()
+    I(setx(1))
+    I(setxi(2, POS), call("COPY16"))
+    I(*ld(T))
+    I(op("ADD", "R", VECST))
+    I()
+    I(setx(1))
+    I(setxi(2, VEC), call("COPY16"))
 L("DIRTYD")
-I(dirty(1), jmp("D1"))
+I(dirty(1), d1())                      # dirty(1) again when the dispatch stays is harmless
 L("PO0")
 copy16(PROJST, PROJ)
 I(jmp("DIRTYD"))
 L("PO3")
 copy16(TEXST, TEX)
-I(jmp("D1"))
+I(d1())
 
 L("STORE")
 mode_dispatch("ST0", "ST3")
@@ -481,13 +528,13 @@ I(op("ADD", "R", VECST))
 I()
 I(setx(2))
 I(setxi(1, VEC), call("COPY16"))
-I(jmp("D1"))
+I(d1())
 L("ST0")
 copy16(PROJ, PROJST)
-I(jmp("D1"))
+I(d1())
 L("ST3")
 copy16(TEX, TEXST)
-I(jmp("D1"))
+I(d1())
 
 L("RESTORE")
 mode_dispatch("RE0", "RE3")
@@ -497,22 +544,35 @@ copy16(PROJST, PROJ)
 I(jmp("DIRTYD"))
 L("RE3")
 copy16(TEXST, TEX)
-I(jmp("D1"))
+I(d1())
 
 
-# 4x3 parameters -> PR3 (s[3r+c] in row r; column 3 zero, PR3[15] = 0x1000)
-L("REALIGN")
-for k in range(12):
-    I(*ld(PARAM + k), w(PR3 + 4 * (k // 3) + k % 3))
-I(li(0), w(PR3 + 3))
-I(w(PR3 + 7))
-I(w(PR3 + 11))
-I(li(0x1000), w(PR3 + 15), ret())
+# 4x3 parameters -> PR3 (s[3r+c] in row r; column 3 zero, PR3[15] = 0x1000); FF: LD43 writes them into X2
+if not FF:
+    L("REALIGN")
+    for k in range(12):
+        I(*ld(PARAM + k), w(PR3 + 4 * (k // 3) + k % 3))
+    I(li(0), w(PR3 + 3))
+    I(w(PR3 + 7))
+    I(w(PR3 + 11))
+    I(li(0x1000), w(PR3 + 15), ret())
+else:
+    xclear()
+    xrange(2, PROJ, TEX + 1)           # PROJ, POS, VEC or TEX
+    L("LD43")
+    for k in range(12):
+        I(*ld(PARAM + k), w(4 * (k // 3) + k % 3, 2))
+    I(li(0), w(3, 2))
+    I(w(7, 2))
+    I(w(11, 2))
+    I(li(0x1000), w(15, 2), ret())
 
 
 # matrix commands: KIND 0 copy SRCM, 1 multiply by SRCM (ROWS rows), 2 scale,
 # 3 translate; on the mode's matrix, and the vector matrix in mode 2 when VECOK
 def matop(name, kind, src=0, rows=4, vecok=1, realign=False):
+    if FF and name in [v_[0] for v_ in MATOPS.values()]:
+        return                         # in its table slot
     L(name)
     if realign:
         I(call("REALIGN"))
@@ -521,61 +581,181 @@ def matop(name, kind, src=0, rows=4, vecok=1, realign=False):
 
 matop("IDENTH", 0, IDENT)
 matop("LOAD44", 0, PARAM)
-matop("LOAD43", 0, PR3, realign=True)
+if not FF:
+    matop("LOAD43", 0, PR3, realign=True)
 matop("MUL44", 1, PARAM, 4)
-matop("MUL43", 1, PR3, 4, realign=True)
-matop("MUL33", 1, PR3, 3, realign=True)
+if not FF:
+    matop("MUL43", 1, PR3, 4, realign=True)
+    matop("MUL33", 1, PR3, 3, realign=True)
 matop("SCALE", 2, vecok=0)
 matop("TRANS", 3)
 
-L("MATOP")
-I(ra(KIND), op("SHR", "QA", 6), w(SRCM))
-I(ra(KIND), op("SHR", "QA", 2))
-I(op("AND", "R", 7), w(ROWS))
-I(ra(KIND), op("SHR", "QA", 5), w(VECOK))
-I(*ld(MMODE))
-I()
-I(jc("BIT", "MO23", bit=1))
-I(jnc("BIT", "MO0", bit=0))
-I(setxi(2, POS), call("DOTGT"))
-I(jmp("DIRTYD"))
-L("MO0")
-I(setxi(2, PROJ), call("DOTGT"))
-I(jmp("DIRTYD"))
-L("MO23")
-I(jc("BIT", "MO3", bit=0))
-I(setxi(2, POS), call("DOTGT"))
-I(*ld(VECOK))
-I()
-I(jnc("BIT", "DIRTYD", bit=0))
-I(setxi(2, VEC), call("DOTGT"))
-I(jmp("DIRTYD"))
-L("MO3")
-I(setxi(2, TEX), call("DOTGT"))
-I(jmp("D1"))
+if not (FF and MDIRECT):
+    L("MATOP")
+    I(ra(KIND), op("SHR", "QA", 6), w(SRCM))
+    I(ra(KIND), op("SHR", "QA", 2))
+    I(op("AND", "R", 7), w(ROWS))
+    I(ra(KIND), op("SHR", "QA", 5), w(VECOK))
+    I(*ld(MMODE))
+    I()
+    I(jc("BIT", "MO23", bit=1))
+    I(jnc("BIT", "MO0", bit=0))
+    I(setxi(2, POS), call("DOTGT"))
+    I(jmp("DIRTYD"))
+    L("MO0")
+    I(setxi(2, PROJ), call("DOTGT"))
+    I(jmp("DIRTYD"))
+    L("MO23")
+    I(jc("BIT", "MO3", bit=0))
+    I(setxi(2, POS), call("DOTGT"))
+    I(*ld(VECOK))
+    I()
+    I(jnc("BIT", "DIRTYD", bit=0))
+    I(setxi(2, VEC), call("DOTGT"))
+    I(jmp("DIRTYD"))
+    L("MO3")
+    I(setxi(2, TEX), call("DOTGT"))
+    I(d1())
 
-# one target matrix in X2
-L("DOTGT")
-I(*ld(KIND))
-I()
-I(jc("BIT", "DOT23", bit=1))
-I(jc("BIT", "DOTM", bit=0))
-setx_from(SRCM, 1)
-I(jmp("COPY16"))
-L("DOTM")
-setx_from(SRCM, 1)
-I(setxi(3, TMP))
-I(*ld(ROWS))
-I()
-I(lcr(), call("MROWS"))
-I(setxi(1, TMP))
-I(ra(ROWS), op("SUB", "QA", 3, fl=True))
-I()
-I(jc("Z", "COPY12"))
-I(jmp("COPY16"))
-L("DOT23")
-I(jc("BIT", "TRANSM", bit=0))
-I(jmp("SCALEM"))
+    # one target matrix in X2
+    L("DOTGT")
+    I(*ld(KIND))
+    I()
+    I(jc("BIT", "DOT23", bit=1))
+    I(jc("BIT", "DOTM", bit=0))
+    setx_from(SRCM, 1)
+    I(jmp("COPY16"))
+    L("DOTM")
+    setx_from(SRCM, 1)
+    I(setxi(3, TMP))
+    I(*ld(ROWS))
+    I()
+    I(lcr(), call("MROWS"))
+    I(setxi(1, TMP))
+    I(ra(ROWS), op("SUB", "QA", 3, fl=True))
+    I()
+    I(jc("Z", "COPY12"))
+    I(jmp("COPY16"))
+    L("DOT23")
+    I(jc("BIT", "TRANSM", bit=0))
+    I(jmp("SCALEM"))
+
+
+if FF:
+    # FF: MTX_MULT_4x3 and 3x3 from the parameters (X1 = PARAM, s[3r + k]): s's column 3 is (0, 0, 0, 0x1000)
+    # (REALIGN's), so an element of rows 0-2 is 3 MACs and of row 3 (4x3) 3 plus m[3][c] * 0x1000, the same
+    # sums; MP43 is row 3, then MP33 rows 0-2 into X3 (TMP), each element extracted 3 after its last MAC.
+    # Entered at MP33, the stream's first extraction (row 3's last element, into TMP + 15) is a stale word
+    # MUL33 never copies back
+    scope("mp")
+    ins = []
+    ext = []
+    for r in (3, 0, 1, 2):
+        if r == 0:
+            mp33_at = len(ins)
+        for c in range(4):
+            for k in range(3):
+                ins.append([ra(3 * r + k, 1), rb(4 * k + c, 2), mac("LD" if k == 0 else "ADD", "QA", "QB"), nh()])
+            if r == 3:
+                ins.append([ra(12 + c, 2), mac("ADD", "QA", 0x1000), nh()])
+            ext.append((len(ins) - 1 + 3, 4 * r + c))
+    while len(ins) < max(a_ for a_, _ in ext) + 1:
+        ins.append([nh()])
+    for a_, e_ in ext:
+        ins[a_] += [op("PASSX", "ACCX", sh=12), w(e_, 3)]
+    ins[-1] += [ret()]
+    for i_, parts in enumerate(ins):
+        if i_ == 0:
+            L("MP43")
+        if i_ == mp33_at:
+            L("MP33")
+        I(*parts)
+    scope(None)
+
+    def mulp(name, rows4, load=False):
+        """MTX_MULT_4x3 / 3x3 (MTX_LOAD_4x3: load) on the mode's matrix (and the vector matrix in mode 2), as
+        MATOP's kinds 1 and 0"""
+        L(name)
+        m23, m0, m3 = u("p23"), u("p0"), u("p3")
+
+        def tgt(m):
+            if load:
+                I(setxi(2, m), call("LD43"))
+                return
+            I(setxi(2, m))
+            I(setxi(1, PARAM))
+            I(setxi(3, TMP), call("MP43" if rows4 else "MP33"))
+            I(setxi(1, TMP), call("COPY16" if rows4 else "COPY12"))
+        I(*ld(MMODE))
+        I()
+        I(jc("BIT", m23, bit=1))
+        I(jnc("BIT", m0, bit=0))
+        tgt(POS)
+        I(jmp("DIRTYD"))
+        L(m0)
+        tgt(PROJ)
+        I(jmp("DIRTYD"))
+        L(m23)
+        I(jc("BIT", m3, bit=0))
+        tgt(POS)
+        tgt(VEC)
+        I(jmp("DIRTYD"))
+        L(m3)
+        tgt(TEX)
+        if load:
+            nops(2)                    # LD43's last TEX words before a dispatch (the transform reads TEX's lanes)
+        I(d1())
+
+    def mdisp(name, tgt, vec):
+        """a matrix command on the mode's matrix (and the vector matrix in mode 2 when vec), as MATOP: tgt(m)
+        emits the work on matrix m"""
+        L(name)
+        m23, m0, m3 = u("q23"), u("q0"), u("q3")
+        I(*ld(MMODE))
+        I()
+        I(jc("BIT", m23, bit=1))
+        I(jnc("BIT", m0, bit=0))
+        tgt(POS)
+        I(jmp("DIRTYD"))
+        L(m0)
+        tgt(PROJ)
+        I(jmp("DIRTYD"))
+        L(m23)
+        I(jc("BIT", m3, bit=0))
+        tgt(POS)
+        if vec:
+            tgt(VEC)
+        I(jmp("DIRTYD"))
+        L(m3)
+        tgt(TEX)
+        nops(2)                        # its last TEX words before a dispatch (the transform reads TEX's lanes)
+        I(d1())
+
+    def t_call(r):
+        return lambda m: I(setxi(2, m), call(r))
+
+    def t_copy(src):
+        def f(m):
+            I(setxi(1, src))
+            I(setxi(2, m), call("COPY16"))
+        return f
+
+    def t_mul44(m):
+        I(setxi(2, m))
+        I(setxi(1, PARAM))
+        I(setxi(3, TMP))
+        I(lci(4), call("MROWS"))
+        I(setxi(1, TMP), call("COPY16"))
+
+    xclear()
+    mulp("MUL43", True)
+    mulp("MUL33", False)
+    mulp("LOAD43", True, load=True)
+    mdisp("SCALEF", t_call("SCALEM"), False)
+    mdisp("TRANSF", t_call("TRANSM"), True)
+    mdisp("IDENTHF", t_copy(IDENT), True)
+    mdisp("LOAD44F", t_copy(PARAM), True)
+    mdisp("MUL44F", t_mul44, True)
 
 
 L("SCALEM")
@@ -799,8 +979,10 @@ L("VTX16")
 I(ra(PARAM), op("SX16", "QA"), w(CURV))        # ExecParams[0], [1]: the PARAM words
 I(ra(PARAM), op("SAR", "QA", 16), w(CURV + 1))
 I(ra(PARAM + 1), op("SX16", "QA"), w(CURV + 2), jmp("SUBV"))
-L("VTX10")
-I(op("SHL", "P", 22))
+if not FF:
+    L("VTX10")
+    I(op("SHL", "P", 22))
+L("VTX10b")
 I(op("SAR", "R", 16), w(CURV))
 I(op("SHL", "P", 12))
 I(op("AND", "R", 0xFFC00000))
@@ -808,18 +990,28 @@ I(op("SAR", "R", 16), w(CURV + 1))
 I(op("SHL", "P", 2))
 I(op("AND", "R", 0xFFC00000))
 I(op("SAR", "R", 16), w(CURV + 2), jmp("SUBV"))
-L("VTXXY")
-I(op("SX16", "P"), w(CURV))
+if not FF:
+    L("VTXXY")
+    I(op("SX16", "P"), w(CURV))
+L("VTXXYb")
 I(op("SAR", "P", 16), w(CURV + 1), jmp("SUBV"))
-L("VTXXZ")
-I(op("SX16", "P"), w(CURV))
+if not FF:
+    L("VTXXZ")
+    I(op("SX16", "P"), w(CURV))
+L("VTXXZb")
 I(op("SAR", "P", 16), w(CURV + 2), jmp("SUBV"))
-L("VTXYZ")
-I(op("SX16", "P"), w(CURV + 1))
+if not FF:
+    L("VTXYZ")
+    I(op("SX16", "P"), w(CURV + 1))
+L("VTXYZb")
 I(op("SAR", "P", 16), w(CURV + 2), jmp("SUBV"))
-L("VTXDIFF")
+if not FF:
+    L("VTXDIFF")
 for k, sh in enumerate((22, 12, 2)):
-    I(op("SHL", "P", sh))
+    if k or not FF:
+        I(op("SHL", "P", sh))
+    if k == 0:
+        L("VTXDIFFb")
     I(op("SAR", "R", 22))
     I(rb(CURV + k), op("ADD", "R", "QB"))
     I(op("SX16", "R"), w(CURV + k), *((jmp("SUBV"),) if k == 2 else ()))
@@ -907,6 +1099,47 @@ def transform_both(xg):
         for v in (a, b):
             v[3] = v[3] + [dirty(2)]
             v[-1] = v[-1] + [jc("PSTEP", "SUBP")]
+    if FF and FF_VM and PU and LUNIT:
+        # FF: the lighting unit may still work on this vertex's colour when the transform starts (SUBV no
+        # longer waits): TexCoords first (the texture variant writes G_T again at its end), CURCOL after a
+        # LBUSY test at the second step (a busy unit: LTW waits, then the rest as below); the early-start
+        # window (dirty(2)) after the CURCOL reads
+        for v in (a, b):
+            for k in range(3):
+                v[k] = [p_ for p_ in v[k] if not (isinstance(p_, dict) and p_.get("wa") == G_C + k)]
+                v[k] = [p_ for p_ in v[k] if not (isinstance(p_, dict) and p_.get("xs") == E["XS"]["ATR"])]
+            v[3] = [p_ for p_ in v[3] if p_ != dirty(2)]
+        def strip_alu(parts):
+            return [p_ for p_ in parts if not (isinstance(p_, dict) and ("aop" in p_ or "wa" in p_))]
+        a = [list(x) for x in a]
+        b = [list(x) for x in b]
+        for v in (a, b):
+            v[3] = strip_alu(v[3]) if v is a else v[3]
+            v[4] = strip_alu(v[4]) if v is a else v[4]
+        for v in (a, b):
+            v[0] += [op("PASSX", atr(TEXC)), w(G_T, xg)]
+            v[1] += [op("PASSX", atr(TEXC + 1)), w(G_T + 1, xg)]
+            v[2] += [op("PASSX", atr(CURCOL)), w(G_C, xg)]
+            v[3] += [op("PASSX", atr(CURCOL + 1)), w(G_C + 1, xg)]
+            v[4] += [op("PASSX", atr(CURCOL + 2)), w(G_C + 2, xg)]
+            v[5] += [dirty(2)]
+        scope(u("xf"))
+        I(*a[0])
+        I(*a[1], jc("LBUSY", "LTW"))
+        for i in range(2, len(a)):
+            I(*a[i], *((jc("TEX3", "SV3"),) if i == 2 else ()))
+        I(disp(NOENT))
+        L("SV3")
+        for parts in b[3:]:
+            I(*parts)
+        I(disp(NOENT))
+        L("LTW")                       # the lighting unit's colour: wait, then as from the third step
+        I(jc("LBUSY", "LTW"))
+        for i in range(2, len(a)):
+            I(*a[i], *((jc("TEX3", "SV3"),) if i == 2 else ()))
+        I(disp(NOENT))
+        scope(None)
+        return
     scope(u("xf"))
     for i, parts in enumerate(a):
         I(*parts, *((jc("TEX3" if PU else "Z", "SV3"),) if i == sh - 1 else ()))
@@ -923,20 +1156,34 @@ xclear()
 xrange(1, GRP, GRP + 512 - 16)
 xrange(2, 0, 6)              # SVNEXT: the slot number
 L("SUBV")
-if LUNIT:
-    I(jc("LBUSY", "SUBV"))             # CURCOL from the lighting unit
-I(jnc("DIRTY", "SVPU"))
-I(call("CLIPUPD"))
-L("SVPU")
-if PU:
+if PU and LUNIT:
     # the dispatcher set X1 to the vertex's slot group, and goes straight to SV1 when nothing waits (the
-    # lighting unit idle, the clip matrix clean, no TEXM write in flight); CLIPUPD took X1
+    # lighting unit idle, the clip matrix clean, no TEXM write in flight); here R takes it while the
+    # lighting unit finishes, again after CLIPUPD (which took X1)
+    I(pu(PU_CUR), *(() if FF and FF_VM else (jc("LBUSY", "SUBV"),)))   # CURCOL from the lighting unit (FF: in the transform)
+    I(jnc("DIRTY", "SVPU"))
+    I(call("CLIPUPD"))
+    I(pu(PU_CUR))
+    I()
+    L("SVPU")
+    I(setx(1))
+    L("SV1")
+    DISP_ENTRY.extend(["SUBV", "SV1"])
+elif PU:
+    I(jnc("DIRTY", "SVPU"))
+    I(call("CLIPUPD"))
+    L("SVPU")
     I(pu(PU_CUR))
     I()
     I(setx(1))
     L("SV1")
     DISP_ENTRY.extend(["SUBV", "SV1"])
 else:
+    if LUNIT:
+        I(jc("LBUSY", "SUBV"))         # CURCOL from the lighting unit
+    I(jnc("DIRTY", "SVPU"))
+    I(call("CLIPUPD"))
+    L("SVPU")
     L("SV1")
     I(*ld(CURSLOT))
     I(ra(TEXM), op("SUB", "QA", 3, fl=True))
@@ -1043,6 +1290,11 @@ for dst, xv, comp in ((D0Y, 1, 1), (D2W, 3, 3), (D0W, 1, 3), (D2Y, 3, 1), (D2X, 
 #   Y: MACs 2, 3; low word at 6; fit at 8
 #   Z: MACs 4, 5; low word at 8; fit at 10; dot MACs 8, 9, 11; flags at 16
 scope("cull")
+OCM, SA = OCANY, T2 + 4                 # (as below: the outcode mask of the list; the trivial-reject AND)
+# PU: the polygon unit's list words (CR5's) LA and LN go to the register file in the cull's free ALU and write
+# slots before its first NFIT branch (CULLBIG rejoins at CULLDOT), OCM in CULLDOT's flag wait (the outcode unit
+# has written the last vertex's by then); a rejected polygon's are never read (the box test sets its own)
+PUC = PU and FF                        # the list words in the cull's free slots
 I(ra(D0Y), rb(D2W), mac("LD", "QA", "QB"))                                    # 0
 # PU: wholly outside one plane (clipstart 0): rejected, as CR4 does before the cull (the outcomes agree: such a
 # polygon is rejected after the cull too), and before its first NFIT branch. The last vertex's outcodes are
@@ -1053,18 +1305,24 @@ I(ra(D0X), rb(D2W), mac("SUB", "QA", "QB"))                                   # 
 I(ra(D0X), rb(D2Y), mac("LD", "QA", "QB"), op("PASSX", "ACCX"), w(NX), nh())  # 4
 I(ra(D0Y), rb(D2X), mac("SUB", "QA", "QB"), nh())                             # 5
 I(op("PASSX", "ACCX"), w(NY), jc("NFIT", "CULLBIG"), nh())                    # 6
-I(nh())                                                                        # 7
+I(nh(), *((pu(PU_LA), w(LA)) if PUC else ()))                                 # 7
 I(ra(0, 2), rb(NX), mac("LD", "QA", "QB"), op("PASSX", "ACCX"), w(NZ),
   jc("NFIT", "CULLBIG"), nh())                                                # 8
-I(ra(1, 2), rb(NY), mac("ADD", "QA", "QB"), nh())                             # 9
-I(jc("NFIT", "CULLBIG"), nh())                                                # 10
-I(ra(3, 2), rb(NZ), mac("ADD", "QA", "QB"), nh())                             # 11
+I(ra(1, 2), rb(NY), mac("ADD", "QA", "QB"), nh(), *((pu(PU_LA + 1), w(LA + 1)) if PUC else ()))   # 9
+I(jc("NFIT", "CULLBIG"), nh(), *((pu(PU_LA + 2), w(LA + 2)) if PUC else ()))  # 10
+I(ra(3, 2), rb(NZ), mac("ADD", "QA", "QB"), nh(), *((pu(PU_LA + 3), w(LA + 3)) if PUC else ()))   # 11
 scope(None)
 L("CULLDOT")
-I(*ld(CATTR))
-I()
-I()
-I()
+if PUC:
+    I(pu(PU_LN), w(LN))
+    I()
+    I(pu(PU_OCM, fl=True), w(OCM))     # CR5's Z test (CS and SA there: the box test's clip reads the last kept polygon's)
+    I(*ld(CATTR))
+else:
+    I(*ld(CATTR))
+    I()
+    I()
+    I()
 I(jc("AZ", "CFACE"))                   # dot == 0: facing, kept
 I(jc("A63", "CNEG"))
 I(jnc("BIT", "PREJ", bit=6))           # dot > 0: needs attr bit 6
@@ -1088,6 +1346,9 @@ L("CULLBIG")
 # 3c + 2 it holds c for two reads, 3c + 4 (low word) and 3c + 5 (high)
 scope("cbig")
 ins = [[nh()] for _ in range(12)]
+if PUC:                                # the list words the cull's later slots would have taken
+    for k, i_ in enumerate((0, 1, 2, 3)):
+        ins[i_] += [pu(PU_LA + k), w(LA + k)]
 for c, (a0, b0, a1, b1, lo, hi) in enumerate(((D0Y, D2W, D0W, D2Y, NXL, NXH),
                                               (D0W, D2X, D0X, D2W, NYL, NYH),
                                               (D0X, D2Y, D0Y, D2X, NZL, NZH))):
@@ -1214,13 +1475,19 @@ if PU:
     # a polygon the cull keeps: its list words from the polygon unit (CULLOK's: LA, LN, CS, POOL, SA, and OCM
     # in R for the tests below)
     L("CR5")
-    for k in range(4):
-        I(pu(PU_LA + k), w(LA + k))
-    I(pu(PU_LN), w(LN))
-    I(pu(PU_CS), w(CS))
-    I(li(grp(NSLOTGRP)), w(POOL))
-    I(pu(PU_SA), w(SA))
-    I(pu(PU_OCM, fl=True), w(OCM))
+    if PUC:
+        I(li(grp(NSLOTGRP)), w(POOL))      # LA, LN, OCM at the cull (CULLDOT); the flags are OCM's
+        I(pu(PU_CS), w(CS))
+        I(pu(PU_SA), w(SA))
+        I(*ld(OCM))                        # R = OCM for the far-plane bit below
+    else:
+        for k in range(4):
+            I(pu(PU_LA + k), w(LA + k))
+        I(pu(PU_LN), w(LN))
+        I(pu(PU_CS), w(CS))
+        I(li(grp(NSLOTGRP)), w(POOL))
+        I(pu(PU_SA), w(SA))
+        I(pu(PU_OCM, fl=True), w(OCM))
 else:
     cullok()
 I()
@@ -1247,30 +1514,58 @@ L("NOTRIV")
 I(li(grp(NSLOTGRP)), w(POOL))
 I(li(1), w(ATT))
 I(call("CLIP"))
+I(*ld(T2 + 13))                        # FARF (defined with the clipper below)
+I()
+I(jc("BIT", "PREJ", bit=1))            # the clip ran out of pool groups
 I(*ld(LN, fl=True))
 I()
 I(jc("Z", "PREJ"))
-L("NOCLIP")
 # polygon/vertex RAM overflow
-I(*ld(NP))
-I(op("SUB", "R", 2048, fl=True))
-I(ra(NV), rb(LN), op("ADD", "QA", "QB"))
-I(jnc("LT", "POVF"))                   # NP >= 2048
-I(op("SUB", "R", 6145, fl=True))
-I()
-I(jnc("LT", "POVF"))                   # NV + LN > 6144
-# the outcome now, unless the zero-dot rule may still reject it
-I(op("XOR", "ZDOT", 0xFFFFFF, fl=True))
-I(*ld(CATTR))
-I(jc("Z", "OCNOW"))
-I(li(1), w(ZWAIT))
-I(jnc("BIT", "VPORT", bit=13))
-L("OCNOW")
-I(li(0), w(ZWAIT))
-I(*ld(LN))                             # OCACC inline
-I(op("XOR", "R", 4))
-I(op("SLT", "R", 1))
-I(op("SHL", "R", 1), out("OC"), jmp("VPORT"))
+if FF:
+    L("NOCLIP")
+    # as below: the zero-dot test first, then two copies of the overflow tests (a jc reads the newest flags or R
+    # made at least two instructions before it, so no other flag write between)
+    I(op("XOR", "ZDOT", 0xFFFFFF, fl=True))
+    I(*ld(NP))
+    I(op("SUB", "R", 2048, fl=True), jnc("Z", "NCZ"))         # the zero-dot rule may still reject it: NCZ
+    I(ra(NV), rb(LN), op("ADD", "QA", "QB"))
+    I(op("SUB", "R", 6145, fl=True), jnc("LT", "POVF"))        # NP >= 2048
+    I(ra(LN), op("XOR", "QA", 4))
+    I(op("SLT", "R", 1), jnc("LT", "POVF"))                    # NV + LN > 6144; LN == 4
+    I(op("SHL", "R", 1), out("OC"))                            # the outcome now
+    I(li(0), w(ZWAIT), jmp("VPORT"))
+    L("NCZ")
+    I(ra(NV), rb(LN), op("ADD", "QA", "QB"))
+    I(op("SUB", "R", 6145, fl=True), jnc("LT", "POVF"))
+    I(*ld(CATTR))
+    I(li(1), w(ZWAIT), jnc("LT", "POVF"))
+    I(jnc("BIT", "VPORT", bit=13))
+    I(*ld(LN))
+    I(op("XOR", "R", 4))
+    I(op("SLT", "R", 1))
+    I(op("SHL", "R", 1), out("OC"))
+    I(li(0), w(ZWAIT), jmp("VPORT"))
+if not FF:
+    L("NOCLIP")
+    I(*ld(NP))
+    I(op("SUB", "R", 2048, fl=True))
+    I(ra(NV), rb(LN), op("ADD", "QA", "QB"))
+    I(jnc("LT", "POVF"))                   # NP >= 2048
+    I(op("SUB", "R", 6145, fl=True))
+    I()
+    I(jnc("LT", "POVF"))                   # NV + LN > 6144
+    # the outcome now, unless the zero-dot rule may still reject it
+    I(op("XOR", "ZDOT", 0xFFFFFF, fl=True))
+    I(*ld(CATTR))
+    I(jc("Z", "OCNOW"))
+    I(li(1), w(ZWAIT))
+    I(jnc("BIT", "VPORT", bit=13))
+    L("OCNOW")
+    I(li(0), w(ZWAIT))
+    I(*ld(LN))                             # OCACC inline
+    I(op("XOR", "R", 4))
+    I(op("SLT", "R", 1))
+    I(op("SHL", "R", 1), out("OC"), jmp("VPORT"))
 L("POVF")
 I(out("OVF"), jmp("PREJ"))
 
@@ -1329,26 +1624,58 @@ def list_loop(start_var, body, skip, count=True):
 
 # ---- screen coordinates, Z, final colour and bounds of the new vertices
 # (clipstart..LN-1); bounds only for the reused ones
+if FF:
+    # the reused pair's bounds (list entries 0, 1: IDX 0 and 1), then the loop's IDX/IDXB for CS = 2
+    L("VPRU")
+    I(li(0), w(IDX))
+    I(li(15), w(IDXB))
+    setx_from(LA, 1)
+    bvx()
+    I(li(1), w(IDX))
+    I(li(14), w(IDXB))
+    setx_from(LA + 1, 1)
+    bvx()
+    I(li(2), w(IDX))
+    I(li(13), w(IDXB))
+    I(li(LA + 2), jmp("VPRUB"))         # R = LA + CS for VPRUB's setx
 L("VPORT")
+if FF:
+    # FF: the bounds' start values, the list's IDX/IDXB from CS, vp_ff's prologue and the W-buffer choice in one
+    # pass (a jc on R's bit or the flags reads them two instructions after they are made); the reused pair's
+    # bounds (CS = 2) in VPRU
+    I(li(192 << 4), w(KT))
+    I(li(15), w(KB))
+    I(li(0), w(WOR))
+    I(w(DEG))
+    I(ra(CS), op("PASSX", "QA"), w(IDX))
+    I(ra(CS), op("RSUB", "QA", 15), w(IDXB))
+    I(ra(CS), op("ADD", "QA", LA), jc("BIT", "VPRU", bit=1))   # R two back: CS
+    L("VPRUB")
+    I(ra(LN), rb(CS), op("SUB", "QA", "QB", fl=True))
+    I(setx(2), *ld(FATTR))             # X2 = LA + CS
+    I(lcr(), jc("Z", "VPDONE"))        # LC = LN - CS
+    I(*ld(0, 2), jc("BIT", "VPNW", bit=1))   # the first new vertex (X1 in vp_ff); W-buffering (FATTR bit 1)
 if VFIN == 1:
     I(jc("VBUSY", "VPORT"))       # the last polygon's bounds are written
-I(li(192 << 4), w(KT))
-I(li(15), w(KB))
-I(li(0), w(WOR))
-I(w(DEG))
-I(w(IDX))
-I(*ld(CS))
-I(li(15), w(IDXB))
-I(jnc("BIT", "VPNEW", bit=1))
-setx_from(LA, 1)
-bvx()
-I(li(1), w(IDX))
-I(li(14), w(IDXB))
-setx_from(LA + 1, 1)
-bvx()
-L("VPNEW")
-list_loop(CS, lambda: I(call("VPV")), "VPDONE")
-I(jmp("VPDONE"))
+if not FF:
+    I(li(192 << 4), w(KT))
+    I(li(15), w(KB))
+    I(li(0), w(WOR))
+    I(w(DEG))
+    I(w(IDX))
+    I(*ld(CS))
+    I(li(15), w(IDXB))
+    I(jnc("BIT", "VPNEW", bit=1))
+    setx_from(LA, 1)
+    bvx()
+    I(li(1), w(IDX))
+    I(li(14), w(IDXB))
+    setx_from(LA + 1, 1)
+    bvx()
+if not FF:
+    L("VPNEW")
+    list_loop(CS, lambda: I(call("VPV")), "VPDONE")
+    I(jmp("VPDONE"))
 
 
 # FinalColor = Color >> 12, then (c << 4) + 0xF unless 0; the record's 9 bits
@@ -1388,7 +1715,112 @@ def pack_words():
 # viewport transform of the vertex in X1 (melonDS: W to 24 bits; the
 # divisions through a 32-bit divider, halved when W > 0xFFFF), Z, colour,
 # bounds; the colour, packing and bounds work runs during the divisions
-if VFIN:
+VPS, VPZK, VPKB = PK, PK + 1, PK + 2  # FF viewport: W > 0xFFFF (the halving shift), the Z factor, KB's low bits
+
+
+def vp_ff(wbuf):
+    """FF: the viewport loop over the new vertices CS..LN-1 (list_loop's X2, IDX, IDXB, LC), VPV's results
+    bit for bit with the bounds inline (VFIN-lite's BVX), scheduled around the divider: X, Y, then Z
+    (not when W-buffering), each started as the last one ends, everything else in their waits; the
+    next vertex is loaded during Z's (X3 keeps this one for its G_FZ write). The colour and texture
+    coordinate words are read on idle ports after the G_W write (gpu3d_gxvfin)."""
+    I()                                # VPORT's prologue (X2, LC, IDX, IDXB) loaded R with the first vertex
+    I(setx(1))
+    top, w0, vz = u("vpf"), u("vpw0"), u("vpz")
+    # nh: the checker takes X-relative words as ranges; these three read words of their own vertex that
+    # the loop's writes (G_FX, G_FY, the last vertex's G_FZ through X3) never are
+    scope(top)
+    L(top)
+    I(jc("VARM", top))                 # the last vertex's words are written; arms the unit for G_W
+    I(ra(G_P + 3, 1), op("AND", "QA", 0xFFFFFF, fl=True), w(G_W, 1), movx(3, 1), nh())
+    I(ra(G_T, 1), rb(G_C, 1), op("SHR", "R", 16))
+    I(ra(G_C + 1, 1), rb(G_C + 2, 1), op("MIN", "R", 1), w(VPS), jc("Z", w0))     # W > 0xFFFF: halved
+    I(ra(G_W, 1), rb(G_P + 0, 1), op("ADD", "QA", "QB"), w(VPT))                  # posX = x + w
+    I(ra(G_W, 1), rb(G_P + 1, 1), op("SUB", "QA", "QB"), w(VPT + 1))              # posY = w - y
+    I(ra(G_W, 1), rb(VPS), op("SHR", "QA", "QB"))
+    I(ra(G_T + 1, 1), op("SHL", "R", 1), w(VPT + 2))                              # den = (w >> s) << 1
+    I(ra(VPT), rb(VPS), op("SHR", "QA", "QB"))
+    I(rb(VP4), mac("LD", "R", "QB"))                                              # posX * Viewport[4]
+    I(ra(VPT + 1), rb(VPS), op("SHR", "QA", "QB"), w(VPT + 1))
+    if not wbuf:
+        I(ra(G_P + 2, 1), op("SAR", "QA", 31), w(ZM))                             # z < 0
+    I(rb(VPT + 2), op("PASSX", "R", "QB"), divs("D32", 10))                       # X
+    if not wbuf:
+        I(ra(VPT + 1), rb(VP5), mac("LD", "QA", "QB"), op("SHL", "R", 15))        # posY * Viewport[5]
+        I(op("OR", "R", 0x4000), w(VPZK))                                        # +-0x4000: |z| * 0x4000
+    else:
+        I(ra(VPT + 1), rb(VP5), mac("LD", "QA", "QB"))
+    I(ra(G_W, 1), rb(WOR), op("OR", "QA", "QB"), w(WOR))
+    I(ra(G_W, 1), op("SLT", "QA", 1))
+    I(rb(DEG), op("OR", "R", "QB"), w(DEG))
+    waitd()
+    I(rb(VPT + 2), op("PASSX", "Q", "QB"), divs("D32", 10))                       # Y; R = X's quotient
+    I(rb(VP0), op("ADD", "R", "QB"))
+    I(op("AND", "R", 0x1FF), w(G_FX, 1))
+    if not wbuf:
+        I(ra(G_P + 2, 1), rb(VPZK), mac("LD", "QA", "QB"), op("SHL", "R", 4), nh())
+    else:
+        I(op("SHL", "R", 4))
+    I(rb(IDXB), op("OR", "R", "QB"), w(VPKB))                                    # x << 4 | 15 - i
+    waitd()
+    if not wbuf:
+        I(rb(G_W, 1), op("PASSX", "Q", "QB"), divs("D64", 16), nh())              # Z; R = Y's quotient
+        I(rb(VP3), op("ADD", "R", "QB"))
+    else:
+        I(rb(VP3), op("ADD", "Q", "QB"))
+    I(op("AND", "R", 0xFF), w(G_FY, 1))
+    I(op("SHL", "R", 13))
+    I(rb(VPKB), op("OR", "R", "QB"))
+    I(rb(KB), op("MAX", "R", "QB"), w(KB))                                       # KB = max(y << 13 | x << 4 | 15 - i)
+    I(ra(G_FY, 1), op("SHL", "QA", 4))
+    I(rb(IDX), op("OR", "R", "QB"))
+    I(rb(KT), op("MIN", "R", "QB"), w(KT))                                       # KT = min(y << 4 | i)
+    tail = u("vpt")
+    L(tail)
+    I(ra(IDX), op("ADD", "QA", 1), w(IDX), addx(2, 1))
+    I(ra(IDXB), op("SUB", "QA", 1), w(IDXB))
+    I(*ld(0, 2))                       # the next vertex (past the last one: a list word, unused)
+    I()
+    I(setx(1))
+    if not wbuf:
+        waitd()
+        # Z = ((z * 0x4000) / w + 0x3FFF) * 0x200 as s32, clamped
+        I(rb(ZM), op("XOR", "Q", "QB"))
+        I(rb(ZM), op("SUB", "R", "QB"))
+        I(op("ADD", "R", 0x3FFF))
+        I(op("SHL", "R", 9))
+        I(op("MAX", "R", 0))
+        I(op("MIN", "R", 0xFFFFFF), w(G_FZ, 3), djnz(top))
+    else:
+        I(djnz(top))
+    I(jmp("VPDONE"))
+    scope(None)
+    L(w0)                              # w == 0: position 0, Z 0x7FFE00 (as VPV's VPW0)
+    I(li(0), ra(G_T + 1, 1), w(G_FX, 1))
+    I(w(G_FY, 1))
+    I(li(0x7FFE00), w(G_FZ, 1))
+    I(call("BVX"))
+    I(jmp(tail) if wbuf else jmp(vz))
+    if not wbuf:
+        # the Z path's tail without a division in flight
+        L(vz)
+        I(ra(IDX), op("ADD", "QA", 1), w(IDX), addx(2, 1))
+        I(ra(IDXB), op("SUB", "QA", 1), w(IDXB))
+        I(*ld(0, 2))
+        I()
+        I(setx(1), djnz(top))
+        I(jmp("VPDONE"))
+
+
+if FF:
+    xclear()
+    xrange(1, GRP, GRP + 512 - 16)
+    xrange(2, LA, LA + 11)             # list_loop: the list entry (one past the last at the end)
+    xrange(3, GRP, GRP + 512 - 16)
+    vp_ff(False)
+    L("VPNW")
+    vp_ff(True)
+elif VFIN:
     # gpu3d_gxvfin does the colour, the beat words and the new vertex's bounds from this traffic: armed by
     # the VARM wait, the G_W write starts it, the colour and texture coordinate words are read on idle ports (both paths),
     # the G_FY write gives the bounds. It takes one vertex at a time.
@@ -1504,15 +1936,16 @@ else:
     I(call("COL2PK"))
     I(jmp("BVX"))
 
-# the final colour and the pre-packed beat words, in two parts
-L("COL01")
-fcol(0, FC)
-fcol(1, FC + 1)
-I(ret())
-L("COL2PK")
-fcol(2, FC + 2)
-pack_words()
-I(ret())
+# the final colour and the pre-packed beat words, in two parts (FF: gpu3d_gxvfin's)
+if not FF:
+    L("COL01")
+    fcol(0, FC)
+    fcol(1, FC + 1)
+    I(ret())
+    L("COL2PK")
+    fcol(2, FC + 2)
+    pack_words()
+    I(ret())
 
 # ---- zero-dot rule: rejected when every vertex has the first one's screen
 # position and a W beyond DISP_1DOT_DEPTH (only when the outcome waited)
@@ -1552,63 +1985,107 @@ if VFIN:
 # K4: the smallest multiple of 4 with WOR >> k == 0 (WOR < 2^24, so k <= 24); it also sets kreg,
 # which only CULLBIG's FSH reads, after its own K4
 I(ra(WOR), op("K4", "QA"), w(WS))
-L("WSD")
-I(op("RSUB", "R", 16))
-I(op("MAX", "R", 0), w(WSL))           # left shift 16 - wsize
-I(ra(WS), op("SUB", "QA", 16))
-I(op("MAX", "R", 0), w(WSR))           # right shift wsize - 16
-I(ra(KB), op("SHR", "QA", 13))
-I(op("SLT", "R", 193))
-I(op("XOR", "R", 1))
-I(rb(DEG), op("OR", "R", "QB"), w(DEG))
-
-# ---- sort key, header beat
 HV = T2 + 14                           # 2 words
-I(ra(KB), op("SHR", "QA", 13), w(HV))                  # YBottom
-I(ra(KT), op("SHR", "QA", 4), w(HV + 1))               # YTop
-I(ra(TRT), rb(TRA), op("OR", "QA", "QB"))
-I(op("SHL", "R", 16), w(T))
-I(ra(HV), op("SHL", "QA", 8))
-I(rb(HV + 1), op("OR", "R", "QB"))
-if not USORT:
-    I(rb(T), op("OR", "R", "QB"), w(T))
-    L("KEYW")
-    I(jc("SORTBUSY", "KEYW"))
-    I(*ld(T), out("KEY"))
-# word 2: texpal | n << 13 | vtop << 17 | vbot << 21 | ytop << 25;
-# word 3: ytop >> 7 | ybot << 1 | facing << 9 | wbuffer << 10 | degenerate << 11
-if not USORT:
-    I(ra(HV), op("SHL", "QA", 3), w(T + 1))
-    I(ra(FACING), op("SHL", "QA", 11))
-else:
-    # USORT: the key reads its buckets; count it in {t, ybot}; NumPolygons to the front of {t, ytop}
-    I(rb(T), op("OR", "R", "QB"), w(T), sm("RB"))
-    I(ra(HV), op("SHL", "QA", 3), w(T + 1))
+if FF and USORT:
+    # FF: as below, one R chain for word 3's fields, the header's MACs on free ports; T+1 = ybot << 3 |
+    # facing << 11 | wbuffer << 12 | degenerate << 13 = ((deg << 2 | wb << 1 | facing) << 8 | ybot) << 3
+    L("WSD")
+    I(op("RSUB", "R", 16))
+    I(op("MAX", "R", 0), w(WSL))       # left shift 16 - wsize
+    I(ra(WS), op("SUB", "QA", 16))
+    I(op("MAX", "R", 0), w(WSR))       # right shift wsize - 16
+    I(ra(KB), op("SHR", "QA", 13), w(HV))                  # YBottom
+    I(op("SLT", "R", 193))
+    I(op("XOR", "R", 1))
+    I(rb(DEG), op("OR", "R", "QB"), w(DEG))
+    I(op("SHL", "R", 2))
+    I(rb(FATTR), op("OR", "R", "QB"))
+    I(op("BIC", "R", 1))               # FATTR bit 1: W-buffering
+    I(rb(FACING), op("OR", "R", "QB"))
+    I(op("SHL", "R", 8))
+    I(rb(HV), op("OR", "R", "QB"))
+    I(op("SHL", "R", 3), w(T + 1))
+    I(ra(KT), op("SHR", "QA", 4), w(HV + 1))               # YTop
+    I(ra(TRT), rb(TRA), op("OR", "QA", "QB"))
+    I(op("SHL", "R", 8))
+    I(rb(HV), op("OR", "R", "QB"), ra(TEXPAL), mac("LD", "QA", 1))
+    I(op("SHL", "R", 8))
+    # the key reads its buckets; count it in {t, ybot}; NumPolygons to the front of {t, ytop}
+    I(rb(HV + 1), op("OR", "R", "QB"), w(T), sm("RB"), ra(LN), mac("ADD", "QA", 1 << 13))
+    I(ra(KT), op("AND", "QA", 15), w(T + 2))               # VTop
     I(op("ADD", "SCT", 1), sm("WCT"))
-    I(ra(FACING), op("SHL", "QA", 11), sm("COMMIT"))
-I(rb(T + 1), op("OR", "R", "QB"), w(T + 1))
-I(ra(FATTR), op("AND", "QA", 2))
-I(op("SHL", "R", 11))
-I(rb(T + 1), op("OR", "R", "QB"), w(T + 1))
-I(ra(DEG), op("SHL", "QA", 13))
-I(rb(T + 1), op("OR", "R", "QB"), w(T + 1))
-I(ra(KT), op("AND", "QA", 15), w(T + 2))               # VTop
-I(ra(KB), op("AND", "QA", 15))
-I(op("RSUB", "R", 15), w(T + 3))                       # VBottom
-scope("hdr")
-I(ra(TEXPAL), mac("LD", "QA", 1))
-I(ra(LN), mac("ADD", "QA", 1 << 13))
-I(ra(T + 2), mac("ADD", "QA", 1 << 17))
-I(ra(T + 3), mac("ADD", "QA", 1 << 21))
-I(ra(HV + 1), mac("ADD", "QA", 1 << 25))
-I(ra(T + 1), mac("ADD", "QA", 1 << 30))
-waito()
-I(*ld(CATTR), out("O0"))
-I(*ld(TEXP), out("O1"))
-I(op("PASSX", "ACCX"), out("O2"))
-I(op("PASSX", "ACCX", sh=32), out("O3"))
-I(out("PUSHH"))
-scope(None)
+    I(ra(KB), op("AND", "QA", 15), sm("COMMIT"))
+    I(op("RSUB", "R", 15), w(T + 3))                       # VBottom
+    scope("hdrf")
+    I(ra(HV + 1), mac("ADD", "QA", 1 << 25))
+    I(ra(T + 1), mac("ADD", "QA", 1 << 30))
+    I(ra(T + 2), mac("ADD", "QA", 1 << 17))
+    I(ra(T + 3), mac("ADD", "QA", 1 << 21))
+    waito()
+    I(*ld(CATTR), out("O0"))
+    I(*ld(TEXP), out("O1"))
+    I(op("PASSX", "ACCX"), out("O2"))
+    I(op("PASSX", "ACCX", sh=32), out("O3"))
+    I(out("PUSHH"), *ld(FATTR))
+    scope(None)
+else:
+    L("WSD")
+    I(op("RSUB", "R", 16))
+    I(op("MAX", "R", 0), w(WSL))           # left shift 16 - wsize
+    I(ra(WS), op("SUB", "QA", 16))
+    I(op("MAX", "R", 0), w(WSR))           # right shift wsize - 16
+    I(ra(KB), op("SHR", "QA", 13))
+    I(op("SLT", "R", 193))
+    I(op("XOR", "R", 1))
+    I(rb(DEG), op("OR", "R", "QB"), w(DEG))
+
+    # ---- sort key, header beat
+    I(ra(KB), op("SHR", "QA", 13), w(HV))                  # YBottom
+    I(ra(KT), op("SHR", "QA", 4), w(HV + 1))               # YTop
+    I(ra(TRT), rb(TRA), op("OR", "QA", "QB"))
+    I(op("SHL", "R", 16), w(T))
+    I(ra(HV), op("SHL", "QA", 8))
+    I(rb(HV + 1), op("OR", "R", "QB"))
+    if not USORT:
+        I(rb(T), op("OR", "R", "QB"), w(T))
+        L("KEYW")
+        I(jc("SORTBUSY", "KEYW"))
+        I(*ld(T), out("KEY"))
+    # word 2: texpal | n << 13 | vtop << 17 | vbot << 21 | ytop << 25;
+    # word 3: ytop >> 7 | ybot << 1 | facing << 9 | wbuffer << 10 | degenerate << 11
+    if not USORT:
+        I(ra(HV), op("SHL", "QA", 3), w(T + 1))
+        I(ra(FACING), op("SHL", "QA", 11))
+    else:
+        # USORT: the key reads its buckets; count it in {t, ybot}; NumPolygons to the front of {t, ytop}
+        I(rb(T), op("OR", "R", "QB"), w(T), sm("RB"))
+        I(ra(HV), op("SHL", "QA", 3), w(T + 1))
+        I(op("ADD", "SCT", 1), sm("WCT"))
+        I(ra(FACING), op("SHL", "QA", 11), sm("COMMIT"))
+    I(rb(T + 1), op("OR", "R", "QB"), w(T + 1))
+    I(ra(FATTR), op("AND", "QA", 2))
+    I(op("SHL", "R", 11))
+    I(rb(T + 1), op("OR", "R", "QB"), w(T + 1))
+    I(ra(DEG), op("SHL", "QA", 13))
+    I(rb(T + 1), op("OR", "R", "QB"), w(T + 1))
+    I(ra(KT), op("AND", "QA", 15), w(T + 2))               # VTop
+    I(ra(KB), op("AND", "QA", 15))
+    I(op("RSUB", "R", 15), w(T + 3))                       # VBottom
+    scope("hdr")
+    I(ra(TEXPAL), mac("LD", "QA", 1))
+    I(ra(LN), mac("ADD", "QA", 1 << 13))
+    I(ra(T + 2), mac("ADD", "QA", 1 << 17))
+    I(ra(T + 3), mac("ADD", "QA", 1 << 21))
+    I(ra(HV + 1), mac("ADD", "QA", 1 << 25))
+    I(ra(T + 1), mac("ADD", "QA", 1 << 30))
+    waito()
+    I(*ld(CATTR), out("O0"))
+    I(*ld(TEXP), out("O1"))
+    I(op("PASSX", "ACCX"), out("O2"))
+    I(op("PASSX", "ACCX", sh=32), out("O3"))
+    I(out("PUSHH"))
+    scope(None)
+
 
 # ---- vertex beats: FinalW = W normalized to 16 bits; Z, or W-buffering's
 # shifted W; word 0 = x | y << 9 | z << 17, word 1 = z >> 15 | w << 9 | W1
@@ -1640,13 +2117,67 @@ def beat(wbuf):
     I(out("PUSHV"))
 
 
-I(*ld(FATTR))
+def beats_ff(wbuf):
+    """FF: the vertex beats of list entries 0..LN-1 (LN >= 3), each loading the next entry's group into X3
+    while it works (X1 takes it with the push)"""
+    lb = u("bt")
+    I(rb(LN), op("OR", "ZERO", "QB"), setxi(2, LA))
+    I(*ld(LA))
+    I(lcr())                           # LC = LN
+    I(setx(1))                         # X1 = list entry 0
+    L(lb)
+    if wbuf:
+        I(ra(G_W, 1), rb(WSR), op("SHR", "QA", "QB"))
+        I(rb(WSR), op("SHL", "R", "QB"), ra(G_FX, 1), mac("LD", "QA", 1))  # z = (W >> s) << s
+        I(mac("ADD", "R", 1 << 17), ra(G_W, 1), rb(WSL), op("SHL", "QA", "QB"))
+        I(rb(WSR), op("SHR", "R", "QB"), ra(G_FY, 1), mac("ADD", "QA", 1 << 9))
+        I(op("SHL", "R", 11))
+        I(mac("ADD", "R", 1 << 30), ra(1, 2), op("PASSX", "QA"))
+        I()
+    else:
+        # word 1 = z >> 15 | FinalW << 9 | W1: FinalW << 9 | W1 by the ALU (BW1), the MACs only x, y << 9,
+        # z << 17 (no carries between them); the output wait three after the last beat's push
+        BW1 = PK + 3
+        I(ra(G_W, 1), rb(WSL), op("SHL", "QA", "QB"))
+        I(rb(WSR), op("SHR", "R", "QB"), ra(G_FX, 1), mac("LD", "QA", 1))
+        I(op("SHL", "R", 9))
+        waito()
+        I(rb(G_W1, 1), op("OR", "R", "QB"), w(BW1), ra(G_FY, 1), mac("ADD", "QA", 1 << 9))
+        I(rb(G_W2, 1), op("OR", "ZERO", "QB"), out("O2"), ra(G_FZ, 1), mac("ADD", "QA", 1 << 17))
+        I(ra(1, 2), op("PASSX", "QA"))                                    # the next entry's group
+        I(rb(G_W3, 1), op("OR", "ZERO", "QB"), out("O3"))
+        I(op("PASSX", "ACCX"), out("O0"), setx(3))
+        I(rb(BW1), op("OR", "ACCX", "QB", sh=32), out("O1"), addx(2, 1))
+        I(out("PUSHV"), movx(1, 3), djnz(lb))
+        I(jmp("COMMIT"))
+        return
+    I(setx(3))
+    waito()
+    I(op("PASSX", "ACCX"), out("O0"), addx(2, 1))
+    I(rb(G_W1, 1), op("OR", "ACCX", "QB", sh=32), out("O1"))
+    I(*ld(G_W2, 1), out("O2"))
+    I(*ld(G_W3, 1), out("O3"))
+    I(out("PUSHV"), movx(1, 3), djnz(lb))
+    I(jmp("COMMIT"))
+
+
+if not (FF and USORT):
+    I(*ld(FATTR))
 I()
 I(jc("BIT", "OVWBL", bit=1))
-list_loop(Z0, lambda: beat(False), "COMMIT", count=not FF)
-I(jmp("COMMIT"))
-L("OVWBL")
-list_loop(Z0, lambda: beat(True), "COMMIT", count=not FF)
+if FF:
+    xclear()
+    xrange(1, GRP, GRP + 512 - 16)
+    xrange(2, LA, LA + 11)
+    xrange(3, GRP, GRP + 512 - 16)
+    beats_ff(False)
+    L("OVWBL")
+    beats_ff(True)
+else:
+    list_loop(Z0, lambda: beat(False), "COMMIT", count=not FF)
+    I(jmp("COMMIT"))
+    L("OVWBL")
+    list_loop(Z0, lambda: beat(True), "COMMIT", count=not FF)
 
 # ---- commit: NumPolygons, NumVertices (+2 copies of reused vertices when the
 # polygon has a different vertex count than the last one); the next strip
@@ -1706,12 +2237,22 @@ I(ra(T + 1), op("SLT", "QA", grp(NSLOTGRP)))
 I(rb(T + 2), op("AND", "R", "QB"))
 I()
 I(jnc("BIT", "CMEND", bit=0))
-setx_from(T, 1)
-setx_from(SLOT + 4, 2)
-I(call("COPYV"))
-setx_from(T + 1, 1)
-setx_from(SLOT + 5, 2)
-I(call("COPYV"))
+if FF:
+    I(*ld(T))
+    I(*ld(SLOT + 4))
+    I(setx(1))                         # R two back: T
+    I(setx(2), call("COPYV"))          # R two back: SLOT[4]
+    I(*ld(T + 1))
+    I(*ld(SLOT + 5))
+    I(setx(1))
+    I(setx(2), call("COPYV"))
+else:
+    setx_from(T, 1)
+    setx_from(SLOT + 4, 2)
+    I(call("COPYV"))
+    setx_from(T + 1, 1)
+    setx_from(SLOT + 5, 2)
+    I(call("COPYV"))
 I(li(1), w(LSREUSE))
 L("CMEND")
 I(ret())
@@ -1736,7 +2277,7 @@ xclear()
 xrange(1, GRP, GRP + 512 - 16)
 xrange(2, LA, GRP + 512)
 xrange(3, LA, GRP + 512)
-COMP, FARF, XB1, XB2 = T2 + 12, T2 + 13, T2 + 14, T2 + 15   # plane component; far plane hit; group bases
+COMP, FARF, XB1, XB2 = T2 + 12, T2 + 13, T2 + 14, T2 + 15   # plane component; far plane hit (bit 1: the pool ran out, seg); group bases
 
 
 def segc(off, sx16):
@@ -1873,6 +2414,17 @@ def seg(sgn, name):
         I(ra(G_C, xg), op("AND", "QA", 0xFFF))
         I(ra(G_C, xg), op("SUB", "QA", "R"), w(G_C, xg))
     L(cr)
+    # the pool ends with group 31 (above it, 0x400, the position matrix stack): a clip that needs more (a box
+    # face with corners far outside, pkw2-city: 17 new vertices from group 16) takes group 31 again and sets
+    # FARF bit 1; the caller rejects the polygon, or counts the box face as inside
+    pv = u("pv")
+    I(ra(POOL), op("SUB", "QA", grp(32), fl=True))
+    I()
+    I(jc("LT", pv))
+    I(li(grp(31)), w(POOL))
+    I(*ld(FARF))
+    I(op("OR", "R", 2), w(FARF))
+    L(pv)
     setx_from(POOL, 3)
     I(ra(POOL), op("ADD", "QA", 16), w(POOL))
     I(call("SEGV"))
@@ -2202,7 +2754,13 @@ I(jc("Z", "BFRET"))
 I(li(4), w(LN))
 I(li(grp(16)), w(POOL))
 I(call("CLIP"))
-I(rb(LN), op("SLT", "ZERO", "QB"), w(BOXF))
+I(*ld(FARF))
+I()
+I(jnc("BIT", "BFCLP", bit=1))
+I(li(1), w(BOXF))                      # the clip ran out of pool groups: inside (the object is drawn); R = 1
+I(jmp("BFRET"))
+L("BFCLP")
+I(rb(LN), op("SLT", "ZERO", "QB"), w(BOXF))   # R: the result, for the caller
 L("BFRET")
 I(ret())
 
@@ -2249,7 +2807,7 @@ else:
         I(op("SX16", "R"), w(TEXC + c))
 scope(None)
 if LUNIT:
-    I(jmp("D1"))
+    I(d1())
 else:
     L("NM1")
     # normaltrans = sx11(((Normal * VecMatrix) << 9) >> 21) (32-bit)
@@ -2391,7 +2949,7 @@ for c in range(3):                     # bit 15: VertexColor = MatDiffuse
     I(op("OR", "R", 0xFFF), w(CURCOL + c))
 L("DA1")
 products(((MDIF, LDL), (MAMB9, LAL)), range(4))
-I(jmp("D1"))
+I(d1())
 
 L("SPEEMI")
 fields5(MSPE, 0)
@@ -2399,7 +2957,7 @@ fields5(MEMI, 16)
 I(op("SHR", "P", 15))
 I(op("AND", "R", 1), w(USETAB))
 products(((MSPE, LSL),), range(4))
-I(jmp("D1"))
+I(d1())
 
 xclear()
 xrange(1, 0, 49)
@@ -2420,7 +2978,7 @@ for i_, (a, d, col) in enumerate(jobs):
 for parts in ins:
     I(*parts)
 scope(None)
-I(jmp("D1"))
+I(d1())
 
 # LightDirection = sx11(-((dir * VecMatrix) >> 12)); SpecRecip = (1 << 18) / den,
 # den = 512 - sx11(((dir * VecMatrix[col 2]) << 9) >> 21) (0: SpecRecip 0)
@@ -2471,7 +3029,7 @@ I(ra(0, 1), op("SHR", "QA", 16))
 I(op("AND", "R", 0xFF), w(2, 2))
 I(ra(0, 1), op("SHR", "QA", 24), w(3, 2), addx(1, 1))
 I(addx(2, 4), djnz("SHL"))
-I(jmp("D1"))
+I(d1())
 
 
 if __name__ == "__main__":

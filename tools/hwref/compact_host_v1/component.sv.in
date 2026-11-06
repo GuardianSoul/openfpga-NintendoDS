@@ -1,0 +1,112 @@
+// Host-code component only. No CPU, game, BIOS, or DS timing execution.
+`timescale 1ns/1ps
+`define G_LOG(x) 0
+module fixture_rtc;
+ logic [7:0] yr=0,mo=0,hr=0,s1=0,rm[0:3];
+ logic pm=0,poc=0;
+endmodule
+module fixture_ds(input logic clk);
+ fixture_rtc u_rtc();
+ logic a_req=0,a_ok;
+ logic [17:2] a_addr=0;
+ logic [31:0] a_rdata;
+ arm7_wram u_wram(.clk(clk),.rst(1'b0),.a_req(a_req),.a_we(1'b0),
+  .a_addr(a_addr),.a_be(4'hf),.a_wdata(32'd0),.a_ok(a_ok),.a_rdata(a_rdata),
+  .b_req(1'b0),.b_we(1'b0),.b_addr(16'd0),.b_be(4'd0),.b_wdata(32'd0),
+  .b_done(),.b_rdata());
+endmodule
+module fixture_dut;
+ {{PROFILE_PARAMETERS}}
+ logic clk_sys=0,go=0;
+ always #1 clk_sys=~clk_sys;
+ int underruns=0;
+ fixture_ds ds(clk_sys);
+ logic vm_req=0,vm_we=0,vm_blk=0,vm_ack=0,vm_rvalid=0;
+ logic [20:2] vm_addr=0;
+ logic [3:0] vm_be=0;
+ logic [31:0] vm_wdata=0,vm_rdata=0;
+endmodule
+module tb_component;
+ fixture_dut dut();
+ wire [15:0] dq0,dq1,dqs,dqa;
+ cram_model cram0(.sclk(1'b0),.clk(1'b0),.a(6'd0),.dq(dq0),.wait_o(),
+  .adv_n(1'b1),.cre(1'b0),.ce0_n(1'b1),.ce1_n(1'b1),.oe_n(1'b1),.we_n(1'b1),.ub_n(1'b1),.lb_n(1'b1));
+ cram_model cram1(.sclk(1'b0),.clk(1'b0),.a(6'd0),.dq(dq1),.wait_o(),
+  .adv_n(1'b1),.cre(1'b0),.ce0_n(1'b1),.ce1_n(1'b1),.oe_n(1'b1),.we_n(1'b1),.ub_n(1'b1),.lb_n(1'b1));
+ sdram_chip_model sdram_chip(.clk(1'b0),.cke(1'b0),.ncs(1'b1),.nras(1'b1),.ncas(1'b1),.nwe(1'b1),
+  .a(13'd0),.ba(2'd0),.dqm(2'd0),.dq(dqs));
+ sram_model u_sram(.clk(1'b0),.a(17'd0),.dq(dqa),.oe_n(1'b1),.we_n(1'b1),.ub_n(1'b1),.lb_n(1'b1));
+ int v_frames=0,v_errors=0,ovf_seen=0,cart_words=1,cart_errors=0,v_slot=0;
+ bit stop_serving=0,serving=0;
+ reg [8*256-1:0] fname;
+ bit imp_stub_pend=0;
+ int imp_frame=0;
+ logic [31:0] imp_sram[0:24575];
+ task automatic vml_print; endtask
+ task automatic save_quit(input string p,input int slot=10); $fatal(1,"fixture save path unused"); endtask
+ {{SD_HELPERS}}
+`ifdef COMPACT_HOST_V1
+ `include "compact_profile.svh"
+ // Actual task body, with a fixture-only wrong-deposit switch.
+ `include "component_wram.svh"
+`endif
+ {{CLEAN_BLOCK}}
+ {{VM_BLOCK}}
+ {{FINISH_BLOCK}}
+ task automatic put(input int w,input logic [31:0] d);
+  cram0.mem[w]=d[15:0];cram1.mem[w]=d[31:16];
+ endtask
+ task automatic cpu_read(input logic [15:0] address,input int image_index);
+  @(negedge dut.clk_sys);dut.ds.a_addr=address;dut.ds.a_req=1;
+  @(posedge dut.clk_sys);#0.001;
+  assert(dut.ds.a_ok && dut.ds.a_rdata===imp_sram[image_index])
+   else $fatal(1,"WRAM_CPU_PORT word%0d",image_index);
+  @(negedge dut.clk_sys);dut.ds.a_req=0;
+ endtask
+ initial begin
+  for(int w=0;w<24576;w++)imp_sram[w]=32'h13579bdf^(32'h10203*w);
+  #0.5;
+  assert(cram0.peek(5)==cram0.fill(5) && cram1.peek(5)==cram1.fill(5));
+  assert(u_sram.mem[0]==16'hc3a5);
+  $display("COMPONENT_PRE_GO_DEFAULT_PASS");
+  #0.5;dut.go=1;
+  #1;
+  if($test$plusargs("fault_model_error"))cram0.errors=1;
+`ifdef CLEAN_BOOT
+  for(int w=0;w<(1<<20);w++)assert(ram_word(w)===32'd0)else $fatal(1,"CLEAN_MAIN word%0d",w);
+  for(int w=0;w<'h29000;w++)assert(sd_peek32(w)===32'd0)else $fatal(1,"CLEAN_VRAM word%0d",w);
+  assert(cram0.peek(1<<20)==cram0.fill(1<<20));
+  assert(u_sram.mem[0]==16'hc3a5);
+  $display("COMPONENT_CLEAN_EXACT_MAIN1048576_VRAM167936_PASS");
+`else
+  assert(cram0.peek(5)==cram0.fill(5));
+  $display("COMPONENT_ORDINARY_MODEL_DEFAULT_PASS");
+`endif
+  put('hfc000,'h52545344);put('hfc001,22);put('hfc002,'h3fffff);put('hfc003,1);
+  {{RESULT_WORDS}}
+`ifdef IMPORT
+  for(int w=0;w<24576;w++)assert({u_sram.mem[2*w+1],u_sram.mem[2*w]}===imp_sram[w]);
+  cpu_read('h0000,0);cpu_read('h3fff,16383);cpu_read('h4000,16384);cpu_read('h5fff,24575);
+  $display("COMPONENT_IMPORT_EXTERNAL24576_AND_CPU_ENDPOINTS_PASS");
+`else
+  for(int w=0;w<16384;w++)assert(dut.ds.u_wram.u_private.mem[w]===32'd0);
+  for(int w=0;w<8192;w++)assert(dut.ds.u_wram.u_shared.mem[w]===32'd0);
+  $display("COMPONENT_NONIMPORT_INTERNAL_WRAM_UNTOUCHED_PASS");
+`endif
+  // Drive the actual host shadow with one partial-lane update and a read.
+  @(negedge dut.clk_sys);
+  dut.vm_req=1;dut.vm_ack=1;dut.vm_we=1;dut.vm_be=15;dut.vm_addr=32;dut.vm_wdata='h12345678;
+  @(negedge dut.clk_sys);dut.vm_be=3;dut.vm_wdata='hffffabcd;
+  @(negedge dut.clk_sys);dut.vm_we=0;dut.vm_be=0;
+  @(negedge dut.clk_sys);dut.vm_req=0;dut.vm_ack=0;dut.vm_rvalid=1;
+  dut.vm_rdata=$test$plusargs("fault_vm_response")?'h1234abcc:'h1234abcd;
+  @(negedge dut.clk_sys);dut.vm_rvalid=0;
+ end
+`ifdef IMPORT
+ initial begin
+  @(posedge dut.go);
+  {{IMPORT_DEPOSIT}}
+ end
+`endif
+ initial forever begin #100;v_frames++;end
+endmodule

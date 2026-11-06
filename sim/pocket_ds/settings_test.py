@@ -28,8 +28,23 @@ MUTANTS = [
      ".combo_enable({{4{!top_only}}, {2{!combo_sel[0]}}})"),
     ('rtl/pocket/nds_controls.sv', ".combo_enable({{4{!combo_sel[1] && !top_only}}, {2{!combo_sel[0]}}})",
      ".combo_enable({{4{!combo_sel[0] && !top_only}}, {2{!combo_sel[1]}}})"),
-    ('rtl/pocket/nds_controls.sv', "assign pen = (touch && keys[4 + touch_btn]) || pen_ana;",
-     "assign pen = (touch && keys[6]) || pen_ana;"),
+    ('rtl/pocket/nds_controls.sv', "assign pen = (touch && (|(fb & g_pen) || g_vis)) || pen_ana;",
+     "assign pen = (touch && (fb[2] || g_vis)) || pen_ana;"),
+    # gestures (A/B/X/Y in Touch Mode): Button held back; a circle that doesn't repeat while held; an 88 px
+    # swipe; a wrong circle point; no clamp at the top; a swipe repeated while held; the pen at the cursor
+    ('rtl/pocket/nds_controls.sv', "assign g_on[gi] = gest[3 * gi +: 3] != 3'd0;", "assign g_on[gi] = 1'b1;"),
+    ('rtl/pocket/nds_controls.sv', "g_act <= g_circle && fb[g_btn];", "g_act <= 1'b0;"),
+    ('rtl/pocket/nds_controls.sv', "g_circle ? 4'd15 : 4'd12", "g_circle ? 4'd15 : 4'd11"),
+    # Circle at r 12, the size before the maintainer's 2026-11-06 change
+    ('rtl/pocket/nds_controls.sv', "s_x = {sin12(g_step), 1'b0}", "s_x = sin12(g_step)"),
+    # Big Circle (r 48, 16 points): a wrong point, the loop cut at 8 points, half the radius
+    ('rtl/pocket/nds_controls.sv', "3'd2: m = 7'd34;", "3'd2: m = 7'd33;"),
+    ('rtl/pocket/nds_controls.sv', "wire g_end = g_step == (g_circle ? 4'd15", "wire g_end = g_step == (g_circle ? (g_big ? 4'd7 : 4'd15)"),
+    ('rtl/pocket/nds_controls.sv', "wire signed [7:0] c_x = g_big ? sin48(g_step)", "wire signed [7:0] c_x = g_big ? sin48(g_step) >>> 1"),
+    ('rtl/pocket/nds_controls.sv', "3'd3: m = 5'd11;", "3'd3: m = 5'd10;"),
+    ('rtl/pocket/nds_controls.sv', "g_y <= py[9] ? 8'd0", "g_y <= py[9] ? py[7:0]"),
+    ('rtl/pocket/nds_controls.sv', "wire [3:0] g_new = fb & ~fb_q & g_gest;", "wire [3:0] g_new = fb & g_gest;"),
+    ('rtl/pocket/nds_controls.sv', "assign pen_x = g_vis ? g_x : cur_x;", "assign pen_x = cur_x;"),
     ('rtl/pocket/nds_controls.sv', "speed == 2'd2 ? 8'd6 : 8'd3", "speed == 2'd2 ? 8'd3 : 8'd3"),
     # the setting's value taken only from the low byte (#253: on hardware it
     # arrives byte-swapped and the settings never changed)

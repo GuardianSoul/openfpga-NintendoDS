@@ -104,7 +104,15 @@ module nds_gpu3d
     parameter int GX_SPAW = 12,     // gpu3d_gxfront SP_AW: the spill ring 2^GX_SPAW entries (8 bytes each) in SDRAM
     parameter bit DX_SKID = 1'b0,  // a second posted DMA_GX word waits in a skid register while g_* waits for the front
     // the texture and palette caches' tag stores double-pumped on clk_2x (nds_lcache PUMP: 2 -> 1 M10K each)
-    parameter bit PUMP = 1'b0
+    parameter bit PUMP = 1'b0,
+    // SWHOLD: a swap the engine reaches late (after SWIN, up to line 215) still sorts, and the frame start waits
+    // for its sort output (at most SWM clocks) instead of the swap waiting for the next VBlank (below)
+    parameter bit SWHOLD = 1'b0,
+    parameter bit SWPC = 1'b0,      // SWHOLD: a late sort runs once the started frame is drawn, not at the next VBlank
+    // SSL: nds_g3d_store SL, log2 pool slots (the most polygons on one line: MKDS race intro 252-260)
+    parameter int SSL = 8,
+    // RLEAD (RING): nds_g3d_ring LEAD, the lines the raster may run ahead of the composed line (the DS's 48-line buffer: 46)
+    parameter int RLEAD = 46
 ) (
     input  logic        clk,
     input  logic        clk_2x,         // PUMP: 2 x clk, phase 0
@@ -114,6 +122,8 @@ module nds_gpu3d
     input  logic        rend_en,        // POWCNT1 bit 2
     input  logic        vblank,         // pulse: line 192 starts
     input  logic        line215,        // pulse: line 215 starts
+    input  logic        sw_close,       // SWHOLD pulse: the late-swap window closes (line 215 + G3D_SWL)
+    input  logic        sw_lim,         // SWHOLD pulse: the frame start waits no longer (7 lines later)
     input  logic [15:0] disp3dcnt,
     // I/O 0x320-0x7FF (ARM9): io_req for one cycle, io_ack when done
     input  logic        io_req,
@@ -279,7 +289,33 @@ module nds_gpu3d
     // (a frame still drawn at the VBlank is already late: its remaining lines have been displayed, so the
     // sort may replace its tables; a frame started after the VBlank (frame_go) must not be cut: the window
     // closes 23 lines before it)
-    assign s_draw = sw_vb >= 17'(SWIN);
+    // SWHOLD: the window stays open from the VBlank until sw_close (nds_top: line 215 + G3D_SWL) or the frame
+    // start, whichever comes first, and the frame start waits while the engine owes a swap or sorts (sw_busy),
+    // until sw_lim (7 lines, ~30K clk, later) at most: a sort that passed the window has ended by then (the 28K
+    // margin SWIN keeps). MKDS's race intro, startline: the engine, busy all frame at the camera cut, reached
+    // the sort 83.7K clk after the VBlank (later 102K); the frame was shown a frame late, which swapped the two
+    // screens for good. It also waits while the store builds the swap's lists (192 clk, the write queue's
+    // drain and 4 clk a polygon after SOD): a frame started then finds no lists and draws its first lines empty
+    // (the window's 28K margin used to cover that; startline: the sky's top 38 lines). Without a late swap
+    // frame_go comes at line 215 as before
+    logic         sw_busy;              // gpu3d_geom: a swap the engine owes or sorts
+    logic         st_bld;               // nds_g3d_store: the swap's lists are being built (the fetcher would find none)
+    logic         sw_open, sw_hok;      // SWHOLD: the window is open; the frame start may still wait
+    always_ff @(posedge clk) begin
+        sw_open <= !rst && (vblank || (sw_open && !sw_close));
+        sw_hok  <= !rst && (vblank || (sw_hok && !sw_lim));
+    end
+    logic         fg_vb;                // a frame started since the VBlank (frame_go, below)
+    logic         fg_pend;              // line 215 has come, the frame start waits for sw_busy
+    wire          fg_req = (line215 || fg_pend) && rend_en && geom_en;
+    wire          fg_hold = SWHOLD && (sw_busy || st_bld) && sw_hok;
+    wire          fg_now = fg_req && !fg_hold;     // the frame starts (line215 && rend_en && geom_en without SWHOLD)
+    always_ff @(posedge clk) fg_pend <= !rst && fg_req && fg_hold;
+    // SWPC: once the frame has started, a late sort may run as soon as the store has drawn that frame (st_draw
+    // low) rather than at the next VBlank: its frame is shown a frame late (or skipped by the next swap), but the
+    // engine does not idle a frame at SDRAW, which kept it a frame behind for good once busy (MKDS intro on the
+    // Pocket, NDSPlay8: the 3D on the wrong screen for many frames)
+    assign s_draw = SWHOLD ? (fg_vb ? (SWPC ? st_draw : 1'b1) : !sw_open) : sw_vb >= 17'(SWIN);
     logic [127:0] po_data;
     logic [10:0]  po_index, so_pos, so_idx;
     logic         po_wv;
@@ -317,7 +353,7 @@ module nds_gpu3d
         .io_rdata(g_rdata), .io_ack(g_ack), .io_wait(g_wait),
         .irq_gxfifo, .dma_gx_low, .gx_stall(), .ovf_set,
         .po_valid, .po_ready, .s_draw, .po_type, .po_data, .po_index, .po_wv, .po_wk, .po_wd,
-        .so_we, .so_pos, .so_idx, .so_done, .so_count,
+        .so_we, .so_pos, .so_idx, .so_done, .so_count, .sw_busy,
         .dbg_stall(), .dbg_apply(), .dbg_upc(), .dbg_flush(), .dbg_idle(g_idle), .dbg_gxstat(),
         .dbg_npoly(g_npoly), .dbg_nvert(g_nvert), .dbg_eq_bad(), .diag_ev(g_dev), .diag_used(g_dused),
         .sp_wreq(s_wreq), .sp_waddr(s_waddr), .sp_wdata(s_wdata), .sp_wack(s_wack), .sp_wdrained(rg_wdrained), .sp_rreq(s_rreq), .sp_raddr(s_raddr),
@@ -341,12 +377,12 @@ module nds_gpu3d
     logic         r_busy;
     // RESTART: a frame start that finds the raster busy restarts it (and
     // the store, which drops the old frame); below
-    wire          r_abort = RESTART && line215 && rend_en && geom_en && r_busy;
+    wire          r_abort = RESTART && fg_now && r_busy;
     generate if (EXT_STORE != 0) begin : g_ext
         // full capacity, in PSRAM (nds_g3d_store)
-        nds_g3d_store u_store (.clk, .rst,
+        nds_g3d_store #(.SL(SSL)) u_store (.clk, .rst,
             .po_valid, .po_ready, .po_type, .po_data, .po_index, .po_wv, .po_wk, .po_wd,
-            .so_we, .so_pos, .so_idx, .so_done, .so_count, .drawing(st_draw),
+            .so_we, .so_pos, .so_idx, .so_done, .so_count, .drawing(st_draw), .lists_bld(st_bld),
             .frame_go, .abort(r_abort), .diag_ld(st_diag), .ps_line_req, .ps_line_y, .y_lim, .ps_valid, .ps_ready, .ps_type, .ps_data,
             .p_req(sm_req), .p_we(sm_we), .p_addr(sm_addr), .p_wdata(sm_wdata), .p_ack(sm_ack), .p_rvalid(sm_rvalid), .p_rdata(sm_rdata),
             .p_wdrained(!STORE_SD || rg_wdrained));
@@ -385,6 +421,7 @@ module nds_gpu3d
         final $display("G3D_EQ: %0d beats, %0d differ, %0d reference beats left", eq_beats, eq_bad, rq_wp - rq_rp);
 `endif
     end else begin : g_onchip
+        assign st_bld = 1'b0;
         assign st_diag = 4'd0; assign st_draw = 1'b0;
         assign sm_req = 1'b0; assign sm_we = 1'b0; assign sm_addr = '0; assign sm_wdata = '0;
         nds_g3d_onchip #(.PW(PW), .VW(VW)) u_store (.clk, .rst,
@@ -487,7 +524,8 @@ module nds_gpu3d
     final if (dd_on) $display("g3ddiag total: busy %0d stall-ds %0d stall-eng %0d store-held %0d swaps %0d exec %0d fetch-wait %0d grant-wait %0d",
                               dd_t[0], dd_t[1], dd_t[2], dd_t[3], dd_t[4], dd_t[5], dd_t[6], dd_t[7]);
 `endif
-    always_ff @(posedge clk) frame_go <= !rst && line215 && rend_en && geom_en && (RESTART || !r_busy);
+    always_ff @(posedge clk) frame_go <= !rst && fg_now && (RESTART || !r_busy);
+    always_ff @(posedge clk) fg_vb <= !rst && !vblank && (fg_vb || frame_go);
     // the caches answer in order: those for requests made before a restart
     // (outstanding when it comes) go nowhere
     logic        tc_v, pc_v;
@@ -617,7 +655,7 @@ module nds_gpu3d
         end
 `endif
     generate if (RING) begin : g_ring
-        nds_g3d_ring #(.YLAG(YLIM2 ? 2 : 0), .LLR(LLR), .RPRI(RPRI), .NX2(NX2), .RH_AT(RH_AT), .TR3(TR3 && !FEAT_EDGE && !LB2)) u_ringx (.rg_hurry, .clk, .rst, .frame_go, .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata(ring_q),
+        nds_g3d_ring #(.YLAG(YLIM2 ? 2 : 0), .LLR(LLR), .RPRI(RPRI), .NX2(NX2), .RH_AT(RH_AT), .TR3(TR3 && !FEAT_EDGE && !LB2), .LEAD(RLEAD)) u_ringx (.rg_hurry, .clk, .rst, .frame_go, .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata(ring_q),
             .y_lim(y_lim_rg), .px_valid, .px_x, .px_y, .px_color,
             .rg_wreq(q_wreq), .rg_waddr(q_waddr), .rg_wdata(q_wdata), .rg_wack(q_wack), .rg_rreq(q_rreq), .rg_raddr(q_raddr),
             .rg_rack(q_rack), .rg_rvalid(q_rvalid), .rg_rdata, .rg_wdrained,
@@ -708,7 +746,7 @@ module nds_gpu3d
     // the DS restarts instead and draws none of the old frame
     logic [8:0]  lv_lo;
     logic        lv_skip;
-    always_ff @(posedge clk) lv_skip <= !rst && line215 && rend_en && geom_en && !(RESTART || !r_busy);
+    always_ff @(posedge clk) lv_skip <= !rst && fg_now && !(RESTART || !r_busy);
     logic        lv_on, lv_go, l3d_rear;
     wire         ring_have;
     always_ff @(posedge clk) begin
@@ -867,12 +905,22 @@ module nds_gpu3d
 `endif
 `ifndef ALTERA_RESERVED_QIS
     // synthesis translate_off
-    logic fg_vb;                        // a frame_go since the last VBlank
+    // +swhmon: per frame, when the swap's sort output ended and the frame started (clocks after the VBlank)
+    bit swh_on;
+    initial swh_on = $test$plusargs("swhmon");
+    always_ff @(posedge clk) if (swh_on && !rst) begin
+        if (so_done) $display("swhmon: sort output ended at %0d", sw_vb);
+        if (frame_go) $display("swhmon: frame start at %0d%s", sw_vb, sw_busy ? " (swap still owed)" : "");
+    end
     always_ff @(posedge clk) begin
-        fg_vb <= rst || vblank ? 1'b0 : fg_vb || frame_go;
         if (!rst && (so_we || so_done) && st_draw && fg_vb)
             $error("nds_gpu3d: a swap's sort output while the frame started after the VBlank is drawn (the SWIN window failed)");
     end
+    // SWHOLD: a frame never starts while the store builds the swap's lists (its first lines would be fetched empty),
+    // unless the hold ran out (sw_hok)
+    always_ff @(posedge clk)
+        if (SWHOLD && !rst && frame_go && st_bld && sw_hok)
+            $error("nds_gpu3d: a frame start while the store builds its lists (SWHOLD)");
     // synthesis translate_on
 `endif
 endmodule

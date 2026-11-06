@@ -314,8 +314,9 @@ module gpu3d_gxeng #(
             // a matrix or test read is served at NOENT only with no entry waiting: NOENT is also where a waiting
             // entry's hold sends the engine (FF's CurVertex hazard, LUNIT's busy unit), and a read served there
             // overtakes the commands before it (GXSTAT, the DS timing model, already reads idle): NSMB and HG
-            // read the clip matrix mid-sequence after polling GXSTAT bit 27
-            C_MREQ:     cond = mrd_req && !mrd_ack && !ev_q;
+            // read the clip matrix mid-sequence after polling GXSTAT bit 27. !e_more, not !ev_q: with SPILL, ev_q (e_avail)
+            // is 0 while executed entries still wait in the gather or SDRAM ring or were written < 2 clocks ago
+            C_MREQ:     cond = mrd_req && !mrd_ack && !e_more;
             C_SWAPGO:   cond = swap_go;
             C_SORTBUSY: cond = sort_busy;
             C_DIRTY:    cond = dirty;
@@ -663,9 +664,11 @@ module gpu3d_gxeng #(
 `ifndef SYNTHESIS
     // synthesis translate_off
     logic rb_hi_d;
+    logic [10:0] rb_d, rb_pc;
+    longint rb_cy = 0;
     always_ff @(posedge clk) begin
-        rb_hi_d <= rf_rb[10];
-        if (!rst && rb_hi_d && (b_ys == YS_QB || b_mb == MB_QB)) $error("RF port B used for an address above 0x3FF");
+        rb_hi_d <= rf_rb[10]; rb_d <= rf_rb; rb_pc <= upc; rb_cy <= rb_cy + 1;
+        if (!rst && rb_hi_d && (b_ys == YS_QB || b_mb == MB_QB)) $error("RF port B used for an address above 0x3FF (address %03x, read at upc %03x, clock %0d)", rb_d, rb_pc, rb_cy);
     end
     // synthesis translate_on
 `endif

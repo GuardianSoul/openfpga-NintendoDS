@@ -1,0 +1,171 @@
+{
+  "schema": "nds-hg193-sd-pair-binding-v1",
+  "source": "2f86d1e69b0fc477d179375315acdefc1b438a68",
+  "profile_fields": 58,
+  "model_sha256": "74f1f5a49469a16e07548ea54a998a507fac77de0cccd4a87358a94c133a96f9",
+  "host_root": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host",
+  "manifests": {
+    "production-manifest.json": "aade8c1fd38e3ea12537e474cda68eee6c2cf3c34078ccea9d70a3a4f0468dc7",
+    "compiled-inputs.json": "19526c8f107b1732d50e7a01cb4d7592d1045c67833d8021d0c7154e7cc242a4",
+    "build-command.json": "1191819b117e04e6c673512396e1c78fbb6eececf2a3b0048fb49f961d487175"
+  },
+  "production": {
+    "rtl/ds/nds_g3d_sd_records.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_g3d_sd_records.sv",
+      "sha256": "fba152e9dd9147340dcc5b88172b9f8458b05092ac949b4b8d588134a953f2d7"
+    },
+    "rtl/ds/nds_g3d_pair_cache.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_g3d_pair_cache.sv",
+      "sha256": "210293ab2532ac56a5f25a1ea16a7146b65c67da080720847881bd8c1103fff2"
+    },
+    "rtl/ds/nds_g3d_store_pair.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_g3d_store_pair.sv",
+      "sha256": "84a00d9ff6a8c144b895ffe843cc1abaaa43999cae05e1c6f8221bb693380e23"
+    },
+    "rtl/ds/nds_g3d_journal.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_g3d_journal.sv",
+      "sha256": "5dba025aff6f0d9f2965c79830dd661701a92c25de309873d43e2748cfa6f2b9"
+    },
+    "rtl/ds/nds_gpu3d.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_gpu3d.sv",
+      "sha256": "75624c33f029f1777237ea256bb1a2f9470135c7df9b93f783245999681636db"
+    },
+    "rtl/ds/nds_g3d_ring.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_g3d_ring.sv",
+      "sha256": "15224f39c376bf3092106b75a624b134d00ab1123dba88564b3fb9c21a044350"
+    },
+    "rtl/gpu3d/gpu3d_gxeng.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_gxeng.sv",
+      "sha256": "1ebf0f141df3f0284f210c1da59b2501c5762f7b33dc792816146ebccb8c0799"
+    },
+    "rtl/gpu3d/gpu3d_gxvfin.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_gxvfin.sv",
+      "sha256": "866e67eefebb797f61be1f7e7acf0ce708c7dbe4abd3133348593f627dcf1584"
+    },
+    "rtl/gpu3d/gpu3d_gxlight.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_gxlight.sv",
+      "sha256": "48c3be2cc7f100de65dce720ac7803bb8e7d5637c3a10ee76a10ba50e3a8333c"
+    },
+    "rtl/gpu3d/gpu3d_ram.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_ram.sv",
+      "sha256": "7902863eeb3b575dea8f8f49fb57c5884475f5beed5e44cfe48d4844d23e5b66"
+    },
+    "rtl/gpu3d/gpu3d_geom.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_geom.sv",
+      "sha256": "1374483cbe5f5526d151f210337dd183cbb23ca604040afab3bfd4239e0b89ae"
+    },
+    "rtl/gpu3d/gpu3d_gxfront.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_gxfront.sv",
+      "sha256": "41a6733b74b18f414da54820a0bc4ee92037f5b975d395e92e3b2dbbfdff0944"
+    },
+    "rtl/gpu3d/gpu3d_raster.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_raster.sv",
+      "sha256": "08f20d6507e717e94212328906d9576089fe1fcf1f40ed3b046b85f98eb23cd1"
+    },
+    "rtl/gpu3d/gpu3d_front.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_front.sv",
+      "sha256": "db098c33c903d6d1c2d71388cfcfa5b52e97709db3c9a4d5cf15faaf232d031e"
+    },
+    "rtl/gpu3d/gpu3d_fpass.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_fpass.sv",
+      "sha256": "e1353be78f4ec9a15e0428db8e9da0d403a5fd641134bf502f92c50d7a9473d7"
+    },
+    "rtl/gpu3d/gpu3d_gxrom_ux.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_gxrom_ux.sv",
+      "sha256": "ccff5fe9ea0e54add85435a4c2dfd5caedfade107c175d54d31719212091c9f8"
+    },
+    "rtl/gpu3d/gpu3d_gxu_pkg.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/gpu3d/gpu3d_gxu_pkg.sv",
+      "sha256": "75fd4346d39554d03ed6f7625dac438431d4af5b27bfc1a956216761eaaa849a"
+    },
+    "rtl/ds/nds_g3d_sp_arb.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/production/rtl/ds/nds_g3d_sp_arb.sv",
+      "sha256": "7944557ab639365d7cef54124f013645637e9e4cb79f26f03a53f7926f4ee2a3"
+    }
+  },
+  "overlay": {
+    "tb_ds_pocket.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/overlay/sim/pocket_ds/tb_ds_pocket.sv",
+      "sha256": "3fa66f90c09138028868e4aa49a58387411318e95f17f84f501bf24c407910d6"
+    },
+    "runtime_import_gx_sd_ready.svh": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/overlay/sim/pocket_ds/runtime_import_gx_sd_ready.svh",
+      "sha256": "e26935864b35e5a7ba2523aa4f1c1df9ac3e555c78673fb2795b64a82db6e71f"
+    },
+    "runtime_import_finalize_snapshots.svh": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster-colour49/build/scenes62/extended-host/staged/overlay/sim/pocket_ds/runtime_import_finalize_snapshots.svh",
+      "sha256": "4298c01ec316afd75005ef6c9f0c337ed0ba389743a9164ed185ebb6d0f5458c"
+    }
+  },
+  "legacy": {
+    "g3d_import_context597.svh": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster/build/gpu3d/shared-import-joined/source/sim/pocket_ds/g3d_import_context597.svh",
+      "sha256": "1e1c6d28ccf841659a89c0c3d3ef05296c04e21a75f0a5ab6622d279fe42884d"
+    },
+    "g3d_import_seed.sv": {
+      "path": "/home/user/Git/NDS_Pocket-codex-raster/build/gpu3d/shared-import-joined/source/sim/pocket_ds/g3d_import_seed.sv",
+      "sha256": "ca80174a256e0d1a7528e89a35eff9fcdbc679f939f4411ec9a1af58f6de464b"
+    }
+  },
+  "payload": {
+    "root": "/home/user/Git/NDS_Pocket-codex-raster/build/gpu3d/shared-import-joined/payload/hg193",
+    "manifest_sha256": "aa0477f6829cefb6403a24eecd59681904daf90b33a97fb14b7c72e5606d030c",
+    "files": {
+      "records": {
+        "width": 32,
+        "entries": 65536,
+        "sha256": "688b911a5bac2b5dae8e9eefb883e404d12a33564d6e3489f42b37dfc8c27342"
+      },
+      "order": {
+        "width": 11,
+        "entries": 4096,
+        "sha256": "a9d3ae23d91601a6c8e6485a29ee7c0c14c1a38a22b7be442e81b55ed62a4149"
+      },
+      "ytab": {
+        "width": 17,
+        "entries": 4096,
+        "sha256": "032cd7c2fe14855e111212f426d617e8885fc113fecbd4658d675491a0c17678"
+      },
+      "buckets": {
+        "width": 23,
+        "entries": 256,
+        "sha256": "67545fb590c14afba86113dfdf46dd24d237cd763fbdfaa69c3017fef8e54ffa"
+      },
+      "links": {
+        "width": 11,
+        "entries": 2048,
+        "sha256": "b462c253d467b74cc87c09c6f542d121c468b9b9f3110379e68ab6c7f4227aa9"
+      },
+      "current_regs": {
+        "width": 32,
+        "entries": 6,
+        "sha256": "23410bc13b0add68d3aadebda82a1fa3126ab75365d237659471420205e5bb00"
+      },
+      "render_tables": {
+        "width": 32,
+        "entries": 72,
+        "sha256": "5f5027f9530ad36fddd12deb1a518d6c3bd3cf0778d0242596eaa54922479c15"
+      },
+      "cold_epoch": {
+        "width": 32,
+        "entries": 22,
+        "sha256": "df5a81f635502787f732dc79a75033bdc57d2b965db94e398825d50d14627610"
+      },
+      "context": {
+        "width": 32,
+        "entries": 3712,
+        "sha256": "a509f5fb5fac21e2ad069a9aadb6920d92fb9af1817b8fc381202d5b27ec9129"
+      },
+      "prefix_commands": {
+        "width": 8,
+        "entries": 151,
+        "sha256": "f79be1528cf4b8ef095b595b18246a26b6db9f56644ceb5ba68cf5113a54d39a"
+      },
+      "prefix_parameters": {
+        "width": 32,
+        "entries": 151,
+        "sha256": "362a3b1fc10c41d22f67ae0fa70689227c924fd02679488241f6ad7764f58f61"
+      }
+    }
+  }
+}

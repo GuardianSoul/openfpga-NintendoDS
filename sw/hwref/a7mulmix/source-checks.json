@@ -1,0 +1,684 @@
+{
+  "scope": "SOURCE/OBJECT + SYNTHETIC ONLY; no SDK link/ROM/emulator/native/DS/hardware/staging",
+  "stages": [
+    {
+      "tag": "syntax-arm7.c",
+      "cmd": [
+        "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+        "-fsyntax-only",
+        "-Wall",
+        "-Werror",
+        "-O2",
+        "-mcpu=arm7tdmi",
+        "-mthumb",
+        "-D__NDS__",
+        "-DARM7",
+        "-I/opt/devkitpro/calico/include",
+        "-I/opt/devkitpro/libnds/include",
+        "-include",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/build-id.h",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/sw/hwref/a7mulmix/arm7.c"
+      ],
+      "PID": 2454489,
+      "starttime": "44144829",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.031
+    },
+    {
+      "tag": "syntax-main.c",
+      "cmd": [
+        "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+        "-fsyntax-only",
+        "-Wall",
+        "-Werror",
+        "-O2",
+        "-mcpu=arm946e-s",
+        "-mthumb",
+        "-D__NDS__",
+        "-DARM9",
+        "-I/opt/devkitpro/calico/include",
+        "-I/opt/devkitpro/libnds/include",
+        "-include",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/build-id.h",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/sw/hwref/a7mulmix/main.c"
+      ],
+      "PID": 2454491,
+      "starttime": "44144832",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.064
+    },
+    {
+      "tag": "syntax-quiet.itcm.c",
+      "cmd": [
+        "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+        "-fsyntax-only",
+        "-Wall",
+        "-Werror",
+        "-O2",
+        "-mcpu=arm946e-s",
+        "-mthumb",
+        "-D__NDS__",
+        "-DARM9",
+        "-I/opt/devkitpro/calico/include",
+        "-I/opt/devkitpro/libnds/include",
+        "-include",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/build-id.h",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/sw/hwref/a7mulmix/quiet.itcm.c"
+      ],
+      "PID": 2454493,
+      "starttime": "44144838",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.064
+    },
+    {
+      "tag": "assemble",
+      "cmd": [
+        "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+        "-mcpu=arm7tdmi",
+        "-marm",
+        "-c",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/sw/hwref/a7mulmix/kernel.S",
+        "-o",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/kernel.o"
+      ],
+      "PID": 2454495,
+      "starttime": "44144845",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.016
+    },
+    {
+      "tag": "link-kernel-only",
+      "cmd": [
+        "/opt/devkitpro/devkitARM/bin/arm-none-eabi-ld",
+        "-Ttext=0x03800640",
+        "--entry=mm_mul",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/kernel.o",
+        "-o",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/kernel-only.elf"
+      ],
+      "PID": 2454498,
+      "starttime": "44144846",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.008
+    },
+    {
+      "tag": "host-resume-build",
+      "cmd": [
+        "/usr/bin/cc",
+        "-O2",
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume.c",
+        "-o",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454499,
+      "starttime": "44144850",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.164
+    },
+    {
+      "tag": "host-resume-pass",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454504,
+      "starttime": "44144866",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-live-opcode",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454505,
+      "starttime": "44144867",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-wrong-r6-header",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454506,
+      "starttime": "44144868",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-wrong-r6-snapshot-rehashed",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454507,
+      "starttime": "44144869",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-wrong-return-owner",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454508,
+      "starttime": "44144870",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-bad-timer-context",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454509,
+      "starttime": "44144871",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-last-raw-time-zero",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454510,
+      "starttime": "44144872",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.003
+    },
+    {
+      "tag": "host-CSV-checksum",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454511,
+      "starttime": "44144873",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    },
+    {
+      "tag": "host-incomplete-journal",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454512,
+      "starttime": "44144873",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.001
+    },
+    {
+      "tag": "host-valid-contradictory-timing",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume"
+      ],
+      "PID": 2454513,
+      "starttime": "44144874",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.003
+    },
+    {
+      "tag": "host-real-predicate-mutant-build",
+      "cmd": [
+        "/usr/bin/cc",
+        "-O2",
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume.c",
+        "-o",
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume-weak"
+      ],
+      "PID": 2454514,
+      "starttime": "44144875",
+      "NI": 10,
+      "exit": 0,
+      "reaped": true,
+      "seconds": 0.164
+    },
+    {
+      "tag": "host-real-predicate-mutant-caught",
+      "cmd": [
+        "/home/user/Git/NDS_Pocket-cpu-a7mulphase-compare/build/a7mulmix-source/attempt4/resume-weak"
+      ],
+      "PID": 2454521,
+      "starttime": "44144892",
+      "NI": 10,
+      "exit": 1,
+      "reaped": true,
+      "seconds": 0.004
+    }
+  ],
+  "mutations": [
+    "kernel-NOP",
+    "wrong-Rs",
+    "wrong-backedge",
+    "wrapper-fifth-argument-offset",
+    "live-opcode",
+    "wrong-r6-header",
+    "wrong-r6-snapshot-rehashed",
+    "wrong-return-owner",
+    "bad-timer-context",
+    "last-raw-time-zero",
+    "CSV-checksum",
+    "incomplete-journal",
+    "failure-completion",
+    "interrupted-completion"
+  ],
+  "ISA": [
+    {
+      "entry": 58721856,
+      "loops": 1,
+      "rs2": 127,
+      "rs6": 127,
+      "executed_MULs": 64,
+      "steps": 68
+    },
+    {
+      "entry": 58721856,
+      "loops": 4,
+      "rs2": 127,
+      "rs6": 127,
+      "executed_MULs": 256,
+      "steps": 266
+    },
+    {
+      "entry": 58721856,
+      "loops": 16,
+      "rs2": 127,
+      "rs6": 127,
+      "executed_MULs": 1024,
+      "steps": 1058
+    },
+    {
+      "entry": 58721856,
+      "loops": 1,
+      "rs2": 2147483647,
+      "rs6": 2147483647,
+      "executed_MULs": 64,
+      "steps": 68
+    },
+    {
+      "entry": 58721856,
+      "loops": 4,
+      "rs2": 2147483647,
+      "rs6": 2147483647,
+      "executed_MULs": 256,
+      "steps": 266
+    },
+    {
+      "entry": 58721856,
+      "loops": 16,
+      "rs2": 2147483647,
+      "rs6": 2147483647,
+      "executed_MULs": 1024,
+      "steps": 1058
+    },
+    {
+      "entry": 58721856,
+      "loops": 1,
+      "rs2": 127,
+      "rs6": 2147483647,
+      "executed_MULs": 64,
+      "steps": 68
+    },
+    {
+      "entry": 58721856,
+      "loops": 4,
+      "rs2": 127,
+      "rs6": 2147483647,
+      "executed_MULs": 256,
+      "steps": 266
+    },
+    {
+      "entry": 58721856,
+      "loops": 16,
+      "rs2": 127,
+      "rs6": 2147483647,
+      "executed_MULs": 1024,
+      "steps": 1058
+    },
+    {
+      "entry": 50122752,
+      "loops": 1,
+      "rs2": 127,
+      "rs6": 127,
+      "executed_MULs": 64,
+      "steps": 68
+    },
+    {
+      "entry": 50122752,
+      "loops": 4,
+      "rs2": 127,
+      "rs6": 127,
+      "executed_MULs": 256,
+      "steps": 266
+    },
+    {
+      "entry": 50122752,
+      "loops": 16,
+      "rs2": 127,
+      "rs6": 127,
+      "executed_MULs": 1024,
+      "steps": 1058
+    },
+    {
+      "entry": 50122752,
+      "loops": 1,
+      "rs2": 2147483647,
+      "rs6": 2147483647,
+      "executed_MULs": 64,
+      "steps": 68
+    },
+    {
+      "entry": 50122752,
+      "loops": 4,
+      "rs2": 2147483647,
+      "rs6": 2147483647,
+      "executed_MULs": 256,
+      "steps": 266
+    },
+    {
+      "entry": 50122752,
+      "loops": 16,
+      "rs2": 2147483647,
+      "rs6": 2147483647,
+      "executed_MULs": 1024,
+      "steps": 1058
+    },
+    {
+      "entry": 50122752,
+      "loops": 1,
+      "rs2": 127,
+      "rs6": 2147483647,
+      "executed_MULs": 64,
+      "steps": 68
+    },
+    {
+      "entry": 50122752,
+      "loops": 4,
+      "rs2": 127,
+      "rs6": 2147483647,
+      "executed_MULs": 256,
+      "steps": 266
+    },
+    {
+      "entry": 50122752,
+      "loops": 16,
+      "rs2": 127,
+      "rs6": 2147483647,
+      "executed_MULs": 1024,
+      "steps": 1058
+    }
+  ],
+  "kernel": {
+    "entry": 58721856,
+    "SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441",
+    "bytes": 272,
+    "wrapper_SHA256": "be6e268a172318ba8f61d702e5430aeff906befb5a2434224612d5f7afe0e61d",
+    "wrapper_bytes": 100,
+    "return_pc": 58722188
+  },
+  "synthetic": {
+    "status": "PASS software protocol/state/body only; emulator timing is not DS truth",
+    "groups": 6,
+    "raw_times": 60,
+    "invocations": 120,
+    "register_words": 3840,
+    "live_body_snapshots": 12,
+    "summary": [
+      {
+        "case_id": 0,
+        "rs2": 127,
+        "rs6": 127,
+        "pattern": "all_small",
+        "region": "private_WRAM",
+        "ticks4": [
+          665,
+          665,
+          665,
+          665,
+          665
+        ],
+        "ticks16": [
+          2249,
+          2249,
+          2249,
+          2249,
+          2249
+        ],
+        "slope": 2.0625,
+        "entry": 58721856,
+        "body": 58721860,
+        "code_SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441"
+      },
+      {
+        "case_id": 0,
+        "rs2": 127,
+        "rs6": 127,
+        "pattern": "all_small",
+        "region": "MAIN",
+        "ticks4": [
+          2500,
+          2500,
+          2500,
+          2500,
+          2500
+        ],
+        "ticks16": [
+          9592,
+          9592,
+          9592,
+          9592,
+          9592
+        ],
+        "slope": 9.234375,
+        "entry": 50122752,
+        "body": 50122756,
+        "code_SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441"
+      },
+      {
+        "case_id": 1,
+        "rs2": 2147483647,
+        "rs6": 2147483647,
+        "pattern": "all_large",
+        "region": "private_WRAM",
+        "ticks4": [
+          1433,
+          1433,
+          1433,
+          1433,
+          1433
+        ],
+        "ticks16": [
+          5321,
+          5321,
+          5321,
+          5321,
+          5321
+        ],
+        "slope": 5.0625,
+        "entry": 58721856,
+        "body": 58721860,
+        "code_SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441"
+      },
+      {
+        "case_id": 1,
+        "rs2": 2147483647,
+        "rs6": 2147483647,
+        "pattern": "all_large",
+        "region": "MAIN",
+        "ticks4": [
+          2756,
+          2756,
+          2756,
+          2756,
+          2756
+        ],
+        "ticks16": [
+          10616,
+          10616,
+          10616,
+          10616,
+          10616
+        ],
+        "slope": 10.234375,
+        "entry": 50122752,
+        "body": 50122756,
+        "code_SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441"
+      },
+      {
+        "case_id": 2,
+        "rs2": 127,
+        "rs6": 2147483647,
+        "pattern": "alternating",
+        "region": "private_WRAM",
+        "ticks4": [
+          1049,
+          1049,
+          1049,
+          1049,
+          1049
+        ],
+        "ticks16": [
+          3785,
+          3785,
+          3785,
+          3785,
+          3785
+        ],
+        "slope": 3.5625,
+        "entry": 58721856,
+        "body": 58721860,
+        "code_SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441"
+      },
+      {
+        "case_id": 2,
+        "rs2": 127,
+        "rs6": 2147483647,
+        "pattern": "alternating",
+        "region": "MAIN",
+        "ticks4": [
+          2628,
+          2628,
+          2628,
+          2628,
+          2628
+        ],
+        "ticks16": [
+          10104,
+          10104,
+          10104,
+          10104,
+          10104
+        ],
+        "slope": 9.734375,
+        "entry": 50122752,
+        "body": 50122756,
+        "code_SHA256": "5fa966df74ee4951f3e0f105dde25906bd16e3ad938a663f662ecf68cb673441"
+      }
+    ],
+    "predictions": {
+      "private_WRAM": {
+        "small": "33/16",
+        "large": "81/16",
+        "mixed": "57/16",
+        "local": "57/16",
+        "shared": "57/16",
+        "local_windows": {
+          "4": "1049",
+          "16": "3785"
+        },
+        "shared_windows": {
+          "4": "1049",
+          "16": "3785"
+        },
+        "anchor_scope": "Conditional same-code anchors; no old intercept/timing accepted or subtracted"
+      },
+      "MAIN": {
+        "small": "591/64",
+        "large": "655/64",
+        "mixed": "623/64",
+        "local": "623/64",
+        "shared": "591/64",
+        "local_windows": {
+          "4": "2628",
+          "16": "10104"
+        },
+        "shared_windows": {
+          "4": "2500",
+          "16": "9592"
+        },
+        "anchor_scope": "Conditional same-code anchors; no old intercept/timing accepted or subtracted"
+      }
+    },
+    "files": {
+      "a7mulmix_v1.csv": "b197218f9dee2f461f7f689359f27bddae218325a7e0b9302bb685522baef259",
+      "a7mulmix_v1_build.txt": "51e4cfc030f4d386360676d48274f327356aed8153a9b09848b7d56a097fa503",
+      "a7mulmix_v1_completion.txt": "a7992e479af5a0bf79efe2c2ac500b0653d62d89bb9a838aa238d4b154397655",
+      "a7mulmix_v1_helper_itcm.bin": "630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd",
+      "a7mulmix_v1_info.txt": "3dc6a21e583816cbf5cde8208f66c4bf9ee5ce1b96ad5cfa021cc38c5547c63a",
+      "a7mulmix_v1_k00_r0.bin": "910a2d2b2179781144223a3b0f4e9960f22c6fb68872ed8944b002c70742f251",
+      "a7mulmix_v1_k00_r1.bin": "501ac3ffb59ef10cf8524f4ae92a6bd168f9cc5432639cd4b4edca51a91cc9e6",
+      "a7mulmix_v1_k01_r0.bin": "4654e5996230261134b089b5d776e9381a39df1dc6286a05d97df680e7896318",
+      "a7mulmix_v1_k01_r1.bin": "7cb11a253647951a7f85084f47dd513482aa09f42f7480fe1bede7474d8fa7ec",
+      "a7mulmix_v1_k02_r0.bin": "ac7c20652f5ca5d01c43dca4ed3e807b911d7d5b3956c70b5c7b4e1b9112ac03",
+      "a7mulmix_v1_k02_r1.bin": "163a521f45c39cb2bcd443a7f39688aa30257f4e8971d6f6c4f05e39c4a2f2f4",
+      "a7mulmix_v1_progress.txt": "e85d76ffe35848e6c841d183db321a0f6e541ce28b4f2c29ccb568760a668169",
+      "a7mulmix_v1_setup.csv": "2c43d5b982b2a9f3867b09f67505a8ad6f3a018064b2ce89ece7f382fa69a8d3"
+    }
+  },
+  "valid_contradictory_timing_accepted": true,
+  "completed_resume_accepted": true,
+  "source_SHA256": {
+    "kernel.S": "27b2a7cf00e95bee09189f8850f39f5b43e8b31d5b2d91a9a4be438918eb39cf",
+    "quiet.itcm.c": "6e66471804be4a91480d5131d84f5508cc9979346e7797ad05ec3f1cea5ab82b",
+    "check.py": "c933c03371d3850e06f947db73d2fbd4723c7988e7d2d0c451171ca496e3ade3",
+    "arm7.c": "7f78c1b1a0ff4938f868baa7f3e3c6a4b13319b1fafe3f63fed2f8b6e62689e5",
+    "test_source.py": "e92df6c97092f80fc088d8ff8c2908f69bfcb70ce0a0f47bdb36096c79fe89c1",
+    "protocol.h": "cf85f6fc26ee10f156610c7cff6048434bfe67b3190f43f501451c68fa88d310",
+    "main.c": "a84c83161edac7711ad655736db386a0c3c9fbfad94292d64e67ca74a3108e7d",
+    "Makefile": "50d151e144d13ea885893cdbe7ff0fc4d30ee3fe5de00143de2347554f773fcf"
+  },
+  "status": "PASS source/object18 ISA runs; synthetic60raw/3840registers; actual C resume gates;10 payload mutations+4 opcode/ABI faults; actual weakened R6 predicate caught. SDK/host-ROM/DS timing NOT qualified.",
+  "reuse": {
+    "quiet_helper_source_exact_after_symbol_rename": true,
+    "upstream": "sw/hwref/a7mulphase/quiet.itcm.c",
+    "upstream_SHA256": "595287c35aef5ccf0137e96b21c3d25cb50b2ab89a7cfa79c32911af7a7ed419",
+    "scope": "Source-level reuse; exact new SDK helper/call/runtime not yet qualified"
+  },
+  "tests_command": "python3 sw/hwref/a7mulmix/test_source.py --output build/a7mulmix-source/recheck"
+}

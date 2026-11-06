@@ -58,4 +58,12 @@ void res_finish(void)
     int ok = (RESULT->mask & full_mask()) == full_mask();
     draw_mask(ok ? "ALL PASS  " : "FAIL      ", ok ? PAL_GREEN : PAL_RED);
     RESULT->done = 1;
+    /* ROMs that turn the MPU and D-cache on (cputime, unitmem, unitcpu) hold
+       the block in write-back lines: clean and invalidate the D-cache (4 KiB,
+       4 ways, 32-byte lines; harmless with the cache off), drain the write
+       buffer, so the testbench and melonDS's savestate see it in RAM */
+    for (u32 way = 0; way < 4; way++)
+        for (u32 i = 0; i < 32; i++)
+            __asm__ volatile("mcr p15, 0, %0, c7, c14, 2" :: "r"((way << 30) | (i << 5)));
+    __asm__ volatile("mcr p15, 0, %0, c7, c10, 4" :: "r"(0));
 }

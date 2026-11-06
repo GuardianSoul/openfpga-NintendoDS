@@ -1,0 +1,12 @@
+{
+  "status": "SOURCE PORT ONLY; exact qualified receiver minus observation ledger/module rename",
+  "source_base": "de6039a5",
+  "qualified": "087e3a66/174d268d/98373e35",
+  "before_sha256": "0ce5fbcf4878a4b0603ee85e8a63a88551865f94e4b93ea08778b921404fd457",
+  "production_sha256": "dacb3dc37fbfc75b23ba47ec1873753e95d7c3f8138841b64df561e4ddd43016",
+  "ports": "i_commit_valid, i_commit_addr[31:0], i_commit_accept; FLOW+aligned ARM MAIN only",
+  "integration": "CPU owns A7_IF_COMMIT default0; Root local cclk join ties valid0 on inactive route. No production countdown or price change.",
+  "exact_qualified_receiver": true,
+  "qlint": "PASS production P7",
+  "scope": "Source/targetedlint only; production pair runtime queued. Explicit caller valid0/addr0 required on disabled route; Root owns join. No new registers/counters/price/constants."
+}

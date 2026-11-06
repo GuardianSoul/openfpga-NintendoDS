@@ -374,12 +374,18 @@ module nds_fabric #(
     logic        u;
     logic        ura;           // DMA_RA: the unit's run continues past its quad
     wire         ugx = DMA_GX != 0 && dm_dst[27:24] == 4'h4 && dm_dst[12:9] == 4'd2;   // DMA_GX: the unit's destination is the GX FIFO or a command port
-    logic        ugw;           // DMA_GX: S_GO is that unit's write
+    logic        ugw;           // DMA_GX: S_GO is that unit's write (or, DMA_GX bit 1, the ARM9's)
+    // DMA_GX bit 1: an ARM9 write to the GX FIFO or a command port (0x04000400-5FF) is posted the same way: S_GO hands
+    // it to the engine's port (dx_valid) and the ARM9 is answered in S_DONE, without the I/O request and its io_ack
+    // (#1591's kh-heavy: about 10 clocks a write before). Later ARM9 accesses to the 3D registers wait for it (gx_hold)
+    wire         a9gx = (DMA_GX & 2) != 0 && a9_we && a9_addr[27:24] == 4'h4 && a9_addr[23:12] == 12'h000 && a9_addr[11:9] == 3'b010;
     wire         d_line = DMA_B8 != 0 && mst == 2'd0;                    // the access fills a 32-byte DMA line
     wire         f_this = d_line ? fw == addr[4:2] : fw[1:0] == addr[3:2];   // the fill's word is the access's
     wire [21:4]  uq_n = DMA_B8 != 0 ? {addr[21:5] + 17'd1, 1'b0} : addr[21:4] + 18'd1;   // the quad/line after this one
-    logic        io_go2;        // the clock before was S_GO too
-    always_ff @(posedge clk) io_go2 <= st == S_GO;
+    logic        io_go2;        // the clock before was S_GO too, with this addr, be and wdata
+    // (!u: a DMA_FAST unit's S_GO is its main RAM read, and a line-buffer hit reloads S_GO with the write's addr and
+    // wdata; without it io_pre fired a clock after them, inside the SDC's 2-clock fabric multicycle)
+    always_ff @(posedge clk) io_go2 <= st == S_GO && !u;
     // DMA_GX: an ARM9 access to the 3D registers waits while a posted word does
     wire gx_hold = DMA_GX != 0 && !dx_idle && !cpu && !addr[12] && (addr[11:10] != 2'd0 || addr[9:5] >= 5'h19);
     logic [21:4] uq;            // DMA_RA: the quad after the unit's source
@@ -446,6 +452,7 @@ module nds_fabric #(
                     wdata <= dm_size32 ? dm_wdata : {dm_wdata[15:0], dm_wdata[15:0]};
                 end else if (grant[1]) begin
                     mst <= 2'd1; cpu <= 1'b0; we <= a9_we; addr <= a9_addr; be <= a9_be; wdata <= a9_wdata;
+                    ugw <= a9gx;
                     blk <= MR_BLOCK != 0 && a9_n8;
                     if (MR_BLOCK != 0 && a9_n8) begin addr[4:0] <= 5'd0; be <= 4'hF; end
                 end else if (grant[2]) begin
@@ -616,6 +623,18 @@ module nds_fabric #(
     // (pocket-now: the second clock of S_GO, so addr, be, wdata -> the I/O registers are 2-clock paths in the SDC;
     // #1322/#1323 addr -> sys_timers, rtc, powcnt1 -0.43 ns; known difference: an I/O access +1 clock)
     assign io_pre   = st == S_GO && tgt == T_IO && !ugw && io_go2;
+`ifndef SYNTHESIS
+    // the SDC's fabric multicycle (scripts/build_ds.sh): an I/O request a clock after addr, be, wdata, we or cpu changed
+    logic [31:0] mc_addr, mc_wd;
+    logic [3:0]  mc_be;
+    logic        mc_we, mc_cpu;
+    always_ff @(posedge clk) begin
+        mc_addr <= addr; mc_wd <= wdata; mc_be <= be; mc_we <= we; mc_cpu <= cpu;
+        if (!rst && io_pre && {mc_addr, mc_wd, mc_be, mc_we, mc_cpu} != {addr, wdata, be, we, cpu})
+            $error("nds_fabric: io_pre a clock after its request changed (addr %08x was %08x, wdata %08x was %08x): the 2-clock fabric multicycle",
+                   addr, mc_addr, wdata, mc_wd);
+    end
+`endif
     assign io_req   = io_pre && !gx_hold;
     assign dx_valid = st == S_GO && ugw && dx_ready;
     assign io_cpu   = cpu;

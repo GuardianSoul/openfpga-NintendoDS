@@ -16,9 +16,16 @@ with the game's 16 bytes at 0x100:
   - a 64 KiB file: the boot program takes EEPROM 64 KiB from the file size
     (0xF1C), so 0x2100 no longer wraps and SVWRDI reads the file's bytes.
   - a 6000-byte file (no size type): EEPROM 8 KiB, the file then 0xFF.
-Then the boot program's savetab, with no .sav: KH 358/2 (YKG, EEPROM 64 KiB)
-and HeartGold (IPK, FLASH 512 KiB) from BOOT_ROMDIR, 8 frames each; the save
-memory's blank must cover the whole chip (16,384 and 131,072 words). Until
+Then the boot program's game list (savelist, melonDS's), with no .sav: KH
+358/2 (YKG, EEPROM 64 KiB, a bitmap prefix), HeartGold (IPK, FLASH 512 KiB, an
+exception), Burnout Legends (ABO, EEPROM 512 B, issue 1 of the public repo),
+The World Ends With You (AWL, EEPROM 64 KiB, issue 2) and NSMB (A2D, not
+listed: EEPROM 8 KiB) from BOOT_ROMDIR, 8 frames each; the save memory's
+blank must cover the whole chip (16,384, 131,072, 128, 16,384 and 2,048
+words). Before the list only 26 games had a type without the plugin's .ndt;
+the others got EEPROM 8 KiB, which Burnout reports as a write error and
+TWEWY as deleted save data. cart.nds under three more gamecodes covers the
+list's common-type and rare-type codes (CODE_CASES). Until
 2026-10-24 savetab was read through an absolute address (the boot ROM is
 linked at 0 and runs at 0xFFFF8000), never matched, and every game got
 EEPROM 8 KiB: 2,048 words here, and "backup memory failed" in HG (#253).
@@ -58,7 +65,11 @@ CASES = [
 ]
 
 # (ROM in BOOT_ROMDIR, words the blank of its chip writes)
-TYPE_CASES = [('kh358.nds', 16384), ('heartgold.nds', 131072)]
+TYPE_CASES = [('kh358.nds', 16384), ('heartgold.nds', 131072), ('burnout.nds', 128), ('twewy.nds', 16384),
+              ('nsmb.nds', 2048)]
+# cart.nds under other gamecodes, for the list's other paths: (code, words): a common type (Animal Crossing,
+# FLASH 256 KiB), the rare types' escape (Explorers of Sky, EEPROM 128 KiB; Platinum, FLASH 512 KiB)
+CODE_CASES = [('ADME', 65536), ('C2SE', 32768), ('CPUE', 131072)]
 
 # (file, original, planted fault)
 MUTANTS = [
@@ -96,23 +107,32 @@ def run_case(tb, case, d):
 
 
 def run_type(tb, rom, words):
-    r = subprocess.run([str(tb), '--rom', str(ROMS / rom), '--bios9', str(ROMS / 'bios9.bin'),
+    r = subprocess.run([str(tb), '--rom', str(rom if isinstance(rom, Path) else ROMS / rom), '--bios9', str(ROMS / 'bios9.bin'),
                         '--bios7', str(ROMS / 'bios7.bin'), '--firmware', str(ROMS / 'firmware.bin'),
                         '--frames', '8', '--quiet', '--sav-out', '/dev/null', '0'],
                        capture_output=True, text=True, cwd=ROOT, timeout=3600)
     line = next((l for l in r.stdout.splitlines() if l.startswith('save port')), '')
     got = int(line.split(', ')[1].split()[0]) if line else -1
-    return None if got == words else f'{rom}: blank of {got} words, expected {words} ({line or r.stdout[-300:]})'
+    # (cart.nds under another code also runs its own save checks: a few more writes; chip sizes differ 2x)
+    ok = got == words or (isinstance(rom, Path) and words <= got < words + 256)
+    return None if ok else f'{rom}: blank of {got} words, expected {words} ({line or r.stdout[-300:]})'
 
 
 def run_all(tb, quiet=False, types=True):
     if types:
-        for rom, words in TYPE_CASES:
-            p = run_type(tb, rom, words)
-            if not quiet:
-                print(f'savetab {rom}: {p or "PASS"}', flush=True)
-            if p:
-                return p
+        with tempfile.TemporaryDirectory() as t:
+            roms = list(TYPE_CASES)
+            for code, words in CODE_CASES:
+                r = bytearray((ROOT / 'build/ds-tests/cart.nds').read_bytes())
+                r[0x0C:0x10] = code.encode()
+                (Path(t) / f'{code}.nds').write_bytes(r)
+                roms.append((Path(t) / f'{code}.nds', words))
+            for rom, words in roms:
+                p = run_type(tb, rom, words)
+                if not quiet:
+                    print(f'savelist {rom if isinstance(rom, str) else rom.stem}: {p or "PASS"}', flush=True)
+                if p:
+                    return p
     with tempfile.TemporaryDirectory() as t:
         for i, case in enumerate(CASES):
             d = Path(t) / str(i)

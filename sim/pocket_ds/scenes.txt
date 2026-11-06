@@ -12,10 +12,11 @@ mkds-race    mkds.nds       mkds-race.mln    10     43768  0
 kh-menu      kh358.nds      exports/kh-menu  10     0      0
 nsmb-intro   nsmb.nds       nsmb-intro.mln   10     3484   0
 mkds-intro   mkds.nds       mkds-intro.mln   10     -      -      known
-# the maintainer's flicker spots on #1040 (states from mkds-intro.mln at frames 150, 290, 560: census --save-state-at)
-mkds-intro-corner    mkds.nds  mkds-intro-corner.mln     40  -  -  known
+# the maintainer's flicker spots on #1040 (states from mkds-intro.mln at frames 150, 290, 560: census --save-state-at);
+# corner and startline pass since claude/play6-mkds-full (SWHOLD, G3D_LEAD 192, PL 8, SL 9, PUMP 1)
+mkds-intro-corner    mkds.nds  mkds-intro-corner.mln     40  2561  777
 mkds-intro-cut       mkds.nds  mkds-intro-cut.mln        40  -  -  known
-mkds-intro-startline mkds.nds  mkds-intro-startline.mln  40  -  -  known
+mkds-intro-startline mkds.nds  mkds-intro-startline.mln  40  2758  14
 nsmb-busy    nsmb.nds       nsmb-busy.mln    10     0      0
 mkds-opening mkds.nds       mkds-opening.mln 10     46890  0
 kh-first-level kh358.nds    kh-first-level.mln 10   19315  0
@@ -48,3 +49,20 @@ mkds-pack2   mkds.nds      mkds-pack2.mln   16    -      -      known
 kh-heavy     kh358.nds      kh-tester-heavy.mln 16    -      -      known
 kh-heavy2    kh358.nds      kh-tester-heavy2.mln 16   -      -      known
 hg-tester      heartgold.nds  hg-tester.mln 16 - - known
+pkw2-title  pkw2.nds       pkw2-title.mln   16     -      -      known
+pkw2-intro  pkw2.nds       pkw2-intro.mln   16     -      -      known
+pkw2-city   pkw2.nds       pkw2-city.mln    64     -      -      known  hold=UP
+pkw2-cityw  pkw2.nds       pkw2-cityw.mln   48     -      -      known  hold=UP
+pkw2-city2w pkw2.nds       pkw2-city2w.mln  48     -      -      known  hold=LEFT
+# scenes from main (merge of the play line, docs/merge-play-main.md)
+# acww-title (the maintainer #822: "slow performance in 3D scenes" right after the first splash): Animal Crossing Wild World title screen, 3D town scene, no input; made from boot (census, frame 750)
+acww-title   acww.nds       acww-title.mln   64     -      -      known
+# tomodachi-island: Tomodachi Collection (English patch) after the clock setup (touch Yes/Done/Yes) and the first island dialogue; frame 4000 from boot
+tomodachi-island tomodachi.nds tomodachi-island.mln 64 -    -      known
+gtacw-menu  gtacw.nds      gtacw-menu.mln   10     -      -
+mph-hunt    mph.nds        mph-hunt.mln     10     -      -
+ff4-battle  ff4.nds        ff4-battle.mln   10     -      -
+eba-brief   eba.nds        eba-brief.mln    10     -      -
+# pkw2-load: pkw2-exit walked DOWN 114 frames (census --save-state-at), just before White 2 streams the next map
+# block from the card; sim/pocket_ds/w2load.sh compares main RAM and GX entries after the load with melonDS's
+pkw2-load   pkw2.nds       pkw2-load.mln    32     -      -      known  hold=DOWN

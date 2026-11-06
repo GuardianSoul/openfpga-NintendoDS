@@ -42,6 +42,28 @@ converted through the firmware's touch calibration. The touch is census-only,
 for menus that need it; the Pocket core has no touch input. `#` starts a
 comment.
 
+## Reference mode identity
+
+`census --build-info` prints the advertised mode and the named rules
+compiled into the linked core. Current shared builds advertise
+`ds-rules-23`; the output includes `DS_RULE_OBJWORK` and both rule counts23.
+Every run also records those fields in `summary.json`.
+`frontend_capabilities` separately lists the available terminal-output handlers.
+The current frontend supports `final-state`, `final-save` and `save-state-save`;
+add `--require-capabilities final-state,final-save,save-state-save` when the
+generator requires all three. Unsupported requirements exit3 before ROM load.
+
+Pass `--expect-mode ds-rules-23` when generating references. A requested-mode
+mismatch, or a CLI/core identity mismatch, exits3 before loading the ROM or
+creating output. A partial/stale linked core must not silently label new
+references as the current mode. Build information is an identity receipt;
+DS comparisons separately establish rule behavior.
+
+[FullCLI23 qualification](../../docs/census23-cli.md) binds the frozen source,
+actual compile flags/binary, caught linked-mode fault and all38 real-DS
+capture comparisons. Existing game references remain separate until the
+combined game gate runs with this explicit mode.
+
 ## Homebrew SD card
 
 `--sd-dir DIR` gives a homebrew ROM melonDS's DLDI SD card: a 64 MiB FAT
@@ -247,3 +269,54 @@ To regenerate the patch after changing `Census.h` or `apply_hooks.py`:
 export the pinned melonDS into an empty directory, `git init` and commit
 it, run `apply_hooks.py <dir>/src`, then `git add -A` and
 `git diff --cached > melonds-census.patch`.
+
+`ds-rules-objwork.patch` adds the bounded DS runs38–40 OBJ work rule behind
+`DS_RULE_OBJWORK`; `MELONDS_STOCK` suppresses it. `build.sh` applies it after
+the existing2D patch, and CMake enables the flag for Census builds. The
+measured bit23=0 normal form uses2124 marker-pixel work units, full nominal
+normal width, zero extra active setup and2 per disabled entry. Identity
+affine64 total138 is measured; the retained10+2×width continuation and free
+Y misses are unresolved aliases. Bit23=1 keeps the previous unlimited path.
+These are not measured hardware clock costs or a general feature-cost law.
+
+The [shared reference proof](../../docs/results/objwork-census31/qualification.json)
+replays the actual ordered build patches against the pinned upstream. Its
+software-only full-frame gate matches the qualified core/DS outputs and
+catches a separately compiled disabled-charge fault. Flag-off, stock and
+bit23 fallback outputs equal the previous reference. This qualifies the
+shared2D component and wiring; a new complete Census CLI/game reference
+still requires coordinator qualification. See
+[the core evidence](../../docs/objwork-closure31.md).
+
+Incremental reference builds must verify the complete original patched-source and
+header hash snapshot after every host mirror. The first terminal binary1472c341
+was withdrawn after unpatched headers shifted the idle predicate by32 bytes.
+Repaired2ff70684 uses the same core, restores clean0:193/all21 original exports,
+and retains the failure and guards in the [qualification](../../docs/census23-cli.md).
+
+### Read-only clean runtime export
+
+`--export-clean DIR --export-runtime 1` also writes `DIR/runtime.json` at
+that same clean scanline callback, before the line is processed. Schema1
+contains raw scheduler timestamps, timer counters (including fractional
+bits), IRQ/IPC, DMA working state, SPU channel/capture FIFOs and display
+latches. It reads fields directly and does not invoke device update,
+renderer preparation or save-state methods. Source-device objects and
+live RAM are byte-compared before/after the export in the paused instance.
+The capability is `clean-runtime`; the option requires the clean hook.
+
+The [qualification packet](../../docs/results/clean-runtime-export-20261101/qualification.json)
+binds the unchanged Census23 core/ABI, six original100-frame windows,
+600 exact frame files,126 exact initial exports and exact terminal common
+semantic state. An actual exporter mutation of channel0 TimerReload is
+caught by the direct source guard. Runtime payloads and all retained output
+hashes are included; compiler/large output scratch is separate.
+
+This exporter does not qualify a native restore. In the inherited MKDS
+clean state, active timer4 has F/64 fraction52 while timers0/1/5 and the
+global epoch have fraction42. The next-edge audit, including both CPU domains and lazy timestamps,
+finds timer4 increments10SYS early. The native DS-verified shared free
+prescaler cannot represent both unchanged. DMA3 is also in progress with68 words
+remaining, and each capture has8 pending bytes at write offset1616.
+The original seed's runtime is not the clean payload. No normalization,
+restart, oracle shift or native scene acceptance is implied.

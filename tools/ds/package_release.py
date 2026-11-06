@@ -37,7 +37,7 @@ SHORTNAME = 'NintendoDS'
 CORE = f'{AUTHOR}.{SHORTNAME}'
 REPO = f'https://github.com/{AUTHOR}/openfpga-NintendoDS'
 PLATFORM = 'nds'
-SOURCE_CORES = ('GuardianSoul.NintendoDS', CORE)        # the workspace packager's core id, and the public one
+SOURCE_CORES = ('GuardianSoul.NintendoDS', CORE)        # the workspace packager's core id (and its named builds, GuardianSoul.NintendoDSPlayRC1), and the public one
 SOURCE_PLATFORMS = ('ds', PLATFORM)
 LICENSES = (                               # (source, name in the core's licenses folder)
     (ROOT/'licenses/MIT.txt', 'MIT.txt'),
@@ -75,7 +75,7 @@ def main():
     result = args.result.read_text()
     if not re.search(r'timing PASS', result): parser.error(f'{args.result}: timing did not pass')
     package = args.package.resolve()
-    cores = [c for c in (package/'SD/Cores').iterdir() if c.name in SOURCE_CORES]
+    cores = [c for c in (package/'SD/Cores').iterdir() if c.name.startswith(SOURCE_CORES)]
     if len(cores) != 1: parser.error(f'expected one of {SOURCE_CORES} in {package}/SD/Cores')
     source_platform = next((p for p in SOURCE_PLATFORMS if (package/f'SD/Platforms/{p}.json').is_file()), None)
     if not source_platform: parser.error('package has no DS platform')

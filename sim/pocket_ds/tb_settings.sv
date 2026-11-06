@@ -33,6 +33,10 @@ module tb_settings;
                 SET_SELECT_ABXY_IDX:   set_a[SET_SELECT_ABXY_BIT +: SET_SELECT_ABXY_W] <= set_v(SET_SELECT_ABXY_W);
                 SET_CURSOR_SPEED_IDX:  set_a[SET_CURSOR_SPEED_BIT +: SET_CURSOR_SPEED_W] <= set_v(SET_CURSOR_SPEED_W);
                 SET_SCREEN_ROTATION_IDX: set_a[SET_SCREEN_ROTATION_BIT +: SET_SCREEN_ROTATION_W] <= set_v(SET_SCREEN_ROTATION_W);
+                SET_A_IN_TOUCH_MODE_IDX: set_a[SET_A_IN_TOUCH_MODE_BIT +: SET_A_IN_TOUCH_MODE_W] <= set_v(SET_A_IN_TOUCH_MODE_W);
+                SET_B_IN_TOUCH_MODE_IDX: set_a[SET_B_IN_TOUCH_MODE_BIT +: SET_B_IN_TOUCH_MODE_W] <= set_v(SET_B_IN_TOUCH_MODE_W);
+                SET_X_IN_TOUCH_MODE_IDX: set_a[SET_X_IN_TOUCH_MODE_BIT +: SET_X_IN_TOUCH_MODE_W] <= set_v(SET_X_IN_TOUCH_MODE_W);
+                SET_Y_IN_TOUCH_MODE_IDX: set_a[SET_Y_IN_TOUCH_MODE_BIT +: SET_Y_IN_TOUCH_MODE_W] <= set_v(SET_Y_IN_TOUCH_MODE_W);
                 default: ;
             endcase
     wire [SET_BITS-1:0] set_b;
@@ -40,14 +44,15 @@ module tb_settings;
 
     wire [1:0] layout;
     wire touch, cursor, pen;
-    wire [7:0] cx, cy;
+    wire [7:0] cx, cy, px, py;
     wire [15:0] ds_keys;
     nds_controls dut (.clk, .reset, .apf_keys(keys), .apf_type(ctype), .apf_joy(joy), .frame,
-        .combo_sel({set_b[SET_SELECT_ABXY_BIT], set_b[SET_SELECT_LR_BIT]}), .touch_btn(2'd0),
+        .combo_sel({set_b[SET_SELECT_ABXY_BIT], set_b[SET_SELECT_LR_BIT]}), .gest({set_b[SET_Y_IN_TOUCH_MODE_BIT +: 3], set_b[SET_X_IN_TOUCH_MODE_BIT +: 3],
+               set_b[SET_B_IN_TOUCH_MODE_BIT +: 3], set_b[SET_A_IN_TOUCH_MODE_BIT +: 3]}),
         .speed(set_b[SET_CURSOR_SPEED_BIT +: 2]), .layout_set(2'd0), .set_new(1'b0),
-        .layout, .touch, .cursor, .pen, .cur_x(cx), .cur_y(cy), .ds_keys);
+        .layout, .touch, .cursor, .pen, .cur_x(cx), .cur_y(cy), .pen_x(px), .pen_y(py), .ds_keys);
 
-    localparam K_DOWN = 1, K_UP = 0, K_RIGHT = 3, K_A = 4, K_B = 5, K_X = 6, K_Y = 7, K_L = 8, K_R = 9, K_SEL = 14;
+    localparam K_DOWN = 1, K_UP = 0, K_LEFT_ = 2, K_RIGHT = 3, K_A = 4, K_B = 5, K_X = 6, K_Y = 7, K_L = 8, K_R = 9, K_SEL = 14;
     task automatic wait_clk(input integer n); repeat (n) @(posedge clk); endtask
     task automatic setting(input integer idx, input integer v);
         @(posedge clk_74a) begin bridge_wr <= 1; bridge_addr <= 32'h5000_0000 | (idx << 2); bridge_wr_data <= {v[7:0], 24'd0}; end   // byte-swapped, as the APF delivers it (bridge_endian_little)
@@ -203,6 +208,82 @@ module tb_settings;
         release_(K_A); release_(K_SEL); wait_clk(8);
         check("both Off: layout unchanged", layout, 0);
         check("both Off: touch unchanged", touch, 0);
+        // gestures (A/B/X/Y in Touch Mode): one point a frame from the cursor, the pen up after the last
+        setting(SET_SELECT_LR_IDX, 0);
+        setting(SET_SELECT_ABXY_IDX, 0);
+        combo(K_Y);                    check("gestures: touch on", touch, 1);
+        setting(SET_CURSOR_SPEED_IDX, 2);   // 6 px a frame
+        press(K_LEFT_); frames(60); release_(K_LEFT_);
+        press(K_UP); frames(40); release_(K_UP);
+        check("gestures: cursor at the top left", cx * 256 + cy, 0);
+        press(K_RIGHT); press(K_DOWN); frames(15); release_(K_RIGHT); release_(K_DOWN);   // (90, 90)
+        setting(SET_B_IN_TOUCH_MODE_IDX, 7);    // Swipe Right
+        setting(SET_X_IN_TOUCH_MODE_IDX, 2);    // Circle
+        setting(SET_Y_IN_TOUCH_MODE_IDX, 4);    // Swipe Up
+        setting(SET_A_IN_TOUCH_MODE_IDX, 3);    // Big Circle
+        check("gestures: cursor", cx * 256 + cy, 90 * 256 + 90);
+        press(K_B);                    check("Swipe Right: B held back", ds_keys[K_B], 0);
+        check("Swipe Right: no pen before the frame", pen, 0);
+        for (int k = 0; k <= 12; k++) begin
+            frames(1); wait_clk(2);
+            check("Swipe Right: pen down", pen, 1);
+            check("Swipe Right: x", px, 90 + 8 * k);
+            check("Swipe Right: y", py, 90);
+            if (k == 2) release_(K_B);
+        end
+        frames(1); wait_clk(2);        check("Swipe Right: pen up after 96 px", pen, 0);
+        check("Swipe Right: the cursor stays", cx, 90);
+        check("Swipe Right: the pen back at the cursor", px, 90);
+        // Circle: radius 24, 16 points from the top, clockwise, again while X is held
+        begin
+            int cxs[16] = '{0, 10, 16, 22, 24, 22, 16, 10, 0, -10, -16, -22, -24, -22, -16, -10};
+            int bxs[16] = '{0, 18, 34, 44, 48, 44, 34, 18, 0, -18, -34, -44, -48, -44, -34, -18};
+            press(K_X);
+            for (int k = 0; k < 20; k++) begin
+                frames(1); wait_clk(2);
+                check("Circle: pen down", pen, 1);
+                check("Circle: x", px, 90 + cxs[k % 16]);
+                check("Circle: y", py, 90 - cxs[(k + 4) % 16]);
+            end
+            release_(K_X);
+            for (int k = 20; k < 32; k++) begin
+                frames(1); wait_clk(2);
+                check("Circle: the loop finishes", pen, 1);
+                check("Circle: x (finishing)", px, 90 + cxs[k % 16]);
+            end
+            frames(1); wait_clk(2);    check("Circle: pen up after the loop", pen, 0);
+            // Big Circle (A): radius 48, 16 points from the top, clockwise, again while A is held
+            press(K_A);
+            for (int k = 0; k < 20; k++) begin
+                frames(1); wait_clk(2);
+                check("Big Circle: pen down", pen, 1);
+                check("Big Circle: x", px, 90 + bxs[k % 16]);
+                check("Big Circle: y", py, 90 - bxs[(k + 4) % 16]);
+                if (k == 17) release_(K_A);
+            end
+            for (int k = 20; k < 32; k++) begin
+                frames(1); wait_clk(2);
+                check("Big Circle: the loop finishes", pen, 1);
+                check("Big Circle: x (finishing)", px, 90 + bxs[k % 16]);
+            end
+            frames(1); wait_clk(2);    check("Big Circle: pen up after the loop", pen, 0);
+            check("Big Circle: A held back", ds_keys[K_A], 0);
+        end
+        // a held button doesn't repeat a swipe; Swipe Up clamps at the top
+        press(K_UP); frames(8); release_(K_UP);     // y 90 - 8 * 6 = 42
+        press(K_Y);
+        for (int k = 0; k <= 12; k++) begin
+            frames(1); wait_clk(2);
+            check("Swipe Up: y", py, 42 - 8 * k < 0 ? 0 : 42 - 8 * k);
+        end
+        frames(3); wait_clk(2);        check("Swipe Up: no repeat while held", pen, 0);
+        release_(K_Y);
+        // Button: the button reaches the game in touch mode, no pen
+        setting(SET_A_IN_TOUCH_MODE_IDX, 0);
+        press(K_A); frames(1); wait_clk(2);
+        check("Button: A reaches the game", ds_keys[K_A], 1);
+        check("Button: no pen", pen, 0);
+        release_(K_A);
         if (errors == 0) $display("TEST PASSED"); else $display("TEST FAILED (%0d)", errors);
         $finish;
     end

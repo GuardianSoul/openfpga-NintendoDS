@@ -6,6 +6,7 @@
 // skips its hang-suspect phase in this mode (gxtime.nds still has it).
 #include "../common/hwref.h"
 #include <stdio.h>
+#include <string.h>
 
 int hwref_main_memtime(void);
 int hwref_main_gxtime(void);
@@ -24,9 +25,21 @@ int hwref_main_gxburst(void);
 int hwref_main_sndq(void);
 int hwref_main_late3d(void);
 int hwref_main_tmcnt(void);
+int hwref_main_wbuf(void);
+int hwref_main_cacheorg(void);
+int hwref_main_openq(void);
+int hwref_main_dmaslip(void);
+int hwref_main_gxlatency(void);
+int hwref_main_rdtimeline(void);
 
 // secs: expected time on the DS, shown in the menu; new_secs in "new only".
-static const struct { const char* name; int (*fn)(void); int secs, new_secs; } s_steps[] = {
+// first: runs before the others (a step that can't hang, ahead of riskier ones).
+static const struct { const char* name; int (*fn)(void); int secs, new_secs; bool first; } s_steps[] = {
+#ifdef HWREF_SPEED_TRIP
+	{ "late3d_v2", hwref_main_late3d, 5, 5, true },
+	{ "gxlatency_v4", hwref_main_gxlatency, 180, 180, false },
+	{ "rdtimeline_v1", hwref_main_rdtimeline, 3, 3, true },
+#else
 	{ "memtime", hwref_main_memtime, 2 },
 	{ "gxtime",  hwref_main_gxtime, 15 },
 	{ "cap3d",   hwref_main_cap3d, 15 },
@@ -48,18 +61,47 @@ static const struct { const char* name; int (*fn)(void); int secs, new_secs; } s
 	{ "sndq",    hwref_main_sndq, 5 },
 	{ "late3d",  hwref_main_late3d, 5 },
 	{ "tmcnt",   hwref_main_tmcnt, 1 },
+	{ "wbuf",    hwref_main_wbuf, 1, 0, true },   // fixed code only: ahead of memtime v2's GX part
+	{ "cacheorg", hwref_main_cacheorg, 1 },
+	{ "dmaslip", hwref_main_dmaslip, 6 },
+	// openq writes CP15 and the abort vector: last
+	{ "openq",   hwref_main_openq, 1 },
+#endif
 };
+
+#ifdef HWREF_SPEED_TRIP
+#define ALL_PROGRESS HWREF_DIR "/hwref_speed_progress.txt"
+#else
+#define ALL_PROGRESS HWREF_DIR "/hwref_all_progress.txt"
+#endif
 
 static void log_line(const char* s)
 {
 	if (!hw_fat_ok) return;
-	FILE* f = fopen(HWREF_DIR "/hwref_all_progress.txt", "a");
+	FILE* f = fopen(ALL_PROGRESS, "a");
 	if (f) { fputs(s, f); fputc('\n', f); fclose(f); }
 }
 
 // The steps not yet run on the DS (the menu's default): update with each
 // staged batch. Bit i = s_steps[i].
-#define NEW_STEPS (1u << 0)    // memtime v2 (CPU session: DMA3 main -> I/O, main -> GX port and FIFO)
+#ifdef HWREF_SPEED_TRIP
+#define NEW_STEPS 7u // only late3d v2 restart, GX v4 and three new raster timelines
+#else
+#define NEW_STEPS (1u << 19)   // legacy menu; never shipped for the speed trip
+#endif
+
+#ifdef HWREF_SPEED_TRIP
+static u32 completed_steps(int n)
+{
+	FILE* f=fopen(ALL_PROGRESS,"rb");
+	if(!f)return 0;
+	u32 done=0;char line[96],name[64];
+	while(fgets(line,sizeof line,f))
+		if(sscanf(line,"done %63s",name)==1)
+			for(int i=0;i<n;i++)if(!strcmp(name,s_steps[i].name))done|=1u<<i;
+	fclose(f);return done;
+}
+#endif
 
 static int secs_of(u32 mask, bool new_only)
 {
@@ -116,20 +158,28 @@ int main(void)
 	hw_chain = &jb;
 	int n = sizeof s_steps / sizeof s_steps[0];
 	hw_init("hwref - all programs");
-	remove(HWREF_DIR "/hwref_all_progress.txt");
+#ifndef HWREF_SPEED_TRIP
+	remove(ALL_PROGRESS);
+#endif
 #ifdef HWREF_STEPS   // debugging (and melonDS runs): a bit mask of the steps, no menu
 	u32 run = HWREF_STEPS;
 #else
 	u32 run = menu(n);
+#endif
+#ifdef HWREF_SPEED_TRIP
+	// Re-enter an interrupted program: its own case journal skips the hung
+	// case. Completed programs remain untouched, even on repeated launches.
+	run &= ~completed_steps(n);
 #endif
 	{
 		char line[48];
 		snprintf(line, sizeof line, "steps %02lx", (unsigned long)run);
 		log_line(line);
 	}
-	for (volatile int i = 0; i < n; i++) {
+	for (volatile int j = 0; j < 2 * n; j++) {
 		char line[64];
-		if (!(run >> i & 1)) continue;
+		int i = j % n;
+		if (!(run >> i & 1) || s_steps[i].first != (j < n)) continue;
 		if (!setjmp(jb)) {
 			snprintf(line, sizeof line, "start %s", s_steps[i].name);
 			log_line(line);

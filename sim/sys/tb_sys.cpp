@@ -24,8 +24,9 @@ static std::mt19937_64 rng;
 static long fails = 0, checks = 0;
 static bool cmp_irq = false;
 static bool tmr_lag = false;
-enum { TMR_LAG = 40 };
-static u64 tmr_n[8], tmr_h[8][TMR_LAG], tmr_off1 = 0, tmr_reads = 0;
+static u64 tmr_n[8], tmr_cov[6];     // IRQs at F/1, F/64, F/256, F/1024, cascaded; with a write to the timer that clock
+static u64 tmr_wcyc[8], tmr_w1 = 0;
+static bool tmr_w1h[8];
 static const char* phase = "";
 
 static u32 rnd(u32 n) { return (u32)(rng() % n); }
@@ -68,18 +69,24 @@ static void eval_edge() {
     CHECK(!top->math_late, "divider/sqrt result missed its deadline");
     CHECK(!top->dma_lat_lost, "DMA enable-edge copy dropped");
     if (tmr_lag) {
-        // the timers come out at their entry's visit: every overflow's IRQ, none early, none later than TMR_LAG clocks
+        // every overflow's IRQ on the golden model's clock (docs/timer-exact-plan.md), none armed too late to fire on time
         G.at(cyc >> 1); G.RunTimers(0); G.RunTimers(1);
         for (int i = 0; i < 8; i++) {
             if (top->rootp->nds_sys__DOT__tirq >> i & 1) {
                 tmr_n[i]++;
+                tmr_cov[G.Timers[i].Cnt & 4 ? 4 : G.Timers[i].Cnt & 3]++;
+                if (tmr_wcyc[i] + 1 == cyc) tmr_cov[5]++;
             }
-            tmr_h[i][cyc % TMR_LAG] = G.IrqN[i];
-            CHECK(tmr_n[i] <= G.IrqN[i], "timer %d: IRQ %llu before the golden model's %llu", i,
+            // (one exception: a write on the overflow's own tick edge, whose new state overflows there, fires a clock later)
+            if (tmr_n[i] + 1 == G.IrqN[i] && tmr_wcyc[i] + 1 == cyc && !tmr_w1h[i]) { tmr_w1++; tmr_w1h[i] = true; continue; }
+            tmr_w1h[i] = false;
+            CHECK(tmr_n[i] == G.IrqN[i], "timer %d: IRQ %llu, the golden model's %llu", i,
                   (unsigned long long)tmr_n[i], (unsigned long long)G.IrqN[i]);
-            CHECK(tmr_n[i] >= tmr_h[i][(cyc + 1) % TMR_LAG], "timer %d: IRQ %llu more than %d clocks after the golden model's %llu", i,
-                  (unsigned long long)tmr_n[i], TMR_LAG, (unsigned long long)tmr_h[i][(cyc + 1) % TMR_LAG]);
+            if (tmr_n[i] != G.IrqN[i]) tmr_n[i] = G.IrqN[i];   // (one report per IRQ)
         }
+        static int miss = 0;
+        CHECK(top->rootp->nds_sys__DOT__u_tmr__DOT__miss == miss, "timer overflow came out at a visit, late");
+        miss = top->rootp->nds_sys__DOT__u_tmr__DOT__miss;
     }
     if (cmp_irq) {
         G.at(cyc >> 1);
@@ -138,10 +145,9 @@ static u32 io(u32 cpu, u32 addr, bool we, u32 be = 0xF, u32 wd = 0, bool check =
     G.at(n >> 1);
     u32 g = 0;
     if (we) G.write(cpu, addr, wd, be); else g = G.read(cpu, addr, be);
+    if (we && addr >= 0x100 && addr < 0x110) tmr_wcyc[cpu * 4 + (addr - 0x100) / 4] = n;
     step(true, cpu, we, be, addr, wd);
     u32 r = top->io_rdata;
-    // (a timer above timer 0, a tick either way: the overflow below it not visited yet, around a change of cascade mode)
-    if (!we && check && tmr_lag && addr > 0x100 && addr < 0x110 && ((r - g + 1) & 0xFFFF) <= 2 && (r >> 16) == (g >> 16)) { if (r != g) tmr_off1++; return r; }
     if (!we && check) CHECK(r == g, "ARM%d read %07x: rtl %08x gold %08x", cpu ? 7 : 9, addr, r, g);
     return r;
 }
@@ -240,16 +246,57 @@ static void test_timers(int n) {
                 io(cpu, a, true, rnd(3) == 0 ? 0xC : rnd(2) ? 0x4 : 0x8, c << 16);
                 break;
             }
+            case 4: {                                  // a control write timed onto an F/1 overflow, a few clocks either way
+                G.at(cyc >> 1); G.RunTimers(cpu);
+                const gold::Timer& T = G.Timers[cpu * 4 + t];
+                u32 left = 0x10000 - (T.Counter >> 10);
+                if ((T.Cnt & 0x87) != 0x80 || left > 60) { io(cpu, a, false); break; }
+                int w = 2 * (int)left - 4 + (int)rnd(7);
+                idle(w > 0 ? w : 0);
+                u32 c = rnd(4) | (rnd(4) == 0 ? 4 : 0) | (rnd(2) ? 0x40 : 0) | (rnd(5) ? 0x80 : 0);
+                io(cpu, a, true, rnd(2) ? 0xC : 0xF, (u32)(0x10000 - 20 - rnd(400)) | c << 16);
+                break;
+            }
             default: io(cpu, a, false);
         }
         idle(rnd(4) == 0 ? rnd(300) : rnd(6));
     }
     for (u32 c = 0; c < 2; c++) for (u32 t = 0; t < 4; t++) io(c, 0x100 + 4 * t, true, 0xC, 0);
     idle(64);
+    // directed, checked on every clock as above: each prescale from 0xFFFF and nearby reloads (the divider's phase
+    // runs free, so every start lands somewhere new); a four-timer cascade chain overflowing together; a write swept
+    // over every clock of the countdown window (stop, prescale change, IRQ enable off and on, restart)
+    for (u32 c = 0; c < 2; c++) {
+        u32 a = 0x100 + 4 * rnd(4);
+        for (u32 p = 0; p < 4; p++) for (int k = 0; k < 12; k++) {
+            io(c, a, true, 0xF, ((p ? 0xFFFFu : 0xFFEFu) - rnd(3)) | (0xC0 | p) << 16);   // (F/1 above 0xFFEF: see above)
+            idle((2 << (p ? 2 * p + 4 : 0)) * (2 + rnd(3)) + rnd(9));
+            io(c, a, true, 0xC, 0);
+        }
+        io(c, 0x100, true, 0xF, 0xFFF0 | 0xC0u << 16);
+        io(c, 0x104, true, 0xF, 0xFFFE | 0xC4u << 16);
+        io(c, 0x108, true, 0xF, 0xFFFF | 0xC4u << 16);
+        io(c, 0x10C, true, 0xF, 0xFFFF | 0xC4u << 16);
+        idle(2000);
+        for (u32 t = 0; t < 4; t++) io(c, 0x100 + 4 * t, true, 0xC, 0);
+        static const u32 to[6] = {0x00, 0xC1, 0x80, 0xC0, 0xC2, 0xC3};   // stop, F/64, IRQ off, as is, F/256, F/1024
+        for (int off = 0; off < 72; off++) for (u32 m = 0; m < 6; m++) {
+            io(c, 0x100, true, 0xF, 0xFFE0 | 0xC0u << 16);
+            idle(off);
+            io(c, 0x100, true, 0xC, to[m] << 16);
+            idle(90);
+            io(c, 0x100, true, 0xC, 0);
+        }
+    }
+    idle(64);
     tmr_lag = false;
     for (u32 c = 0; c < 2; c++) io(c, 0x214, true, 0xF, 0xFFFFFFFF);
-    printf("timers: %llu reads a tick off on timers 1-3\n", (unsigned long long)tmr_off1);
-    CHECK(tmr_off1 < (u64)n / 100, "too many timer reads a tick behind: %llu", (unsigned long long)tmr_off1);
+    printf("timers: %llu IRQs a clock late after a write on the overflow's tick edge (sys_timers wlate %d)\n",
+           (unsigned long long)tmr_w1, (int)top->rootp->nds_sys__DOT__u_tmr__DOT__wlate);
+    printf("timers: exact IRQs F/1 %llu, F/64 %llu, F/256 %llu, F/1024 %llu, cascaded %llu; on a write's clock %llu\n",
+           (unsigned long long)tmr_cov[0], (unsigned long long)tmr_cov[1], (unsigned long long)tmr_cov[2],
+           (unsigned long long)tmr_cov[3], (unsigned long long)tmr_cov[4], (unsigned long long)tmr_cov[5]);
+    for (int k = 0; k < 6; k++) CHECK(tmr_cov[k] + (k == 5 ? tmr_w1 : 0) > 0, "timer IRQ case %d never hit", k);
 }
 
 // ================================================================ IPC

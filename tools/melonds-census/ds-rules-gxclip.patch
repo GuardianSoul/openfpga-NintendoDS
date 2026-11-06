@@ -1,0 +1,97 @@
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -44,6 +44,20 @@
+ static constexpr bool GXDS_LOAD_CAPTURED = false;
+ #endif
+ static int GxDs(const char* n, int d) { const char* v = getenv(n); return v ? atoi(v) : d; }
++// Covered DS runs8/38 side-triangle cases only. The high slot bit is
++// private model state; keeping it here preserves GPU3D's serialized layout.
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_GXCLIP)
++static constexpr unsigned GXDS_CLIP_SLOT = 1u << 31;
++#else
++static constexpr unsigned GXDS_CLIP_SLOT = 0;
++#endif
++static int GxClipRemaining(unsigned mode, bool side, int out, int added)
++{
++    if (!GXDS_CLIP_SLOT || mode != 0 || !side) return 0;
++    if ((out == 4 && (added == 2 || added == 3)) || (out == 3 && added == 2))
++        return 14 + 8*out + 24*added;
++    return 0;
++}
+ static const int GXDS_CLIPA = GxDs("GXDS_CLIPA", GXDS_DEF(40)), GXDS_CLIPB = GxDs("GXDS_CLIPB", GXDS_DEF(25)),
+                  GXDS_QS = GxDs("GXDS_QS", GXDS_DEF(9)), GXDS_VS = GxDs("GXDS_VS", GXDS_DEF(1)),
+                  GXDS_L43 = GxDs("GXDS_L43", GXDS_LOAD_CAPTURED ? 0 : GXDS_DEF(2));
+@@ -732,11 +746,14 @@
+         if (PolygonPipeline > num)
+         {
+             PolygonPipeline -= num;
+-            VertexSlotCounter += num;
+-            while (VertexSlotCounter > 9)
+-            {
+-                VertexSlotCounter -= 9;
+-                VertexSlotsFree >>= 1;
++            if (!(VertexSlotsFree & GXDS_CLIP_SLOT))
++            {
++                VertexSlotCounter += num;
++                while (VertexSlotCounter > 9)
++                {
++                    VertexSlotCounter -= 9;
++                    VertexSlotsFree >>= 1;
++                }
+             }
+         }
+         else
+@@ -750,6 +767,11 @@
+
+ void GPU3D::NextVertexSlot() noexcept
+ {
++    if (VertexSlotsFree & GXDS_CLIP_SLOT)
++    {
++        AddCycles(PolygonPipeline);
++        return;
++    }
+     s32 num = (9 - VertexSlotCounter) + 1;
+
+     for (;;)
+@@ -795,6 +817,11 @@
+ {
+     if (PolygonPipeline > 0)
+     {
++        if (VertexSlotsFree & GXDS_CLIP_SLOT)
++        {
++            if (delay == 1) delay = -1;       // measured BEGIN overlaps the clip
++            else if (delay == 9 || delay == 11) delay = 0;  // measured LIGHT_VECTOR adds six total
++        }
+         CycleCount += PolygonPipeline + delay;
+
+         // can be safely assumed those two will go to zero
+@@ -1111,6 +1138,10 @@
+
+     // clipping
+
++    bool gxds_side = true;
++    for (int i=0;i<nverts;i++)
++        if (clippedvertices[i].Position[2] > clippedvertices[i].Position[3] ||
++            clippedvertices[i].Position[2] < -clippedvertices[i].Position[3]) gxds_side = false;
+     nverts = ClipPolygon<true>(*this, clippedvertices, nverts, clipstart);
+     int gxds_new = 0;
+     for (int i = 0; i < nverts; i++) if (clippedvertices[i].Clipped) gxds_new++;
+@@ -1241,7 +1272,17 @@
+         else                   VertexSlotsFree = 0b1110;
+     }
+
+-    if (gxds_new) AddCycles(GXDS_CLIPA + GXDS_CLIPB * gxds_new);
++    int gxds_remaining = GXDS_CLIPA == 40 && GXDS_CLIPB == 25 ?
++        GxClipRemaining(PolygonMode, gxds_side, nverts, gxds_new) : 0;
++    if (gxds_remaining)
++    {
++        // SubmitVertex's final three cycles advance this to the measured
++        // remaining occupancy. Input commands may run while these slots wait.
++        PolygonPipeline = gxds_remaining + 3;
++        VertexSlotCounter = 1;
++        VertexSlotsFree = GXDS_CLIP_SLOT;
++    }
++    else if (gxds_new) AddCycles(GXDS_CLIPA + GXDS_CLIPB * gxds_new);
+     if ((PolygonMode & 3) == 3) CycleCount += GXDS_QS;
+
+     Polygon* poly = &CurPolygonRAM[NumPolygons++];

@@ -1,0 +1,86 @@
+# Bounded DS OBJ work rule (runs38--40); enabled only by DS_RULE_OBJWORK,
+# suppressed by MELONDS_STOCK. Normal-marker-pixel units, not DS clock costs.
+# Bit23=1 retains unlimited rendering; affine slope/setup and Y-miss aliases
+# remain unmeasured. Apply after the existing Census/DS patches.
+--- a/src/GPU2D_Soft.cpp
++++ b/src/GPU2D_Soft.cpp
+@@ -1023,6 +1023,11 @@
+ 
+ void SoftRenderer2D::DrawSprites(u32 line)
+ {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++    // DS runs38--40, bit23=0: work units, not renderer execution clocks.
++    const bool dsWorkLimit = !(GPU2D.DispCnt & (1u<<23));
++    s32 dsWorkLeft = 2124;
++#endif
+     // the OBJ buffers don't get updated at all if the 2D engine is disabled
+     if (!GPU2D.Enabled)
+         return;
+@@ -1067,8 +1072,16 @@
+         u16* attrib = &oam[sprnum*4];
+ 
+         u16 sprtype = (attrib[0] >> 8) & 0x3;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++        if (dsWorkLimit && dsWorkLeft <= 0) break;
++#endif
+         if (sprtype == 2) // disabled
++        {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++            if (dsWorkLimit) dsWorkLeft -= 2;
++#endif
+             continue;
++        }
+ 
+         bool iswin = (((attrib[0] >> 10) & 0x3) == 2);
+ 
+@@ -1105,6 +1118,18 @@
+         else
+             ypos = (line - ypos) & 0xFF;
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++        // The measured normal form charges full nominal width, including
++        // right-clipped tails. Affine64 total138 is measured;10+2*width is
++        // the retained upstream continuation, not an identified affine law.
++        // Keep free Y misses and the existing non-drawing bitmap skip.
++        const bool bitmap = !iswin && ((attrib[0]>>10)&3)==3;
++        const bool bitmapSkip = bitmap && (!(attrib[2]>>12) || ((GPU2D.DispCnt & 0x60)==0x60));
++        const s32 workSetup = (sprtype & 1) ? 10 : 0;
++        const s32 workPixel = (sprtype & 1) ? 2 : 1;
++        DSObjWorkPixels = dsWorkLimit ? std::max(0, std::min(boundwidth, (dsWorkLeft-workSetup)/workPixel)) : boundwidth;
++        if (dsWorkLimit && !bitmapSkip) dsWorkLeft -= workSetup + workPixel*boundwidth;
++#endif
+         if (sprtype & 1)
+             DoDrawSprite(Rotscale, sprnum, boundwidth, boundheight, width, height, xpos, ypos);
+         else
+@@ -1180,6 +1205,9 @@
+         xpos = 0;
+     }
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++    boundwidth = std::min(boundwidth, DSObjWorkPixels);
++#endif
+     s16 rotA = (s16)rotparams[0];
+     s16 rotB = (s16)rotparams[4];
+     s16 rotC = (s16)rotparams[8];
+@@ -1351,6 +1379,9 @@
+ 
+     u32 xoff;
+     u32 xend = width;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++    xend = std::min(xend, DSObjWorkPixels);
++#endif
+     if (xpos >= 0)
+     {
+         xoff = 0;
+--- a/src/GPU2D_Soft.h
++++ b/src/GPU2D_Soft.h
+@@ -59,6 +59,9 @@
+     alignas(8) u8 OBJWindow[256];
+ 
+     u32 NumSprites;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_OBJWORK)
++    u32 DSObjWorkPixels = 0; // local draw frontier; original dimensions stay intact
++#endif
+ 
+     u8* CurBGXMosaicTable;
+     array2d<u8, 16, 256> MosaicTable = []() constexpr

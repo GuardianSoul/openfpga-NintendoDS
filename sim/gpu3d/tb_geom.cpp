@@ -601,6 +601,7 @@ int g_gap = 0;
 u32 g_gseed = 1;
 bool g_packed = false;
 int g_mread = 0;
+bool g_mpoll = false;
 int g_pobusy = 0;
 bool g_rwall = false;
 u64 g_rwp_from = ~0ull, g_rwp_to = 0;
@@ -693,7 +694,16 @@ int run_trace(const char* path, int max_frames, bool verbose)
             // complete command, once the engine is idle, as a game reads them mid-frame
             if (g_mread && entries % g_mread == 0 && gd.g->ExecParamCount == 0)
             {
-                if (!rtl.wait_idle()) { fprintf(stderr, "entry %llu: RTL not idle\n", (unsigned long long)entries); return 2; }
+                // --mpoll: poll GXSTAT bit 27 as a game does (the DS timing model's busy), not the engine's idle: entries
+                // the model executed can still wait in the engine's queue (on chip, in the gather or in the SDRAM spill),
+                // and the read must not overtake them
+                if (g_mpoll)
+                {
+                    u32 st = 0; int t = 0;
+                    for (; ((st = rtl.read(0x04000600)) >> 27) & 1 && t < 2000000; t++) {}
+                    if (t >= 2000000) { fprintf(stderr, "entry %llu: GXSTAT stays busy\n", (unsigned long long)entries); return 2; }
+                }
+                else if (!rtl.wait_idle()) { fprintf(stderr, "entry %llu: RTL not idle\n", (unsigned long long)entries); return 2; }
                 if (!check_matrices(gd, rtl, frames)) { bad++; if (bad < 20) fprintf(stderr, "  (entry %llu, cmd %02X)\n", (unsigned long long)entries, e.cmd); }
             }
             if (g_lock && e.cmd != 0x50)
@@ -1350,6 +1360,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[a], "--rwprobe") && a + 2 < argc) { g_rwp_from = atoll(argv[++a]); g_rwp_to = atoll(argv[++a]); }
         else if (!strcmp(argv[a], "--poready") && a + 1 < argc) g_pobusy = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--mread") && a + 1 < argc) g_mread = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--mpoll")) g_mpoll = true;
         else if (!strcmp(argv[a], "--lockframe") && a + 1 < argc) { g_lock = true; g_lockframe = atoi(argv[++a]); }
         else if (!strcmp(argv[a], "--synth") && a + 1 < argc) synth = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--seed") && a + 1 < argc) seed = atoi(argv[++a]);

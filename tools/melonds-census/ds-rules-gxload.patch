@@ -1,0 +1,41 @@
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -35,10 +35,18 @@
+ #else
+ #define GXDS_DEF(v) 0
+ #endif
++// DS Lite gxlatency v4 (2026-10-31): no serialized texture-load tail;
++// LOAD43 is 30 cycles in nontexture modes. The old run30 +2 attribution
++// remains available as GXDS_L43=2 for reproducing that mixed-stream fit.
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_GXLOAD)
++static constexpr bool GXDS_LOAD_CAPTURED = true;
++#else
++static constexpr bool GXDS_LOAD_CAPTURED = false;
++#endif
+ static int GxDs(const char* n, int d) { const char* v = getenv(n); return v ? atoi(v) : d; }
+ static const int GXDS_CLIPA = GxDs("GXDS_CLIPA", GXDS_DEF(40)), GXDS_CLIPB = GxDs("GXDS_CLIPB", GXDS_DEF(25)),
+                  GXDS_QS = GxDs("GXDS_QS", GXDS_DEF(9)), GXDS_VS = GxDs("GXDS_VS", GXDS_DEF(1)),
+-                 GXDS_L43 = GxDs("GXDS_L43", GXDS_DEF(2));
++                 GXDS_L43 = GxDs("GXDS_L43", GXDS_LOAD_CAPTURED ? 0 : GXDS_DEF(2));
+-
++
+ #include "GPU3D.h"
+ #include "Census.h"
+@@ -2251,7 +2259,7 @@
+                     else if (MatrixMode == 3)
+                     {
+                         MatrixLoad4x4(TexMatrix, (s32*)ExecParams);
+-                        AddCycles(10);
++                        AddCycles(GXDS_LOAD_CAPTURED ? 0 : 10);
+                     }
+                     else
+                     {
+@@ -2274,7 +2282,7 @@
+                     else if (MatrixMode == 3)
+                     {
+                         MatrixLoad4x3(TexMatrix, (s32*)ExecParams);
+-                        AddCycles(7);
++                        AddCycles(GXDS_LOAD_CAPTURED ? 0 : 7);
+                     }
+                     else
+                     {

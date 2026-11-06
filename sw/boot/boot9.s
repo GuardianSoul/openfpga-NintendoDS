@@ -123,36 +123,129 @@ arm9_boot:
         mov     r2, #0x170
         bl      cardread
         @ BOOTCTL: raw reads (bit 0), infrared cart (bit 1: gamecode 'I...'),
+        @ DSi-enhanced cart (bit 7: unit code bit 1, the chip ID's bit 30),
         @ save type in bits 6:4 (melonDS SaveMemType): none for homebrew
         @ (ARM9 binary below 0x4000), else (docs/saves.md) the ROM tables'
-        @ type, else from savetab by the gamecode's first three letters, else
-        @ the loaded .sav's size, else EEPROM 8 KiB (melonDS's default).
+        @ type, else melonDS's game list (savelist, tools/ds/savelist.py),
+        @ else the loaded .sav's size, else EEPROM 8 KiB (melonDS's default).
         @ 0xF1C from the shell: [7] tables valid, [6:4] tables type, [3] size
         @ valid, [2:0] size type
         mov     r3, #1
         ldrb    r0, [r12, #0x0C]
         cmp     r0, #'I'
         orreq   r3, r3, #2
+        ldrb    r0, [r12, #0x12]
+        tst     r0, #2
+        orrne   r3, r3, #0x80
         ldr     r0, [r12, #0x20]
         cmp     r0, #0x4000
         blo     7f
-        ldr     r0, [r12, #0x0C]
-        bic     r0, r0, #0xFF000000
+        ldr     r7, [r12, #0x0C]        @ the gamecode
         mov     r2, #2
         ldr     r4, [r9, #0x1C]
         tst     r4, #0x80
         movne   r2, r4, lsr #4
         andne   r2, r2, #7
         bne     6f
-        adr     r1, savetab             @ PC-relative: the boot ROM runs at 0xFFFF8000, linked at 0
-5:      ldr     r5, [r1], #4
-        cmp     r5, #0
+        ldr     r11, savelist_off       @ PC-relative: the boot ROM runs at 0xFFFF8000, linked at 0
+savelist_pc:
+        add     r11, pc, r11
+        @ the exceptions: whole gamecodes, the type in bit 7 of bytes 1-3 (2: not listed)
+        ldr     r5, [r11]
+        add     r1, r11, #32
+        ldr     r8, =0x80808080
+11:     subs    r5, r5, #1
+        bmi     12f
+        ldr     r0, [r1], #4
+        bic     r6, r0, r8
+        cmp     r6, r7
+        bne     11b
+        mov     r2, r0, lsr #15
+        and     r2, r2, #1
+        mov     r6, r0, lsr #22
+        and     r6, r6, #2
+        orr     r2, r2, r6
+        mov     r6, r0, lsr #29
+        and     r6, r6, #4
+        orr     r2, r2, r6
+        cmp     r2, #2
         beq     8f
-        bic     r6, r5, #0xFF000000
-        cmp     r6, r0
-        bne     5b
-        mov     r2, r5, lsr #24
         b       6f
+        @ the three-letter prefixes: r1 the bitmap, bit (L * 36 + c1) * 36 + c2
+12:     ldr     r5, [r11, #4]           @ the letters
+        and     r0, r7, #0xFF
+        add     r6, r11, #16
+        mov     r8, #0
+13:     cmp     r8, r5
+        beq     19f
+        ldrb    r2, [r6, r8]
+        cmp     r2, r0
+        addne   r8, r8, #1
+        bne     13b
+        mov     r6, #36
+        mov     r0, r7, lsr #8
+        and     r0, r0, #0xFF
+        sub     r0, r0, #'0'
+        cmp     r0, #10
+        blo     14f
+        sub     r0, r0, #7              @ 'A'-'Z': 10-35
+        cmp     r0, #10
+        blo     19f
+        cmp     r0, #36
+        bhs     19f
+14:     mla     r8, r6, r8, r0
+        mov     r0, r7, lsr #16
+        and     r0, r0, #0xFF
+        sub     r0, r0, #'0'
+        cmp     r0, #10
+        blo     15f
+        sub     r0, r0, #7
+        cmp     r0, #10
+        blo     19f
+        cmp     r0, #36
+        bhs     19f
+15:     mla     r7, r6, r8, r0          @ the bit
+        @ the types follow the bitmap (162 bytes a letter), 2 bits each, 4 for
+        @ a rare one: r6 their start, r5 the bit position, r8 the bitmap's
+        mov     r0, #162
+        mul     r0, r5, r0
+        add     r6, r1, r0
+        mov     r5, #0
+        mov     r8, #0
+16:     ldrb    r0, [r1, r8, lsr #3]
+        and     r2, r8, #7
+        mov     r0, r0, lsr r2
+        cmp     r8, r7
+        beq     17f
+        tst     r0, #1
+        beq     18f
+        ldrb    r0, [r6, r5, lsr #3]
+        and     r2, r5, #7
+        mov     r0, r0, lsr r2
+        and     r0, r0, #3
+        cmp     r0, #3
+        addeq   r5, r5, #2
+        add     r5, r5, #2
+18:     add     r8, r8, #1
+        b       16b
+17:     tst     r0, #1
+        beq     19f
+        ldrb    r0, [r6, r5, lsr #3]
+        and     r2, r5, #7
+        mov     r0, r0, lsr r2
+        and     r0, r0, #3
+        cmp     r0, #3
+        bne     10f
+        add     r5, r5, #2
+        ldrb    r0, [r6, r5, lsr #3]
+        and     r2, r5, #7
+        mov     r0, r0, lsr r2
+        and     r0, r0, #3
+        add     r0, r0, #4
+10:     add     r0, r0, r11
+        ldrb    r2, [r0, #8]
+        b       6f
+19:     mov     r2, #2                  @ not listed
 8:      tst     r4, #0x08
         andne   r2, r4, #7
 6:      orr     r3, r3, r2, lsl #4
@@ -261,38 +354,5 @@ arm9_boot:
         bx      r12
         .ltorg
 
-@ Save chips (melonDS's ROM list: 1 EEPROM 512 B, 2/3/4 EEPROM 8/64/128 KiB,
-@ 5/6/7 FLASH 256/512/1024 KiB) of the games tested so far, by the first
-@ three letters of the gamecode.
-.macro save c0, c1, c2, t
-        .word   \c0 | (\c1 << 8) | (\c2 << 16) | (\t << 24)
-.endm
-        .align  2
-savetab:
-        save    'A','2','D', 2          @ New Super Mario Bros.
-        save    'A','S','M', 2          @ Super Mario 64 DS
-        save    'A','T','R', 2          @ Tetris DS
-        save    'A','R','M', 2          @ Mario & Luigi: Partners in Time
-        save    'A','F','F', 3          @ Final Fantasy III
-        save    'A','J','U', 3          @ Jump Ultimate Stars
-        save    'Y','K','G', 3          @ Kingdom Hearts 358/2 Days
-        save    'B','K','9', 3          @ Kingdom Hearts Re:coded
-        save    'Y','K','W', 3          @ Kirby Super Star Ultra
-        save    'Y','B','U', 3          @ Blue Dragon: Awakened Shadow
-        save    'B','S','K', 3          @ 999
-        save    'C','3','J', 3          @ Professor Layton and the Unwound Future
-        save    'C','2','S', 4          @ Pokemon Mystery Dungeon: Explorers of Sky
-        save    'A','D','M', 5          @ Animal Crossing: Wild World
-        save    'A','M','C', 5          @ Mario Kart DS
-        save    'B','O','5', 5          @ Golden Sun: Dark Dawn
-        save    'A','D','A', 6          @ Pokemon Diamond
-        save    'A','P','A', 6          @ Pokemon Pearl
-        save    'C','P','U', 6          @ Pokemon Platinum
-        save    'I','P','K', 6          @ Pokemon HeartGold
-        save    'I','P','G', 6          @ Pokemon SoulSilver
-        save    'I','R','B', 6          @ Pokemon Black
-        save    'I','R','A', 6          @ Pokemon White
-        save    'I','R','E', 6          @ Pokemon Black 2
-        save    'I','R','D', 6          @ Pokemon White 2
-        save    'C','C','U', 6          @ Tomodachi Collection
-        .word   0
+savelist_off:
+        .word   savelist - (savelist_pc + 8)

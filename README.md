@@ -5,10 +5,10 @@ itself (both CPUs, the memory system, the 2D and 3D engines, sound and the
 other hardware) was written from scratch for this core, against
 measurements of a real DS.
 
-> **Status (as of 2026-11-06): experimental.** Several big 3D games boot
+> **Status (0.5.1, 2026-11-06): experimental.** Several big 3D games boot
 > and play, with sound and saves. Some 3D effects are switched off to fit
-> the chip, heavy 3D scenes can run below full speed, and some 3D scenes show
-> line glitches. See [Pocket limitations](#pocket-limitations),
+> the chip, the heaviest 3D scenes can run a little below full speed, and
+> some 3D scenes show line glitches. See [Pocket limitations](#pocket-limitations),
 > [Known issues](#known-issues) and [COMPATIBILITY.md](COMPATIBILITY.md)
 > before you try it.
 
@@ -50,7 +50,7 @@ Each game's save is kept in `Saves/nds/common/<game>.sav`, a raw save that
 works with melonDS and flashcarts. To use an existing save, copy it there
 with the game's name. The core supports EEPROM (512 bytes, 8, 64 and
 128 KiB) and FLASH (256 KiB, 512 KiB, 1 MiB) saves. It picks the type from
-its built-in list of games, or from the size of an existing save. The rare 8 MiB NAND saves (WarioWare D.I.Y., Jam with the Band)
+its built-in list of every game's save chip, or from the size of an existing save. The rare 8 MiB NAND saves (WarioWare D.I.Y., Jam with the Band)
 are not supported.
 
 **Quit through the Pocket menu before you turn the Pocket off.** The save is
@@ -71,7 +71,10 @@ it gives the combos below.
 
 **Touch:** the Pocket has no touchscreen. In touch mode the D-pad moves a
 cursor over the bottom screen and A is the stylus (touching while held).
-Neither reaches the game while touch mode is on. With an analog controller
+Each of A, B, X and Y can instead run a gesture from the cursor: a circle,
+a big circle, or a swipe up, down, left or right (see [Settings](#settings));
+the cursor shows each gesture as it runs. The D-pad and the buttons set to a
+touch or gesture don't reach the game while touch mode is on. With an analog controller
 in the Dock, the right stick moves the cursor at any time, R3 (pressing the
 stick) touches, and the left stick also works as the D-pad. Games that need
 fast or precise stylus input (drawing, rubbing, quick taps) are hard or
@@ -85,8 +88,10 @@ Under **Core Settings** in the Pocket menu. Defaults are in bold.
 | --- | --- | --- |
 | SELECT + L/R | **Swap Screens**, Off | The layout combos above; Off sends L and R to the game with Select |
 | SELECT + A/B/X/Y | **Toggle Touch**, Off | The touch mode combo; Off sends the buttons to the game with Select |
+| Touch: Cursor Speed | Slow, **Normal**, Fast | How fast the D-pad moves the touch cursor (1, 3 or 6 pixels a frame) |
+| Touch: A Button | Button, **Touch**, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | What A does in touch mode: the button itself, a touch, or a gesture from the cursor |
+| Touch: B Button, X Button, Y Button | **Button**, Touch, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | The same for B, X and Y |
 | Screen Rotation | **Off**, Left, Right | Turns the picture for games played with the DS held like a book |
-| Cursor Speed | Slow, **Normal**, Fast | How fast the D-pad moves the touch cursor (1, 3 or 6 pixels a frame) |
 
 ## Pocket limitations
 
@@ -102,28 +107,19 @@ The Pocket lacks some of the DS's hardware, so these can't work:
 
 ## Known issues
 
-As of 2026-11-06:
+As of 0.5.1 (2026-11-06):
 
 - **3D effects are switched off** to fit the chip: shadow polygons, toon and
   highlight shading, fog, edge marking and anti-aliasing. Games draw without
   them. The 2D mosaic effect is off too. These are temporary: the source
   can build them all, and they come back as room is found.
-- **Heavy 3D scenes can run below full speed.** Most games tested run at
-  full speed, Mario Kart DS included, race start and all. Slower:
-  - Kingdom Hearts 358/2 Days: heavy scenes with several enemies run at
-    about 50–60%.
-  - Pokémon Black 2 / White 2: walking through cities slows down.
-
-  Animal Crossing: Wild World runs at about 20 frames a second, which is
-  what the game itself does.
-- **Line glitches:** in busy 3D scenes, a 3D line that isn't drawn in time
-  can show as a missing or wrong line.
-- **Golden Sun: Dark Dawn:** the title screen bounces up and down.
-- **Pokémon Black 2 / White 2:** the title screen runs slow, sound
-  included, and part of its bottom screen isn't shown.
-- **Pokémon Black 2 / White 2:** in cities, tree vertices glitch while you
-  walk (a 3D geometry bug, under investigation).
-- **Mario & Luigi: Partners in Time:** the title logo line flickers.
+- **The heaviest 3D scenes can still run a little below full speed.** Most
+  games tested run at full speed. Animal Crossing: Wild World runs at about
+  20 frames a second, which is what the game itself does.
+- **Line glitches:** some busy 3D scenes show black lines, and some models
+  show glitching vertices.
+- **Loading stutter:** a short stutter can remain when a game loads a lot of
+  new data at once.
 - **No sleep mode, save states or firmware menu.** Games start directly.
 - **DSi:** DSi-only games and DSi enhancements are not supported.
 
@@ -131,15 +127,14 @@ As of 2026-11-06:
 
 The core's rules come from measurements on a real DS. Where the Pocket's
 memory or chip budget forces a difference, it is recorded. The main ones as
-of 2026-11-06:
+of 0.5.1:
 
 - The ARM9's caches are larger than the DS's: 16 KiB instruction and
   16 KiB data, 2-way, instead of 8 and 4 KiB, 4-way. This makes up for the
   Pocket's slower external memory. Cache replacement is per set instead of
   the DS's global counter. Games can't see the difference, only its timing.
-- Timer interrupts can arrive up to about 40 clocks late, and the lean ARM7
-  differs in a detail of its saved status register (SPSR). Both are
-  temporary trades for room.
+- The lean ARM7 differs in a detail of its saved status register (SPSR),
+  a temporary trade for room.
 - Some memory access costs differ from the DS by a cycle or a few: ARM9 I/O
   reads and uncached multi-word loads, some ARM7 stores to VRAM, and ARM7
   multiplies and ALU work running from main RAM.

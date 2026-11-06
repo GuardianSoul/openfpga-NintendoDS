@@ -1,0 +1,41 @@
+module caller89_endpoint #(parameter bit OLD=0)(
+ input logic clk,clk_2x,rst,tick,
+ input logic a7_req,a7_we,input logic [31:0] a7_addr,a7_wdata,input logic [3:0] a7_be,
+ input logic a9_req,a9_we,input logic [31:0] a9_addr,a9_wdata,input logic [3:0] a9_be,
+ input logic dm_req,dm_we,input logic [31:0] dm_addr,dm_wdata,
+ output logic a7_ack,a9_ack,dm_ack,output logic [31:0] a7_rdata,a9_rdata,dm_rdata,
+ output logic mr_req,mr_we,mr_n8,output logic [21:2] mr_addr,
+ output logic [3:0] mr_be,output logic [31:0] mr_wdata,
+ input logic mr_ack,mr_rvalid,input logic [31:0] mr_rdata,
+ output logic [767:0] observed,
+ output logic sn_req,sn_we,output logic [31:0] sn_addr,sn_wdata,
+ output logic aud_valid,output logic [15:0] aud_l,aud_r,
+ output logic [31:0] snd_late,output logic engine_overrun,
+ output logic io_req,io_we,output logic [23:2] io_addr,
+ output logic [15:0] snd_wait_max
+);
+ logic io_cpu,io_ack,snd_req,snd_ack;
+ logic [3:0] io_be;logic [31:0] io_wdata,io_rdata,snd_rdata;
+ logic sn_ack;logic [31:0] sn_rdata;
+ logic [1:0] powcnt2,wramcnt;logic [15:0] exmemcnt;
+ logic irq_key7,irq_key9,gx_irq;logic [9:0] dac_l,dac_r;
+ // Parameter values match the captured compact nds_top defaults for exercised
+ // scalar masters. No CPU block, DMA-unit or GX endpoint request is produced.
+ nds_fabric #(.MR_BLOCK(1),.BOOT_SRAM(0),.OAM_SHARE(0),.A7_IO(0),.DMA_FAST(0),.DMA_RA(0),.DMA_PACE(0),.DMA_PACE_GX(80),.DMA_GX(0)) u_fab (
+ @FABRIC@);
+ nds_io u_io (@IO@);
+ generate if(OLD)begin : old_control
+ caller89_old caller(.clk,.clk_2x,.rst,.tick,.snd_req,.io_we,.io_be,.io_addr,.io_wdata,.powcnt2,
+ .sn_ack,.sn_rdata,.snd_ack,.snd_rdata,.sn_req,.sn_we,.sn_addr,.sn_wdata,
+ .aud_valid,.aud_l,.aud_r,.snd_late,.snd_wait_max,.engine_overrun,.dac_l,.dac_r);
+ end else begin : compact
+ caller89_new caller(.clk,.clk_2x,.rst,.tick,.snd_req,.io_we,.io_be,.io_addr,.io_wdata,.powcnt2,
+ .sn_ack,.sn_rdata,.snd_ack,.snd_rdata,.sn_req,.sn_we,.sn_addr,.sn_wdata,
+ .aud_valid,.aud_l,.aud_r,.snd_late,.snd_wait_max,.engine_overrun,.dac_l,.dac_r);
+ end endgenerate
+ always_comb observed={a7_ack,a7_ack?a7_rdata:32'd0,a9_ack,a9_ack?a9_rdata:32'd0,
+ dm_ack,dm_ack?dm_rdata:32'd0,mr_req,mr_req?{mr_we,mr_n8,mr_addr,mr_be,mr_we?mr_wdata:32'd0}:58'd0,
+ sn_req,sn_req?{sn_we,sn_addr,sn_we?sn_wdata:32'd0}:65'd0,
+ snd_ack,snd_ack?snd_rdata:32'd0,aud_valid,aud_l,aud_r,dac_l,dac_r,snd_late,snd_wait_max,engine_overrun,
+ irq_key7,irq_key9,gx_irq,io_req,io_req?{io_cpu,io_we,io_be,io_addr,io_wdata}:60'd0};
+endmodule

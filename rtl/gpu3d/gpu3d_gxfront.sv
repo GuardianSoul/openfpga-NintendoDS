@@ -287,6 +287,20 @@ module gpu3d_gxfront #(
     wire         ram_we = st_busy && st_w != st_n && (SPILL ? !sp_full : used != 9'd511);
     // the command byte as the engine dispatches on it (gpu3d_gxu_pkg gx_ecode: {multi-parameter, 0, handler entry})
     wire  [39:0] ram_wd = {gpu3d_gxu_pkg::gx_ecode(st_cmd[st_w[1:0]]), st_param};
+`ifndef ALTERA_RESERVED_QIS   // (Quartus rejects $value$plusargs)
+    // synthesis translate_off
+    // +gxlog=FILE: every entry as it enters the entry RAM, in the census GX trace's record ('C' u8 cmd u32 param,
+    // little endian; sim/pocket_ds/w2load_cmp.py compares it with melonDS's --gx-first trace)
+    integer gxl_fd = 0;
+    initial begin
+        string gxl_f;
+        if ($value$plusargs("gxlog=%s", gxl_f)) gxl_fd = $fopen(gxl_f, "wb");
+    end
+    always_ff @(posedge clk) if (gxl_fd != 0 && !rst && ram_we)
+        $fwrite(gxl_fd, "C%c%c%c%c%c", st_cmd[st_w[1:0]], st_param[7:0], st_param[15:8], st_param[23:16], st_param[31:24]);
+    final if (gxl_fd != 0) $fclose(gxl_fd);
+    // synthesis translate_on
+`endif
     // CHEAP: no read-during-write logic (#669: -0.385 ns from its write enable through the entry to the
     // control store's address). The engine reads entry e_addr while one is written only when it is the
     // next entry (dp_r + 1 at a pop with one entry left), and with the cheap model takes it a clock later

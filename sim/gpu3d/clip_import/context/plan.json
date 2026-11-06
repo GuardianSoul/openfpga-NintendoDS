@@ -1,0 +1,32 @@
+{
+  "base": "c47bd33b",
+  "scope": "Missing complete RF/2632word context wrapper only; no production change or game acceptance",
+  "packet": "docs/results/clean-runtime-snapshot-adapt-20261101/context.hex, expected-clip.hex, context-seed.json, runtime-atomic.json, qualification.json; immutable parent, no host schema/hash refresh",
+  "source_control": "Actual current Geometry8e2a leaves, private/scalar profile selected, STORE0; narrow default qualification requires full context readback plus original independent16lazyMMIO matrix results. STORE1 target differs only flag. Original469+4b qualification retained, not silently transferred.",
+  "sequence": [
+    "Normal cold init/boot of both instances, stop at actual drained postM with lastE RFwrite0",
+    "Default import/verify actual retained2632words",
+    "Read-only capture helper all160latecells+10heldreads; compare both RF replicas; seal sidecar with parent/source/profile/freeze certificate",
+    "Enabled import_gx_context_with_clip_witness; all native/context/backing/read outputs verified, metadata/time unchanged",
+    "First ordinary E: original16lazyMMIO reads; then observed real GX matrixmode/identity commands from existing caller recipe and clipping quad. No captured-state/backdoor repair or settling tick."
+  ],
+  "not_allowed": [
+    "invent28groups/OI",
+    "force idle/discard active clip",
+    "extra startup or settling clocks after restore",
+    "change host binding/schema",
+    "reinterpret qualification as game/STA acceptance"
+  ],
+  "machine": "LaptopL2 explicitly available; DesktopD1 reservedGeometry",
+  "transport": "main absolute tools/laptop-run.sh on thin input directory; measured gitdelta29523144bytes, ROMdelta0",
+  "disk": {
+    "observed_free": "2.0GiB",
+    "input_estimate_MB": 4,
+    "prior_pair_obj_measured_MB": 12,
+    "scratch_cap_bytes": 536870912,
+    "minimum_free_bytes": 1073741824,
+    "PCH": "Task-local no-pch.mk and O0 host compilation; positive peak56903786bytes, mutant56904557; owned objects pruned",
+    "trace": "none"
+  },
+  "worker": "oneNI10/jobs1/threads1; budget monitor terminates own process group only, retains receipt; fetch evidence/prune owned object tree"
+}

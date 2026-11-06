@@ -2,11 +2,16 @@
 # nds_cart_scpu equivalence: the working tree's cache and firmware against REF's, seeds 1..N.
 #   scpu_eq.sh [REF] [seeds] [reads] [SLOTS]
 # MUTATE_FILE=<rtl or firmware .c in the tree> MUTATE_EXPR='<sed expr>' mutates a copy for the new side.
+# PACE=N (streams check): slow clients (sim/pocket/scpu_eq/scpu_eq.cpp --pace) with long files (--files 400),
+# race mode only. Every seed's words must be right, and over the seeds with interleaved 512-byte streams and a
+# read-ahead table (ndt 1, 2-3 streams x512) the new side's misses must total at most 90% of REF's.
+# DSROM=1 (with PACE): no .ndt but a DS header and FAT in the ROM (scpu_eq.cpp --dsrom): the new side's
+# read-ahead fields must equal the plugin's rule, and the misses criterion counts every x512 2-3 stream seed.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 PATH=${TOOLS:-build/tools/oss-cad-suite/bin}:$PATH
 ref=${1:-HEAD}; seeds=${2:-8}; reads=${3:-2000}; slots=${4:-24}
-out=build/scpu_eq; rm -rf "$out"; mkdir -p "$out"
+out=${OUT:-build/scpu_eq}; rm -rf "$out"; mkdir -p "$out"
 git show "$ref:rtl/pocket/nds_cart_scpu.sv" | sed 's/^module nds_cart_scpu\b/module nds_cart_scpu_ref/' > "$out/ref.sv"
 git show "$ref:sw/scpu/cache.bin" > "$out/ref.bin"
 cp rtl/pocket/nds_cart_scpu.sv "$out/new.sv"; cp sw/scpu/cache.bin "$out/new.bin"
@@ -22,6 +27,21 @@ verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUN
     --top-module tb_scpu_eq --Mdir "$out/obj" "$out/new.sv" "$out/ref.sv" rtl/serv/*.v sim/pocket/scpu_eq/tb_scpu_eq.sv \
     "$PWD/sim/pocket/scpu_eq/scpu_eq.cpp" > "$out/build.log" 2>&1 || { grep -E "%Error" "$out/build.log" | head; exit 1; }
 pass=0
+if [ -n "${PACE:-}" ]; then
+    mn=0; mr=0
+    for s in $(seq 1 "$seeds"); do
+        l=$("$out/obj/Vtb_scpu_eq" --seed "$s" --ref "$out/ref.bin" --new "$out/new.bin" --reads "$reads" --strict 0 --pace "$PACE" --files 400 ${DSROM:+--dsrom 1} | grep -vE '^  (new|ref) ready' | tail -1 || true)
+        echo "$l" | tee -a "$out/runs.log" | cut -c1-200
+        ok=1; echo "$l" | grep -q '^PASS' || ok=0
+        if echo "$l" | grep -qE "ndt $([ -n "${DSROM:-}" ] && echo 0 || echo 1), streams [23] x512"; then
+            m=$(echo "$l" | sed -E 's/.*misses ([0-9]+)\/([0-9]+).*/\1 \2/')
+            mn=$((mn + ${m% *})); mr=$((mr + ${m#* }))
+        fi
+        pass=$((pass + ok))
+    done
+    echo "scpu_eq streams: $pass/$seeds seeds right; misses on interleaved streams $mn against REF's $mr"
+    [ "$pass" = "$seeds" ] && [ "$mr" -gt 0 ] && [ $((mn * 10)) -le $((mr * 9)) ]; exit
+fi
 for s in $(seq 1 "$seeds"); do
     ok=1
     for strict in 1 0; do

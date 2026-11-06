@@ -20,11 +20,19 @@ LDFLAGS := -specs=$(CALICO)/share/ds9.specs $(ARCH) -L$(CALICO)/lib -L$(LIBNDS)/
 LIBS := -lfat -lnds9 -lcalico_ds9 -lm
 ARM7 := $(CALICO)/bin/ds7_maine.elf
 
-PROGS := gxtime cap3d rules3d memtime sndcap rand3d replay3d gxcount dmacpu cputime lat2d load3d vramcnt gxburst sndq late3d tmcnt
+PROGS := gxtime cap3d rules3d memtime sndcap rand3d replay3d gxcount dmacpu cputime lat2d load3d vramcnt gxburst sndq late3d tmcnt wbuf cacheorg openq dmaslip
+ifeq ($(SPEED_TRIP),1)
+PROGS := late3d rdtimeline gxlatency
+CFLAGS += -DHWREF_SPEED_TRIP
+endif
 ALL := $(OUT)/hwref.nds
 COMMON := common/hwref.c
 gxtime_SRC := gxtime/main.c gxtime/run.itcm.c
 gxtime_TITLE := hwref GX timing;NDS_Pocket hw reference;results in /hwref/
+gxlatency_SRC := gxlatency/main.c gxlatency/read.itcm.c gxtime/run.itcm.c
+gxlatency_TITLE := hwref new GX timing;NDS_Pocket hw reference;new trip results
+rdtimeline_SRC := rdtimeline/main.c common/gxplay.c
+rdtimeline_TITLE := hwref render progress;NDS_Pocket hw reference;new trip results
 cap3d_SRC := cap3d/main.c
 cap3d_EXTRA := $(OUT)/obj/font.o
 cap3d_TITLE := hwref 3D capture;NDS_Pocket hw reference;results in /hwref/
@@ -59,6 +67,14 @@ late3d_SRC := late3d/main.c common/gxplay.c
 late3d_TITLE := hwref late 3D lines;NDS_Pocket hw reference;results in /hwref/
 tmcnt_SRC := tmcnt/main.c
 tmcnt_TITLE := hwref TMCNT_H read-back;NDS_Pocket hw reference;results in /hwref/
+wbuf_SRC := wbuf/main.c
+wbuf_TITLE := hwref ARM9 write buffer;NDS_Pocket hw reference;results in /hwref/
+cacheorg_SRC := cacheorg/main.c cacheorg/run.itcm.c
+cacheorg_TITLE := hwref ARM9 cache organisation;NDS_Pocket hw reference;results in /hwref/
+openq_SRC := openq/main.c openq/run.itcm.c
+openq_TITLE := hwref open questions;NDS_Pocket hw reference;results in /hwref/
+dmaslip_SRC := dmaslip/main.c dmaslip/run.itcm.c
+dmaslip_TITLE := hwref ARM9 access during DMA;NDS_Pocket hw reference;results in /hwref/
 
 all: $(PROGS:%=$(OUT)/%.nds) $(ALL) $(OUT)/arm7time.nds
 
@@ -76,6 +92,44 @@ $(OUT)/arm7time.elf: $(ARM7TIME_OBJ)
 $(OUT)/arm7time.nds: $(OUT)/arm7time.elf $(OUT)/arm7time7.elf
 	$(NDSTOOL) -c $@ -9 $< -7 $(OUT)/arm7time7.elf -b $(CALICO)/share/nds-icon.bmp "hwref ARM7 timing;NDS_Pocket hw reference;results in /hwref/" >/dev/null
 -include $(OUT)/obj7/arm7time/arm7.d
+
+# Source-staged WRAM/sound arbitration and ownership-handover probe.
+# Own ARM7; not in the all-probe chain and no automatic build by `all`.
+$(OUT)/wramarb-ds7.ld: $(CALICO)/lib/ds7.ld wramarb/linker.py
+	python3 wramarb/linker.py $< $@
+$(OUT)/wramarb7.elf: $(OUT)/obj7/wramarb/arm7.o $(OUT)/wramarb-ds7.ld
+	$(CC) -specs=$(CALICO)/share/ds7.specs -mcpu=arm7tdmi -L$(CALICO)/lib -Wl,-T,$(OUT)/wramarb-ds7.ld -Wl,-Map,$@.map $(OUT)/obj7/wramarb/arm7.o -lcalico_ds7 -o $@
+$(OUT)/wramarb.elf: $(OUT)/obj/wramarb/main.o $(OUT)/obj/common/hwref.o
+	$(CC) $(LDFLAGS) -Wl,-Map,$@.map $^ $(LIBS) -o $@
+$(OUT)/wramarb.nds: $(OUT)/wramarb.elf $(OUT)/wramarb7.elf
+	$(NDSTOOL) -c $@ -9 $< -7 $(OUT)/wramarb7.elf -b $(CALICO)/share/nds-icon.bmp "hwref WRAM arbitration;NDS_Pocket hw reference;results in /hwref/" >/dev/null
+-include $(OUT)/obj7/wramarb/arm7.d
+
+# New-only four-case ordinary I/O phase probe; never part of the all-probe chain.
+IOPHASE_DEFS ?=
+IOPHASE_BUILD_ID := $(shell cat iophase/main.c common/hwref.c common/hwref.h | sha256sum | cut -d' ' -f1)
+$(OUT)/obj/iophase/main.o: CFLAGS += -marm -DIOPHASE_BUILD_ID=\"$(IOPHASE_BUILD_ID)\" $(IOPHASE_DEFS)
+$(OUT)/obj/iophase/main.o: iophase/main.c common/hwref.c common/hwref.h Makefile
+$(OUT)/iophase.elf: $(OUT)/obj/iophase/main.o $(OUT)/obj/common/hwref.o
+	$(CC) $(LDFLAGS) -Wl,-Map,$@.map $^ $(LIBS) -o $@
+$(OUT)/iophase.nds: $(OUT)/iophase.elf
+	$(NDSTOOL) -c $@ -9 $< -7 $(ARM7) -b $(CALICO)/share/nds-icon.bmp "hwref ordinary IO phase;NDS_Pocket hw reference;four new cases" >/dev/null
+
+# Standalone 2D load captures; not part of the historical all-probe chain.
+$(OUT)/load2d.elf: $(OUT)/obj/load2d/main.o $(OUT)/obj/common/hwref.o
+	$(CC) $(LDFLAGS) $^ $(LIBS) -o $@
+$(OUT)/load2d.nds: $(OUT)/load2d.elf
+	$(NDSTOOL) -c $@ -9 $< -7 $(ARM7) -b $(CALICO)/share/nds-icon.bmp "hwref 2D load;NDS_Pocket hw reference;results in /hwref/" >/dev/null
+
+# Standalone peripheral timing probes need their own ARM7 (no competing
+# sound/touch/WiFi servers). Deliberately not included in hwref.nds's chain.
+$(OUT)/perftime7.elf: $(OUT)/obj7/perftime/arm7.o
+	$(CC) -specs=$(CALICO)/share/ds7.specs -mcpu=arm7tdmi -L$(CALICO)/lib $^ -lcalico_ds7 -o $@
+$(OUT)/perftime.elf: $(OUT)/obj/perftime/main.o $(OUT)/obj/common/hwref.o
+	$(CC) $(LDFLAGS) $^ $(LIBS) -o $@
+$(OUT)/perftime.nds: $(OUT)/perftime.elf $(OUT)/perftime7.elf
+	$(NDSTOOL) -c $@ -9 $< -7 $(OUT)/perftime7.elf -b $(CALICO)/share/nds-icon.bmp "hwref peripheral timing;NDS_Pocket hw reference;results in /hwref/" >/dev/null
+-include $(OUT)/obj7/perftime/arm7.d
 
 define prog
 $(1)_OBJ := $$(patsubst %.c,$(OUT)/obj/%.o,$$($(1)_SRC) $(COMMON))
@@ -98,9 +152,9 @@ $(OUT)/obj/%.o: %.c
 # again with main renamed, linked into one relocatable object, and all its
 # symbols except the entry made local, so the programs can't collide.
 # ITCM is shared by gxtime's and memtime's loops in hwref.nds: gxtime keeps
-# 1232 samples (runs log a few hundred events) instead of 1536; vramcnt's
-# kernels took the last 1 KiB.
-CHAIN_DEFS := -DMAX_SAMPLES=1232
+# 1024 samples (runs log a few hundred events) instead of 1536; vramcnt's
+# kernels took 1 KiB of it, wbuf's generated code 512 bytes, cacheorg's walker ~320, dmaslip's trial ~300.
+CHAIN_DEFS := -DMAX_SAMPLES=1024
 define chain
 $(1)_COBJ := $$(patsubst %.c,$(OUT)/chain/%.o,$$($(1)_SRC))
 $(OUT)/chain/$(1).o: $$($(1)_COBJ) $$($(1)_EXTRA)

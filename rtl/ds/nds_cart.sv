@@ -35,6 +35,7 @@ module nds_cart (
     input  logic        owner7,         // EXMEMCNT bit 11: the ARM7 owns the slot
     input  logic        raw,            // boot program: no 0x8000 redirect
     input  logic        ir,             // infrared cart: SPI byte 0 is an IR command
+    input  logic        dsi,            // DSi-enhanced/exclusive cart (header unit code bit 1): chip ID bit 30
     input  logic [2:0]  save_type,      // melonDS SaveMemType (0 none)
     input  logic [20:0] sv_loaded,      // bytes of the save file the shell loaded (static; docs/saves.md)
     input  logic [31:0] rom_size,
@@ -78,6 +79,9 @@ module nds_cart (
         m[28] = rom_l[28];
         for (int i = 27; i >= 19; i--) m[i] = m[i + 1] | rom_l[i];
     end
+    // bit 30 (melonDS: unit code & 2): the DSi-enhanced cards' ID, which such a game stores at boot and checks
+    // against later (a melonDS savestate of Pokémon White 2 holds 0x4000FEC2: without the bit the card counts
+    // as pulled out and the ARM7 parks in its trap)
     wire [16:0] chip_id = m[19] && !m[27] ? {1'b0, m[27:20], 8'hC2} : m[27] ? {1'b0, 7'h7F, !m[28], 8'hC2} : 17'h1_00C2;
 
     wire mine = io_cpu == owner7;
@@ -91,6 +95,26 @@ module nds_cart (
     logic [3:0]  sp_st;             // status register: [3:2] WP bits, [1] write enable
     logic [19:0] sp_a;              // address of the command
     logic [7:0]  pf;                // the byte a read returns next
+    // an AUX SPI data write is taken in two clocks (timing: fabric address -> er_a/so_op): the
+    // write's clock sets busy, sp_cnt, sp_sel and sp_pos; the next one (sb_go) answers the byte
+    // sb_v at position sb_p (the SPI busy bit holds the next byte back for >= 64 ticks)
+    logic        sb_go;
+    logic [7:0]  sb_v;
+    logic [3:0]  sb_p;
+    // sb_so: the byte starts a save access (the block below sets so_v), from registers only: the erase
+    // engine waits for it this clock, so the access still goes before the next erase word
+    logic        sb_so;
+    always_comb begin
+        logic [3:0] sq;
+        logic       pass, adr, rdc, wrc;
+        sq   = ir ? sb_p - 4'd1 : sb_p;
+        pass = !ir || (sb_p != 4'd0 && ir_cmd == 8'h00);
+        adr  = sq <= {1'b0, sv_ab};
+        rdc  = sp_cmd == 8'h03 || (sv_kind == 2'd1 && sp_cmd == 8'h0B) || (sv_kind == 2'd3 && sp_cmd == 8'h0B && sq != 4'd4);
+        wrc  = sp_cmd == 8'h02 || (sv_kind != 2'd3 ? sv_kind == 2'd1 && sp_cmd == 8'h0A : sp_cmd == 8'h0A);
+        sb_so = sb_go && pass && sv_kind != 2'd0 && sq != 4'd0 && sp_cmd != 8'h05 && !(sp_cmd == 8'h01 && sv_kind != 2'd3) &&
+                sp_cmd != 8'h9F && ((rdc && (sq == {1'b0, sv_ab} || !adr)) || (wrc && !adr && sp_st[1]));
+    end
     // save memory accesses: one SPI access (so_*) and the erase engine
     typedef enum logic [1:0] { O_RD, O_WR, O_PRG } op_t;
     logic        so_v, sv_er;
@@ -208,7 +232,7 @@ module nds_cart (
         if (rst) begin
             sp_cnt <= 11'd0; sp_sel <= 1'b0; sp_pos <= 4'd0; spidata <= 8'd0; sp_st <= 4'd0;
             sp_cmd <= 8'd0; ir_cmd <= 8'd0; sp_a <= 20'd0;
-            so_v <= 1'b0; sv_req <= 1'b0; er_k <= 2'd0; st_q <= 3'd0;
+            so_v <= 1'b0; sv_req <= 1'b0; er_k <= 2'd0; st_q <= 3'd0; sb_go <= 1'b0;
         end else begin
             if (tick && sp_cnt != 11'd0 && !(sp_cnt == 11'd1 && (so_v || (sv_req && !sv_er)))) begin
                 sp_cnt <= sp_cnt - 11'd1;
@@ -230,7 +254,7 @@ module nds_cart (
                 end
             end else if (so_v) begin
                 sv_req <= 1'b1; sv_er <= 1'b0; sv_addr <= sp_a[19:2] & sz_w;
-            end else if (er_k != 2'd0) begin
+            end else if (er_k != 2'd0 && !sb_so) begin   // (sb_so: the byte's access goes first, as so_v did a clock earlier)
                 sv_req <= 1'b1; sv_er <= 1'b1; sv_addr <= er_a;
                 // (er_a is always inside the chip: every load is masked or below the size)
                 er_a <= er_a1[17:0] & sz_w;
@@ -246,13 +270,23 @@ module nds_cart (
                     else begin er_a <= sv_lw[17:0]; er_k <= 2'd3; end
                 end
             end
+            sb_go <= 1'b0;
             if (wr && io_reg == 3'd0 && io_be[2] && spicnt[15] && spicnt[13] && !spicnt[7]) begin
+                logic [3:0]  p;
+                p = sp_sel ? sp_pos : 4'd0;
+                sb_go <= 1'b1; sb_v <= io_wdata[23:16]; sb_p <= p;
+                spicnt[7] <= 1'b1;
+                sp_cnt <= 11'd64 << spicnt[1:0];
+                sp_sel <= spicnt[6];
+                sp_pos <= spicnt[6] ? (p == 4'hF ? p : p + 4'd1) : 4'd0;
+            end
+            if (sb_go) begin
                 logic [7:0]  v, r;
                 logic [3:0]  p, sq;
                 logic [19:0] a;
                 logic        pass;
-                v = io_wdata[23:16];
-                p = sp_sel ? sp_pos : 4'd0;
+                v = sb_v;
+                p = sb_p;
                 r = 8'hFF;
                 pass = 1'b1;
                 sq = p;
@@ -314,10 +348,6 @@ module nds_cart (
                     end
                 end
                 spidata <= r;
-                spicnt[7] <= 1'b1;
-                sp_cnt <= 11'd64 << spicnt[1:0];
-                sp_sel <= spicnt[6];
-                sp_pos <= spicnt[6] ? (p == 4'hF ? p : p + 4'd1) : 4'd0;
             end
         end
     end
@@ -338,15 +368,15 @@ module nds_cart (
         if (rd) case (io_reg)
             3'd0: r = {8'd0, (spicnt[15] && spicnt[13] && !spicnt[7]) ? spidata : 8'd0, spicnt};
             3'd1: r = {ro_start, 7'd0, ro_drq, 23'd0};
-            3'd4: r = kind == 2'd0 ? (r_past ? 32'hFFFF_FFFF : q[ptr]) : kind == 2'd1 ? {15'd0, chip_id} : 32'd0;
+            3'd4: r = kind == 2'd0 ? (r_past ? 32'hFFFF_FFFF : q[ptr]) : kind == 2'd1 ? {1'b0, dsi, 13'd0, chip_id} : 32'd0;
             default: r = 32'd0;
         endcase
         io_rdata <= r;
     end
 `ifndef ALTERA_RESERVED_QIS   // (Quartus rejects $test$plusargs)
     // simulation (+spitrace): every AUX SPI byte, the byte position in the
-    // chip select, the byte written and the answer (the clock after)
-    logic   tr_on = 1'b0, tr_v = 1'b0;
+    // chip select, the byte written and the answer (two clocks after: sb_go)
+    logic   tr_on = 1'b0, tr_v = 1'b0, tr_v0 = 1'b0;
     logic [7:0] tr_b = 8'd0;
     logic [3:0] tr_p = 4'd0;
     longint tr_cyc = 0;
@@ -354,9 +384,9 @@ module nds_cart (
     always_ff @(posedge clk) begin
         tr_cyc <= tr_cyc + 1;
         if (tr_cyc[19:0] == 20'd0) tr_on <= $test$plusargs("spitrace");
-        tr_v <= 1'b0;
+        tr_v <= tr_v0; tr_v0 <= 1'b0;
         if (!rst && wr && io_reg == 3'd0 && io_be[2] && spicnt[15] && spicnt[13] && !spicnt[7]) begin
-            tr_v <= 1'b1; tr_b <= io_wdata[23:16]; tr_p <= sp_sel ? sp_pos : 4'd0;
+            tr_v0 <= 1'b1; tr_b <= io_wdata[23:16]; tr_p <= sp_sel ? sp_pos : 4'd0;
         end
         if (tr_on && tr_v)
             $display("spi %0d: pos %0d out %h in %h hold %b ir %b ircmd %h cmd %h type %0d st %h",

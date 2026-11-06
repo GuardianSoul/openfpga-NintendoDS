@@ -15,13 +15,23 @@
 //                     switches since #746; Off, those buttons reach the game
 //                     with SELECT)
 //   Cursor Speed   1, 3 or 6 pixels per frame
-// touch_btn (the face button that is the pen: A, B, X, Y) and layout_set (a
-// layout chosen from the menu, applied at once) have no menu entries since
-// #217: core_top_ds ties them to A and to none.
+//   A/B/X/Y in Touch Mode  what each face button does in touch mode (gest)
+// layout_set (a layout chosen from the menu, applied at once) has no menu
+// entry since #217: core_top_ds ties it to none.
 // Layouts: stacked -> top only -> bottom only -> stacked (SELECT+R; SELECT+L
 // the other way round). Touch mode (SELECT + A/B/X/Y): the D-pad moves a
-// cursor over the bottom screen (clamped to 256 x 192) and the touch button
-// is the pen (down while held); neither reaches the game.
+// cursor over the bottom screen (clamped to 256 x 192); each face button is,
+// by its gest setting, a game button (Button: reaches the game), the pen at
+// the cursor (Touch: down while held, A's default) or a gesture drawn from
+// the cursor (2026-11-06, for TWEWY's psychs and Ranger's captures).
+// The D-pad and the buttons that touch don't reach the game.
+// Gestures: a press starts one at the next DS frame (none while another
+// runs); the pen is down at one point per frame and goes up after the last
+// (pen_x/pen_y, clamped to the screen; the cursor stays where it is):
+//   Circle / Big Circle  radius 24 / 48 px, 16 points clockwise from the
+//                        top, again while the button is held (Ranger's loops)
+//   Swipe Up/Left/Down/Right  96 px from the cursor in 12 frames (13 points, 8 px
+//                        apart; TWEWY's Pyrokinesis casts nothing from 48 px)
 // Top only (2026-10-28): the normal controls. No touch, cursor or pen;
 // SELECT + A/B/X/Y are no combos there (the button reaches the game); only
 // SELECT+L/R still change the layout. Touch mode's state is kept and applies
@@ -45,7 +55,8 @@ module nds_controls (
     input wire [31:0] apf_joy,              // cont1_joy {RY, RX, LY, LX}, any clock
     input wire frame,                       // one pulse per DS frame
     input wire [1:0] combo_sel,             // off: [0] SELECT + L/R, [1] SELECT + A/B/X/Y
-    input wire [1:0] touch_btn,             // 0 A, 1 B, 2 X, 3 Y
+    input wire [11:0] gest,                 // {Y, X, B, A} in touch mode: 0 Button, 1 Touch, 2 Circle,
+                                            // 3 Big Circle, 4-7 Swipe Up, Left, Down, Right
     input wire [1:0] speed,                 // 0 slow, 1 normal, 2 fast
     input wire [1:0] layout_set,            // Screen Layout
     input wire set_new,                     // pulse: the settings above changed
@@ -55,6 +66,7 @@ module nds_controls (
     output wire pen,
     output reg [7:0] cur_x = 8'd128,
     output reg [7:0] cur_y = 8'd96,
+    output wire [7:0] pen_x, pen_y,         // where the pen touches: the cursor, or a gesture's point
     output wire [15:0] ds_keys
 );
     localparam UP = 0, DOWN = 1, LEFT = 2, RIGHT = 3, R3 = 13;
@@ -132,8 +144,81 @@ module nds_controls (
             end
         end
     end
+    // gestures: the face buttons as the frame before (a press is a new one), the gesture running, its kind and
+    // button and its point (step)
+    wire [3:0] fb = keys[7:4];              // A, B, X, Y
+    reg [3:0] fb_q = 0;
+    reg g_act = 0;
+    reg [2:0] g_kind = 0;
+    reg [1:0] g_btn = 0;
+    reg [3:0] g_step = 0;
+    wire [3:0] g_on, g_pen, g_gest;         // the button doesn't reach the game; is the pen; draws a gesture
+    genvar gi;
+    generate
+        for (gi = 0; gi < 4; gi = gi + 1) begin : gb
+            assign g_on[gi] = gest[3 * gi +: 3] != 3'd0;
+            assign g_pen[gi] = gest[3 * gi +: 3] == 3'd1;
+            assign g_gest[gi] = gest[3 * gi + 1] || gest[3 * gi + 2];
+        end
+    endgenerate
+    wire [3:0] g_new = fb & ~fb_q & g_gest;
+    wire [1:0] g_sel = g_new[0] ? 2'd0 : g_new[1] ? 2'd1 : g_new[2] ? 2'd2 : 2'd3;
+    wire g_circle = !g_kind[2];
+    wire g_big = g_circle && g_kind[0];
+    wire g_end = g_step == (g_circle ? 4'd15 : 4'd12);   // the last point
+    always @(posedge clk)
+        if (reset || !touch) begin
+            g_act <= 0; fb_q <= 4'hF;       // (a button held as touch mode starts draws nothing)
+        end else if (frame) begin
+            fb_q <= fb;
+            if (g_act) begin
+                g_step <= g_end ? 4'd0 : g_step + 1'b1;    // (a circle's repeat starts at its first point)
+                if (g_end) g_act <= g_circle && fb[g_btn];
+            end else if (|g_new) begin
+                g_act <= 1; g_kind <= gest[3 * g_sel +: 3]; g_btn <= g_sel; g_step <= 0;
+            end
+        end
+    // the point's offset from the cursor, a sixteenth of a turn apart, for x at the step and for y (-cos) a
+    // quarter turn further on: Circle 2 round(12 sin), Big Circle round(48 sin) (the maintainer: Circle the 24 px Big
+    // Circle was, Big Circle twice that, a loop in 16 frames for both: 32 points was too slow; about 19 px a
+    // frame, and Ranger still captures); a swipe's 8 px a step
+    function automatic signed [4:0] sin12(input [3:0] k);
+        reg [4:0] m;
+        case (k[2:0])
+            3'd0: m = 5'd0; 3'd1: m = 5'd5; 3'd2: m = 5'd8; 3'd3: m = 5'd11;
+            3'd4: m = 5'd12; 3'd5: m = 5'd11; 3'd6: m = 5'd8; default: m = 5'd5;
+        endcase
+        sin12 = k[3] ? -m : m;
+    endfunction
+    function automatic signed [6:0] sin48(input [3:0] k);
+        reg [6:0] m;
+        case (k[2:0])
+            3'd0: m = 7'd0; 3'd1: m = 7'd18; 3'd2: m = 7'd34; 3'd3: m = 7'd44;
+            3'd4: m = 7'd48; 3'd5: m = 7'd44; 3'd6: m = 7'd34; default: m = 7'd18;
+        endcase
+        sin48 = k[3] ? -m : m;
+    endfunction
+    wire signed [5:0] s_x = {sin12(g_step), 1'b0}, s_y = {sin12(g_step + 4'd4), 1'b0};
+    wire signed [7:0] c_x = g_big ? sin48(g_step) : s_x;
+    wire signed [7:0] c_y = g_big ? sin48(g_step + 4'd4) : s_y;
+    wire [7:0] sw = {1'b0, g_step[3:0], 3'b000};            // step * 8 (up to 96)
+    wire signed [7:0] sw_s = g_kind[1] ? sw : -sw;           // Down/Right +, Up/Left -
+    wire signed [7:0] dx = g_circle ? c_x : g_kind[0] ? sw_s : 8'sd0;
+    wire signed [7:0] dy = g_circle ? -c_y : g_kind[0] ? 8'sd0 : sw_s;
+    wire signed [9:0] px = $signed({2'b00, cur_x}) + dx, py = $signed({2'b00, cur_y}) + dy;
+    // the point, clamped to the screen, through a register here: pen_x/pen_y reach the DS on clk_sys, so the
+    // adds stay off that crossing; the pen goes down with it, a clock after the gesture starts (g_vis)
+    reg [7:0] g_x = 0, g_y = 0;
+    reg g_vis = 0;
+    always @(posedge clk) begin
+        g_x <= px[9] ? 8'd0 : px[8] ? 8'd255 : px[7:0];
+        g_y <= py[9] ? 8'd0 : py > 10'sd191 ? 8'd191 : py[7:0];
+        g_vis <= g_act && touch;
+    end
+    assign pen_x = g_vis ? g_x : cur_x;
+    assign pen_y = g_vis ? g_y : cur_y;
     assign cursor = !top_only && (touch || ana) && idle != 8'd180;
-    assign pen = (touch && keys[4 + touch_btn]) || pen_ana;
-    assign ds_keys = touch ? keys & ~(16'h000F | (16'h0010 << touch_btn)) : keys;
+    assign pen = (touch && (|(fb & g_pen) || g_vis)) || pen_ana;
+    assign ds_keys = touch ? keys & ~{8'd0, g_on, 4'hF} : keys;
 endmodule
 `default_nettype wire

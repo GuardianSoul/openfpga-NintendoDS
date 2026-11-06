@@ -78,14 +78,17 @@ module nds_sdram_mc #(
     (* useioff = 1 *) reg        dq_oe = 0;
     (* useioff = 1 *) reg [15:0] dq_in = 0;
     // OUT_REG: the pins' registers, a clk_mem behind the engine's
-    (* useioff = 1 *) reg [2:0]  p_cmd = C_NOP;
+    // the command as three plain pin bits: as one 3-bit p_cmd <= cmd, Quartus extracted it as a state machine
+    // (one-hot flops in the core, the pins decoded from them, outside the I/O registers: #1643 STA, -2.97 ns
+    // setup on dram_we_n at slow 85C; docs/sdram-io.md)
+    (* useioff = 1 *) reg        p_nras = 1'b1, p_ncas = 1'b1, p_nwe = 1'b1;
     (* useioff = 1 *) reg [12:0] p_a = 0;
     (* useioff = 1 *) reg [1:0]  p_ba = 0;
     (* useioff = 1 *) reg [1:0]  p_dqm = 2'b00;
     (* useioff = 1 *) reg [15:0] p_dq_out = 0;
     (* useioff = 1 *) reg        p_dq_oe = 0;
-    always @(posedge clk) begin p_cmd <= cmd; p_a <= a; p_ba <= ba; p_dqm <= dqm; p_dq_out <= dq_out; p_dq_oe <= dq_oe; end
-    assign {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} = OUT_REG != 0 ? p_cmd : cmd;
+    always @(posedge clk) begin {p_nras, p_ncas, p_nwe} <= cmd; p_a <= a; p_ba <= ba; p_dqm <= dqm; p_dq_out <= dq_out; p_dq_oe <= dq_oe; end
+    assign {SDRAM_nRAS, SDRAM_nCAS, SDRAM_nWE} = OUT_REG != 0 ? {p_nras, p_ncas, p_nwe} : cmd;
     assign SDRAM_A = OUT_REG != 0 ? p_a : a;
     assign SDRAM_BA = OUT_REG != 0 ? p_ba : ba;
     assign {SDRAM_DQMH, SDRAM_DQML} = OUT_REG != 0 ? p_dqm : dqm;

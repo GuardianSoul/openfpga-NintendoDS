@@ -85,12 +85,14 @@ def main():
         pal_src = dtcm_src + 0x4000
         oam_src = pal_src + 0x800
         t9 = []
-        # BOOTCTL (core register 0x04000F00, set by the normal boot): IR cart, save type
+        # BOOTCTL (core register 0x04000F00, set by the normal boot): IR cart, save type, DSi-enhanced cart (bit 7,
+        # header unit code bit 1: chip ID bit 30, which the game stored at boot)
         sv = d / 'save.bin'
         stype = {0x200: 1, 0x2000: 2, 0x10000: 3, 0x20000: 4, 0x40000: 5, 0x80000: 6, 0x100000: 7}.get(
             sv.stat().st_size if sv.exists() else 0, 0)
         ir = main_ram[0x3FFE0C] == ord('I')
-        t9 += [3, 0x04000F00, (2 if ir else 0) | stype << 4]
+        dsi = bool(main_ram[0x3FFE12] & 2)
+        t9 += [3, 0x04000F00, (2 if ir else 0) | stype << 4 | (0x80 if dsi else 0)]
         ctl = st['cp15.100']
         t9 += [5, 14, st['cp15.910'], 5, 15, st['cp15.911']]
         # TCMs on (the state's bases), load modes, protection and caches off, for the copies
