@@ -1,0 +1,47 @@
+# DS-verified TMCNT_H rule for melonDS (hwref run 34). Applied after ds-rules-tmr.patch.
+# Under !MELONDS_STOCK && DS_RULE_TMRCNT; the census defines it. sim/sys/golden_sys.h has the same rule.
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 4010a74..978a112 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -1726,6 +1726,10 @@ u16 NDS::TimerGetCounter(u32 timer)
+ 
+ void NDS::TimerStart(u32 id, u16 cnt)
+ {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TMRCNT)
++    // hwref run 34: TMCNT_H keeps bits 0-2, 6 and 7; the rest read 0
++    cnt &= 0x00C7;
++#endif
+     Timer* timer = &Timers[id];
+     u16 curstart = timer->Cnt & (1<<7);
+     u16 newstart = cnt & (1<<7);
+@@ -3165,6 +3169,14 @@ void NDS::ARM9IOWrite8(u32 addr, u8 val)
+ {
+     switch (addr)
+     {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TMRCNT)
++    // hwref run 34: a byte write to TMCNT_H's low byte takes effect (a
++    // write to its high byte changes nothing: those bits read 0)
++    case 0x04000102: TimerStart(0, val); return;
++    case 0x04000106: TimerStart(1, val); return;
++    case 0x0400010A: TimerStart(2, val); return;
++    case 0x0400010E: TimerStart(3, val); return;
++#endif
+     case 0x04000004: GPU.SetDispStat(0, val, 0x00FF); return;
+     case 0x04000005: GPU.SetDispStat(0, val << 8, 0xFF00); return;
+     case 0x04000006: GPU.SetVCount(val, 0x00FF); return;
+@@ -3857,6 +3869,14 @@ void NDS::ARM7IOWrite8(u32 addr, u8 val)
+ {
+     switch (addr)
+     {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TMRCNT)
++    // hwref run 34: a byte write to TMCNT_H's low byte takes effect (a
++    // write to its high byte changes nothing: those bits read 0)
++    case 0x04000102: TimerStart(4+0, val); return;
++    case 0x04000106: TimerStart(4+1, val); return;
++    case 0x0400010A: TimerStart(4+2, val); return;
++    case 0x0400010E: TimerStart(4+3, val); return;
++#endif
+     case 0x04000004: GPU.SetDispStat(1, val, 0x00FF); return;
+     case 0x04000005: GPU.SetDispStat(1, val << 8, 0xFF00); return;
+     case 0x04000006: GPU.SetVCount(val, 0x00FF); return;

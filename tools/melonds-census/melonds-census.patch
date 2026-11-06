@@ -1,0 +1,866 @@
+diff --git a/src/ARM.cpp b/src/ARM.cpp
+index 3937a99..893dacd 100644
+--- a/src/ARM.cpp
++++ b/src/ARM.cpp
+@@ -528,6 +528,7 @@ void ARM::TriggerIRQ()
+ {
+     if (CPSR & 0x80)
+         return;
++    CENSUS_HOOK(IRQEntry, Num);
+ 
+     u32 oldcpsr = CPSR;
+     CPSR &= ~0xFF;
+@@ -657,6 +658,7 @@ void ARMv5::Execute()
+         else
+ #endif
+         {
++            u32 censusPC = R[15] - ((CPSR&0x20)?2:4);
+             if (CPSR & 0x20) // THUMB
+             {
+                 if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+@@ -698,6 +700,7 @@ void ARMv5::Execute()
+                     AddCycles_C();
+             }
+ 
++            CENSUS_HOOK(Retire, Num, censusPC, R, CPSR);
+             // TODO optimize this shit!!!
+             if (Halted)
+             {
+@@ -716,6 +719,7 @@ void ARMv5::Execute()
+ 
+         }
+ 
++        CENSUS_HOOK(Busy, 0, Cycles);
+         NDS.ARM9Timestamp += Cycles;
+         Cycles = 0;
+     }
+@@ -796,6 +800,7 @@ void ARMv4::Execute()
+         else
+ #endif
+         {
++            u32 censusPC = R[15] - ((CPSR&0x20)?2:4);
+             if (CPSR & 0x20) // THUMB
+             {
+                 if constexpr (mode == CPUExecuteMode::InterpreterGDB)
+@@ -832,6 +837,7 @@ void ARMv4::Execute()
+                     AddCycles_C();
+             }
+ 
++            CENSUS_HOOK(Retire, Num, censusPC, R, CPSR);
+             // TODO optimize this shit!!!
+             if (Halted)
+             {
+@@ -849,6 +855,7 @@ void ARMv4::Execute()
+             if (IRQ) TriggerIRQ();
+         }
+ 
++        CENSUS_HOOK(Busy, 1, Cycles);
+         NDS.ARM7Timestamp += Cycles;
+         Cycles = 0;
+     }
+@@ -1121,6 +1128,7 @@ u32 ARMv5::ReadMem(u32 addr, int size)
+ 
+ void ARMv4::DataRead8(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Read, addr, 8);
+     *val = BusRead8(addr);
+     DataRegion = addr;
+     DataCycles = NDS.ARM7MemTimings[addr >> 15][0];
+@@ -1128,6 +1136,7 @@ void ARMv4::DataRead8(u32 addr, u32* val)
+ 
+ void ARMv4::DataRead16(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Read, addr, 16);
+     addr &= ~1;
+ 
+     *val = BusRead16(addr);
+@@ -1137,6 +1146,7 @@ void ARMv4::DataRead16(u32 addr, u32* val)
+ 
+ void ARMv4::DataRead32(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Read, addr, 32);
+     addr &= ~3;
+ 
+     *val = BusRead32(addr);
+@@ -1146,6 +1156,7 @@ void ARMv4::DataRead32(u32 addr, u32* val)
+ 
+ void ARMv4::DataRead32S(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Read, addr, 32);
+     addr &= ~3;
+ 
+     *val = BusRead32(addr);
+@@ -1154,6 +1165,8 @@ void ARMv4::DataRead32S(u32 addr, u32* val)
+ 
+ void ARMv4::DataWrite8(u32 addr, u8 val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Write, addr, 8);
++    CENSUS_HOOK(DataWrite, 1, 0, addr, val, 1);
+     BusWrite8(addr, val);
+     DataRegion = addr;
+     DataCycles = NDS.ARM7MemTimings[addr >> 15][0];
+@@ -1161,6 +1174,8 @@ void ARMv4::DataWrite8(u32 addr, u8 val)
+ 
+ void ARMv4::DataWrite16(u32 addr, u16 val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Write, addr, 16);
++    CENSUS_HOOK(DataWrite, 1, 0, addr, val, 2);
+     addr &= ~1;
+ 
+     BusWrite16(addr, val);
+@@ -1170,6 +1185,8 @@ void ARMv4::DataWrite16(u32 addr, u16 val)
+ 
+ void ARMv4::DataWrite32(u32 addr, u32 val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Write, addr, 32);
++    CENSUS_HOOK(DataWrite, 1, 0, addr, val, 4);
+     addr &= ~3;
+ 
+     BusWrite32(addr, val);
+@@ -1179,6 +1196,8 @@ void ARMv4::DataWrite32(u32 addr, u32 val)
+ 
+ void ARMv4::DataWrite32S(u32 addr, u32 val)
+ {
++    CENSUS_HOOK(MemAccess, 1, Census::Write, addr, 32);
++    CENSUS_HOOK(DataWrite, 1, 0, addr, val, 4);
+     addr &= ~3;
+ 
+     BusWrite32(addr, val);
+diff --git a/src/ARM.h b/src/ARM.h
+index 88f970b..2715018 100644
+--- a/src/ARM.h
++++ b/src/ARM.h
+@@ -25,6 +25,7 @@
+ #include "types.h"
+ #include "MemRegion.h"
+ #include "MemConstants.h"
++#include "Census.h"
+ 
+ #ifdef GDBSTUB_ENABLED
+ #include "debug/GdbStub.h"
+@@ -394,11 +395,13 @@ public:
+ 
+     u16 CodeRead16(u32 addr)
+     {
++        CENSUS_HOOK(MemAccess, 1, Census::Code, addr, 16);
+         return BusRead16(addr);
+     }
+ 
+     u32 CodeRead32(u32 addr)
+     {
++        CENSUS_HOOK(MemAccess, 1, Census::Code, addr, 32);
+         return BusRead32(addr);
+     }
+ 
+diff --git a/src/CP15.cpp b/src/CP15.cpp
+index 9fa0281..df9d904 100644
+--- a/src/CP15.cpp
++++ b/src/CP15.cpp
+@@ -24,6 +24,7 @@
+ #include "Platform.h"
+ #include "ARMJIT_Memory.h"
+ #include "ARMJIT.h"
++#include "Census.h"
+ 
+ namespace melonDS
+ {
+@@ -783,6 +784,7 @@ u32 ARMv5::CP15Read(u32 id) const
+ 
+ u32 ARMv5::CodeRead32(u32 addr, bool branch)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Code, addr, 32);
+     /*if (branch || (!(addr & 0xFFF)))
+     {
+         if (!(PU_Map[addr>>12] & 0x04))
+@@ -817,6 +819,7 @@ u32 ARMv5::CodeRead32(u32 addr, bool branch)
+ 
+ void ARMv5::DataRead8(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Read, addr, 8);
+     if (!(PU_Map[addr>>12] & 0x01))
+     {
+         DataAbort();
+@@ -844,6 +847,7 @@ void ARMv5::DataRead8(u32 addr, u32* val)
+ 
+ void ARMv5::DataRead16(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Read, addr, 16);
+     if (!(PU_Map[addr>>12] & 0x01))
+     {
+         DataAbort();
+@@ -873,6 +877,7 @@ void ARMv5::DataRead16(u32 addr, u32* val)
+ 
+ void ARMv5::DataRead32(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Read, addr, 32);
+     if (!(PU_Map[addr>>12] & 0x01))
+     {
+         DataAbort();
+@@ -902,6 +907,7 @@ void ARMv5::DataRead32(u32 addr, u32* val)
+ 
+ void ARMv5::DataRead32S(u32 addr, u32* val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Read, addr, 32);
+     addr &= ~3;
+ 
+     if (addr < ITCMSize)
+@@ -923,6 +929,8 @@ void ARMv5::DataRead32S(u32 addr, u32* val)
+ 
+ void ARMv5::DataWrite8(u32 addr, u8 val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Write, addr, 8);
++    CENSUS_HOOK(DataWrite, 0, 0, addr, val, 1);
+     if (!(PU_Map[addr>>12] & 0x02))
+     {
+         DataAbort();
+@@ -951,6 +959,8 @@ void ARMv5::DataWrite8(u32 addr, u8 val)
+ 
+ void ARMv5::DataWrite16(u32 addr, u16 val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Write, addr, 16);
++    CENSUS_HOOK(DataWrite, 0, 0, addr, val, 2);
+     if (!(PU_Map[addr>>12] & 0x02))
+     {
+         DataAbort();
+@@ -981,6 +991,8 @@ void ARMv5::DataWrite16(u32 addr, u16 val)
+ 
+ void ARMv5::DataWrite32(u32 addr, u32 val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Write, addr, 32);
++    CENSUS_HOOK(DataWrite, 0, 0, addr, val, 4);
+     if (!(PU_Map[addr>>12] & 0x02))
+     {
+         DataAbort();
+@@ -1011,6 +1023,8 @@ void ARMv5::DataWrite32(u32 addr, u32 val)
+ 
+ void ARMv5::DataWrite32S(u32 addr, u32 val)
+ {
++    CENSUS_HOOK(MemAccess, 0, Census::Write, addr, 32);
++    CENSUS_HOOK(DataWrite, 0, 0, addr, val, 4);
+     addr &= ~3;
+ 
+     if (addr < ITCMSize)
+diff --git a/src/Census.h b/src/Census.h
+new file mode 100644
+index 0000000..6ebbd39
+--- /dev/null
++++ b/src/Census.h
+@@ -0,0 +1,111 @@
++// NDS_Pocket hardware census hooks (tools/melonds-census).
++// Every hook is optional; with no hooks installed melonDS behaves as upstream.
++
++#ifndef MELONDS_CENSUS_H
++#define MELONDS_CENSUS_H
++
++#include "types.h"
++
++namespace melonDS
++{
++class GPU3D;
++class SPU;
++
++namespace Census
++{
++
++enum Access : u32
++{
++    Code = 0,
++    Read = 1,
++    Write = 2,
++};
++
++// melonDS's flat VRAM copies that the renderers read from.
++enum Space : u32
++{
++    BG = 0,         // engine A/B BG VRAM, byte offset
++    OBJ = 1,        // engine A/B OBJ VRAM, byte offset
++    OBJExtPal = 2,  // engine A/B OBJ extended palette, halfword index
++    Texture = 3,    // 3D texture image slots, byte offset
++    TexPal = 4,     // 3D texture palette slots, byte offset
++};
++
++struct Hooks
++{
++    // cpu: 0 = ARM9, 1 = ARM7. size in bits. Called before the access.
++    void (*MemAccess)(int cpu, u32 kind, u32 addr, u32 size) = nullptr;
++    // Cycles the CPU actually executed (halt skips are not counted).
++    void (*Busy)(int cpu, u32 cycles) = nullptr;
++    // Every geometry FIFO entry as it is executed.
++    void (*GXCommand)(u8 cmd, u32 param) = nullptr;
++    // SWAP_BUFFERS taking effect at VBlank, before the polygon RAM is reset.
++    void (*Flush3D)(GPU3D& gpu3d) = nullptr;
++    // A DMA transfer starting (not resuming). bytes is the full length.
++    void (*DMAStart)(int cpu, u32 num, u32 mode, u32 src, u32 dst, u32 bytes) = nullptr;
++    // A cartridge ROM command with its transfer length.
++    void (*CartCommand)(const u8* cmd, u32 len) = nullptr;
++    // Start of every scanline (after VCount updates).
++    void (*Scanline)(u32 line) = nullptr;
++
++    // Renderer VRAM reads. unit: 0 = 2D engine A, 1 = 2D engine B, 2 = 3D.
++    void (*VRAMRead)(int unit, u32 space, u32 offset, u32 bytes) = nullptr;
++    // A 2D BG palette lookup; p points into either palette RAM or the BG
++    // extended palette copy, so the census can tell which.
++    void (*BGPalRead)(int engine, const void* p) = nullptr;
++    // The soft renderer starts drawing visible 2D line `line` (both engines,
++    // then display capture).
++    void (*Line2D)(u32 line) = nullptr;
++    // The 3D rasterizer starts line y; identical: melonDS skips rendering a
++    // frame whose inputs did not change (called once per frame, before any
++    // Line3D).
++    void (*Frame3D)(bool identical) = nullptr;
++    void (*Line3D)(s32 y) = nullptr;
++
++    // Sound (SPU.cpp): register writes as the ARM7 makes them (size in bits),
++    // POWCNT2, the start and end of every mixer step (end: the 16-bit output
++    // pair), each 32-bit sample fetch with the value read, and each capture
++    // word written.
++    void (*SPUWrite)(u32 size, u32 addr, u32 val) = nullptr;
++    void (*SPUPower)(u32 val) = nullptr;
++    void (*SPUMix)(SPU& spu) = nullptr;
++    void (*SPUMixEnd)(const s16* output) = nullptr;
++    void (*SPUFetch)(u32 addr, u32 val) = nullptr;
++    void (*SPUCapture)(u32 addr, u32 val) = nullptr;
++
++    // Golden-model traces (ARM.cpp, CP15.cpp, DMA.cpp).
++    // Retire: every interpreted instruction, including ones whose condition
++    // failed, after it executed and before the IRQ check. pc is the
++    // instruction's address; r is R[0..14] as seen in the current mode.
++    void (*Retire)(int cpu, u32 pc, const u32* r, u32 cpsr) = nullptr;
++    // A data write by the CPU (src 0, called on entry to DataWrite*, before
++    // the MPU check) or by one of its DMA channels (src 1). bytes = 1, 2, 4;
++    // addr as issued (not yet aligned).
++    void (*DataWrite)(int cpu, u32 src, u32 addr, u32 val, u32 bytes) = nullptr;
++    // An IRQ exception being taken (after the CPSR I-bit check).
++    void (*IRQEntry)(int cpu) = nullptr;
++};
++
++extern Hooks* Active;
++
++// Index wrappers for the renderers: report the read, return the index unchanged.
++inline u32 VRAMIdx(int unit, u32 space, u32 offset, u32 bytes)
++{
++    if (Active && Active->VRAMRead) Active->VRAMRead(unit, space, offset, bytes);
++    return offset;
++}
++
++inline u32 PalIdx(int engine, const u16* pal, u32 idx)
++{
++    if (Active && Active->BGPalRead) Active->BGPalRead(engine, &pal[idx]);
++    return idx;
++}
++
++}
++}
++
++#define CENSUS_HOOK(name, ...) \
++    do { if (melonDS::Census::Active && melonDS::Census::Active->name) \
++        melonDS::Census::Active->name(__VA_ARGS__); } while (0)
++
++#endif
+diff --git a/src/DMA.cpp b/src/DMA.cpp
+index b154273..cfc79b4 100644
+--- a/src/DMA.cpp
++++ b/src/DMA.cpp
+@@ -24,6 +24,7 @@
+ #include "GPU3D.h"
+ #include "DMA_Timings.h"
+ #include "Platform.h"
++#include "Census.h"
+ 
+ namespace melonDS
+ {
+@@ -170,6 +171,8 @@ void DMA::Start()
+         RemCount = Cnt & countmask;
+         if (!RemCount)
+             RemCount = countmask+1;
++        CENSUS_HOOK(DMAStart, (int)CPU, Num, StartMode, SrcAddr, DstAddr,
++                    RemCount * ((Cnt & 0x04000000) ? 4 : 2));
+     }
+ 
+     if (StartMode == 0x07 && RemCount > 112)
+@@ -569,7 +572,11 @@ void DMA::Run9()
+             NDS.ARM9Timestamp += (UnitTimings9_16(burststart) << NDS.ARM9ClockShift);
+             burststart = false;
+ 
+-            NDS.ARM9Write16(CurDstAddr, NDS.ARM9Read16(CurSrcAddr));
++            {
++                u16 censusV = NDS.ARM9Read16(CurSrcAddr);
++                CENSUS_HOOK(DataWrite, 0, 1, CurDstAddr, censusV, 2);
++                NDS.ARM9Write16(CurDstAddr, censusV);
++            }
+ 
+             CurSrcAddr += SrcAddrInc<<1;
+             CurDstAddr += DstAddrInc<<1;
+@@ -586,7 +593,11 @@ void DMA::Run9()
+             NDS.ARM9Timestamp += (UnitTimings9_32(burststart) << NDS.ARM9ClockShift);
+             burststart = false;
+ 
+-            NDS.ARM9Write32(CurDstAddr, NDS.ARM9Read32(CurSrcAddr));
++            {
++                u32 censusV = NDS.ARM9Read32(CurSrcAddr);
++                CENSUS_HOOK(DataWrite, 0, 1, CurDstAddr, censusV, 4);
++                NDS.ARM9Write32(CurDstAddr, censusV);
++            }
+ 
+             CurSrcAddr += SrcAddrInc<<2;
+             CurDstAddr += DstAddrInc<<2;
+@@ -645,7 +656,11 @@ void DMA::Run7()
+             NDS.ARM7Timestamp += UnitTimings7_16(burststart);
+             burststart = false;
+ 
+-            NDS.ARM7Write16(CurDstAddr, NDS.ARM7Read16(CurSrcAddr));
++            {
++                u16 censusV = NDS.ARM7Read16(CurSrcAddr);
++                CENSUS_HOOK(DataWrite, 1, 1, CurDstAddr, censusV, 2);
++                NDS.ARM7Write16(CurDstAddr, censusV);
++            }
+ 
+             CurSrcAddr += SrcAddrInc<<1;
+             CurDstAddr += DstAddrInc<<1;
+@@ -662,7 +677,11 @@ void DMA::Run7()
+             NDS.ARM7Timestamp += UnitTimings7_32(burststart);
+             burststart = false;
+ 
+-            NDS.ARM7Write32(CurDstAddr, NDS.ARM7Read32(CurSrcAddr));
++            {
++                u32 censusV = NDS.ARM7Read32(CurSrcAddr);
++                CENSUS_HOOK(DataWrite, 1, 1, CurDstAddr, censusV, 4);
++                NDS.ARM7Write32(CurDstAddr, censusV);
++            }
+ 
+             CurSrcAddr += SrcAddrInc<<2;
+             CurDstAddr += DstAddrInc<<2;
+diff --git a/src/GPU.cpp b/src/GPU.cpp
+index b695ee9..edd6094 100644
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -19,6 +19,7 @@
+ #include <string.h>
+ #include "NDS.h"
+ #include "GPU.h"
++#include "Census.h"
+ 
+ #include "ARMJIT.h"
+ 
+@@ -1216,6 +1217,7 @@ void GPU::BlankFrame() noexcept
+ 
+ void GPU::StartScanline(u32 line) noexcept
+ {
++    CENSUS_HOOK(Scanline, line);
+     /*
+      * order of operations on hardware:
+      * 1. VCount is incremented
+diff --git a/src/GPU.h b/src/GPU.h
+index b0e1faf..ed59b5e 100644
+--- a/src/GPU.h
++++ b/src/GPU.h
+@@ -23,6 +23,7 @@
+ 
+ #include "GPU2D.h"
+ #include "GPU3D.h"
++#include "Census.h"
+ #include "NonStupidBitfield.h"
+ 
+ namespace melonDS
+@@ -575,11 +576,13 @@ public:
+     template <typename T>
+     inline T ReadVRAMFlat_Texture(u32 addr) const
+     {
++        CENSUS_HOOK(VRAMRead, 2, Census::Texture, addr & 0x7FFFF, sizeof(T));
+         return *(T*)&VRAMFlat_Texture[addr & 0x7FFFF];
+     }
+     template <typename T>
+     inline T ReadVRAMFlat_TexPal(u32 addr) const
+     {
++        CENSUS_HOOK(VRAMRead, 2, Census::TexPal, addr & 0x1FFFF, sizeof(T));
+         return *(T*)&VRAMFlat_TexPal[addr & 0x1FFFF];
+     }
+ 
+diff --git a/src/GPU2D_Soft.cpp b/src/GPU2D_Soft.cpp
+index 5adc545..9773c0b 100644
+--- a/src/GPU2D_Soft.cpp
++++ b/src/GPU2D_Soft.cpp
+@@ -455,7 +455,7 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
+         // preload shit as needed
+         if ((xoff & 0x7) || mosaic)
+         {
+-            curtile = *(u16*)&bgvram[(tilemapaddr + ((xoff & 0xF8) >> 2) + ((xoff & widexmask) << 3)) & bgvrammask];
++            curtile = *(u16*)&bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + ((xoff & 0xF8) >> 2) + ((xoff & widexmask) << 3)) & bgvrammask, 2)];
+ 
+             if (extpal) curpal = GPU2D.GetBGExtPal(extpalslot, curtile>>12);
+             else        curpal = pal;
+@@ -476,7 +476,7 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
+                 (mosaic && ((xpos >> 3) != (lastxpos >> 3))))
+             {
+                 // load a new tile
+-                curtile = *(u16*)&bgvram[(tilemapaddr + ((xpos & 0xF8) >> 2) + ((xpos & widexmask) << 3)) & bgvrammask];
++                curtile = *(u16*)&bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + ((xpos & 0xF8) >> 2) + ((xpos & widexmask) << 3)) & bgvrammask, 2)];
+ 
+                 if (extpal) curpal = GPU2D.GetBGExtPal(extpalslot, curtile>>12);
+                 else        curpal = pal;
+@@ -491,10 +491,10 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
+             if (WindowMask[i] & (1<<bgnum))
+             {
+                 u32 tilexoff = (curtile & (1<<10)) ? (7-(xpos&0x7)) : (xpos&0x7);
+-                color = bgvram[(pixelsaddr + tilexoff) & bgvrammask];
++                color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (pixelsaddr + tilexoff) & bgvrammask, 1)];
+ 
+                 if (color)
+-                    DrawPixel(&BGOBJLine[i], curpal[color], 0x01000000<<bgnum);
++                    DrawPixel(&BGOBJLine[i], curpal[Census::PalIdx(GPU2D.Num, curpal, color)], 0x01000000<<bgnum);
+             }
+ 
+             xoff++;
+@@ -507,7 +507,7 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
+         // preload shit as needed
+         if ((xoff & 0x7) || mosaic)
+         {
+-            curtile = *(u16*)&bgvram[((tilemapaddr + ((xoff & 0xF8) >> 2) + ((xoff & widexmask) << 3))) & bgvrammask];
++            curtile = *(u16*)&bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, ((tilemapaddr + ((xoff & 0xF8) >> 2) + ((xoff & widexmask) << 3))) & bgvrammask, 2)];
+             curpal = pal + ((curtile & 0xF000) >> 8);
+             pixelsaddr = tilesetaddr + ((curtile & 0x03FF) << 5)
+                                      + (((curtile & (1<<11)) ? (7-(yoff&0x7)) : (yoff&0x7)) << 2);
+@@ -525,7 +525,7 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
+                 (mosaic && ((xpos >> 3) != (lastxpos >> 3))))
+             {
+                 // load a new tile
+-                curtile = *(u16*)&bgvram[(tilemapaddr + ((xpos & 0xF8) >> 2) + ((xpos & widexmask) << 3)) & bgvrammask];
++                curtile = *(u16*)&bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + ((xpos & 0xF8) >> 2) + ((xpos & widexmask) << 3)) & bgvrammask, 2)];
+                 curpal = pal + ((curtile & 0xF000) >> 8);
+                 pixelsaddr = tilesetaddr + ((curtile & 0x03FF) << 5)
+                                          + (((curtile & (1<<11)) ? (7-(yoff&0x7)) : (yoff&0x7)) << 2);
+@@ -539,15 +539,15 @@ void SoftRenderer2D::DrawBG_Text(u32 line, u32 bgnum)
+                 u32 tilexoff = (curtile & (1<<10)) ? (7-(xpos&0x7)) : (xpos&0x7);
+                 if (tilexoff & 0x1)
+                 {
+-                    color = bgvram[(pixelsaddr + (tilexoff >> 1)) & bgvrammask] >> 4;
++                    color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (pixelsaddr + (tilexoff >> 1)) & bgvrammask, 1)] >> 4;
+                 }
+                 else
+                 {
+-                    color = bgvram[(pixelsaddr + (tilexoff >> 1)) & bgvrammask] & 0x0F;
++                    color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (pixelsaddr + (tilexoff >> 1)) & bgvrammask, 1)] & 0x0F;
+                 }
+ 
+                 if (color)
+-                    DrawPixel(&BGOBJLine[i], curpal[color], 0x01000000<<bgnum);
++                    DrawPixel(&BGOBJLine[i], curpal[Census::PalIdx(GPU2D.Num, curpal, color)], 0x01000000<<bgnum);
+             }
+ 
+             xoff++;
+@@ -626,13 +626,13 @@ void SoftRenderer2D::DrawBG_Affine(u32 line, u32 bgnum)
+ 
+             if ((!((finalX|finalY) & overflowmask)))
+             {
+-                curtile = bgvram[(tilemapaddr + ((((finalY & coordmask) >> 11) << yshift) + ((finalX & coordmask) >> 11))) & bgvrammask];
++                curtile = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + ((((finalY & coordmask) >> 11) << yshift) + ((finalX & coordmask) >> 11))) & bgvrammask, 1)];
+ 
+                 // draw pixel
+                 u32 tilexoff = (finalX >> 8) & 0x7;
+                 u32 tileyoff = (finalY >> 8) & 0x7;
+ 
+-                color = bgvram[(tilesetaddr + (curtile << 6) + (tileyoff << 3) + tilexoff) & bgvrammask];
++                color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilesetaddr + (curtile << 6) + (tileyoff << 3) + tilexoff) & bgvrammask, 1)];
+ 
+                 if (color)
+                     DrawPixel(&BGOBJLine[i], pal[color], 0x01000000<<bgnum);
+@@ -718,7 +718,7 @@ void SoftRenderer2D::DrawBG_Extended(u32 line, u32 bgnum)
+ 
+                     if (!(finalX & ofxmask) && !(finalY & ofymask))
+                     {
+-                        color = *(u16*)&bgvram[(tilemapaddr + (((((finalY & ymask) >> 8) << yshift) + ((finalX & xmask) >> 8)) << 1)) & bgvrammask];
++                        color = *(u16*)&bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + (((((finalY & ymask) >> 8) << yshift) + ((finalX & xmask) >> 8)) << 1)) & bgvrammask, 2)];
+ 
+                         if (color & 0x8000)
+                             DrawPixel(&BGOBJLine[i], color & 0x7FFF, 0x01000000<<bgnum);
+@@ -757,7 +757,7 @@ void SoftRenderer2D::DrawBG_Extended(u32 line, u32 bgnum)
+ 
+                     if (!(finalX & ofxmask) && !(finalY & ofymask))
+                     {
+-                        color = bgvram[(tilemapaddr + (((finalY & ymask) >> 8) << yshift) + ((finalX & xmask) >> 8)) & bgvrammask];
++                        color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + (((finalY & ymask) >> 8) << yshift) + ((finalX & xmask) >> 8)) & bgvrammask, 1)];
+ 
+                         if (color)
+                             DrawPixel(&BGOBJLine[i], pal[color], 0x01000000<<bgnum);
+@@ -827,7 +827,7 @@ void SoftRenderer2D::DrawBG_Extended(u32 line, u32 bgnum)
+ 
+                 if ((!((finalX|finalY) & overflowmask)))
+                 {
+-                    curtile = *(u16*)&bgvram[(tilemapaddr + (((((finalY & coordmask) >> 11) << yshift) + ((finalX & coordmask) >> 11)) << 1)) & bgvrammask];
++                    curtile = *(u16*)&bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilemapaddr + (((((finalY & coordmask) >> 11) << yshift) + ((finalX & coordmask) >> 11)) << 1)) & bgvrammask, 2)];
+ 
+                     if (extpal) curpal = GPU2D.GetBGExtPal(bgnum, curtile>>12);
+                     else        curpal = pal;
+@@ -839,10 +839,10 @@ void SoftRenderer2D::DrawBG_Extended(u32 line, u32 bgnum)
+                     if (curtile & (1<<10)) tilexoff = 7-tilexoff;
+                     if (curtile & (1<<11)) tileyoff = 7-tileyoff;
+ 
+-                    color = bgvram[(tilesetaddr + ((curtile & 0x03FF) << 6) + (tileyoff << 3) + tilexoff) & bgvrammask];
++                    color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, (tilesetaddr + ((curtile & 0x03FF) << 6) + (tileyoff << 3) + tilexoff) & bgvrammask, 1)];
+ 
+                     if (color)
+-                        DrawPixel(&BGOBJLine[i], curpal[color], 0x01000000<<bgnum);
++                        DrawPixel(&BGOBJLine[i], curpal[Census::PalIdx(GPU2D.Num, curpal, color)], 0x01000000<<bgnum);
+                 }
+             }
+ 
+@@ -922,7 +922,7 @@ void SoftRenderer2D::DrawBG_Large(u32 line) // BG is always BG2
+ 
+             if (!(finalX & ofxmask) && !(finalY & ofymask))
+             {
+-                color = bgvram[((((finalY & ymask) >> 8) << yshift) + ((finalX & xmask) >> 8)) & bgvrammask];
++                color = bgvram[Census::VRAMIdx(GPU2D.Num, Census::BG, ((((finalY & ymask) >> 8) << yshift) + ((finalX & xmask) >> 8)) & bgvrammask, 1)];
+ 
+                 if (color)
+                     DrawPixel(&BGOBJLine[i], pal[color], 0x01000000<<2);
+@@ -1002,7 +1002,7 @@ void SoftRenderer2D::InterleaveSprites(u32 prio)
+         else if (pixel & OBJ_StandardPal)
+             color = pal[pixel & 0xFF];
+         else
+-            color = extpal[pixel & 0xFFF];
++            color = extpal[Census::VRAMIdx(GPU2D.Num, Census::OBJExtPal, pixel & 0xFFF, 2)];
+ 
+         DrawPixel(&BGOBJLine[i], color, pixel & 0xFF000000);
+     }
+@@ -1235,7 +1235,7 @@ void SoftRenderer2D::DrawSprite_Rotscale(u32 num, u32 boundwidth, u32 boundheigh
+         {
+             if ((u32)rotX < width && (u32)rotY < height)
+             {
+-                color = *(u16*)&objvram[(pixelsaddr + ((rotY >> 8) * ytilefactor) + ((rotX >> 8) << 1)) & objvrammask];
++                color = *(u16*)&objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, (pixelsaddr + ((rotY >> 8) * ytilefactor) + ((rotX >> 8) << 1)) & objvrammask, 2)];
+ 
+                 DrawSpritePixel<window>((color&0x8000) ? color : -1, pixelattr, xpos);
+             }
+@@ -1281,7 +1281,7 @@ void SoftRenderer2D::DrawSprite_Rotscale(u32 num, u32 boundwidth, u32 boundheigh
+             {
+                 if ((u32)rotX < width && (u32)rotY < height)
+                 {
+-                    color = objvram[(pixelsaddr + ((rotY>>11)*ytilefactor) + ((rotY&0x700)>>5) + ((rotX>>11)*64) + ((rotX&0x700)>>8)) & objvrammask];
++                    color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, (pixelsaddr + ((rotY>>11)*ytilefactor) + ((rotY&0x700)>>5) + ((rotX>>11)*64) + ((rotX&0x700)>>8)) & objvrammask, 1)];
+ 
+                     DrawSpritePixel<window>(color ? color : -1, pixelattr, xpos);
+                 }
+@@ -1305,7 +1305,7 @@ void SoftRenderer2D::DrawSprite_Rotscale(u32 num, u32 boundwidth, u32 boundheigh
+             {
+                 if ((u32)rotX < width && (u32)rotY < height)
+                 {
+-                    color = objvram[(pixelsaddr + ((rotY>>11)*ytilefactor) + ((rotY&0x700)>>6) + ((rotX>>11)*32) + ((rotX&0x700)>>9)) & objvrammask];
++                    color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, (pixelsaddr + ((rotY>>11)*ytilefactor) + ((rotY&0x700)>>6) + ((rotX>>11)*32) + ((rotX&0x700)>>9)) & objvrammask, 1)];
+                     if (rotX & 0x100)
+                         color >>= 4;
+                     else
+@@ -1421,7 +1421,7 @@ void SoftRenderer2D::DrawSprite_Normal(u32 num, u32 width, u32 height, s32 xpos,
+ 
+         for (; xoff < xend;)
+         {
+-            color = *(u16*)&objvram[pixelsaddr & objvrammask];
++            color = *(u16*)&objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, pixelsaddr & objvrammask, 2)];
+ 
+             pixelsaddr += pixelstride;
+ 
+@@ -1479,7 +1479,7 @@ void SoftRenderer2D::DrawSprite_Normal(u32 num, u32 width, u32 height, s32 xpos,
+ 
+             for (; xoff < xend;)
+             {
+-                color = objvram[pixelsaddr & objvrammask];
++                color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, pixelsaddr & objvrammask, 1)];
+ 
+                 pixelsaddr += pixelstride;
+ 
+@@ -1525,13 +1525,13 @@ void SoftRenderer2D::DrawSprite_Normal(u32 num, u32 width, u32 height, s32 xpos,
+             {
+                 if (attrib[1] & (1<<12))
+                 {
+-                    if (xoff & 0x1) { color = objvram[pixelsaddr & objvrammask] & 0x0F; pixelsaddr--; }
+-                    else              color = objvram[pixelsaddr & objvrammask] >> 4;
++                    if (xoff & 0x1) { color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, pixelsaddr & objvrammask, 1)] & 0x0F; pixelsaddr--; }
++                    else              color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, pixelsaddr & objvrammask, 1)] >> 4;
+                 }
+                 else
+                 {
+-                    if (xoff & 0x1) { color = objvram[pixelsaddr & objvrammask] >> 4; pixelsaddr++; }
+-                    else              color = objvram[pixelsaddr & objvrammask] & 0x0F;
++                    if (xoff & 0x1) { color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, pixelsaddr & objvrammask, 1)] >> 4; pixelsaddr++; }
++                    else              color = objvram[Census::VRAMIdx(GPU2D.Num, Census::OBJ, pixelsaddr & objvrammask, 1)] & 0x0F;
+                 }
+ 
+                 DrawSpritePixel<window>(color ? color : -1, pixelattr, xpos);
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+index 3272a34..4e00dee 100644
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -25,6 +25,7 @@
+ #include "GPU3D_Soft.h"
+ #include "Platform.h"
+ #include "GPU3D.h"
++#include "Census.h"
+ 
+ namespace melonDS
+ {
+@@ -1734,6 +1735,7 @@ GPU3D::CmdFIFOEntry GPU3D::CmdFIFORead() noexcept
+ void GPU3D::ExecuteCommand() noexcept
+ {
+     CmdFIFOEntry entry = CmdFIFORead();
++    CENSUS_HOOK(GXCommand, entry.Command, entry.Param);
+ 
+     //printf("FIFO: processing %02X %08X. Levels: FIFO=%d, PIPE=%d\n", entry.Command, entry.Param, CmdFIFO->Level(), CmdPIPE->Level());
+ 
+@@ -2486,6 +2488,7 @@ void GPU3D::VBlank() noexcept
+ 
+         if (FlushRequest)
+         {
++            CENSUS_HOOK(Flush3D, *this);
+             CurRAMBank = CurRAMBank?0:1;
+             CurVertexRAM = &VertexRAM[CurRAMBank ? 6144 : 0];
+             CurPolygonRAM = &PolygonRAM[CurRAMBank ? 2048 : 0];
+diff --git a/src/GPU3D_Soft.cpp b/src/GPU3D_Soft.cpp
+index e620270..07474b0 100644
+--- a/src/GPU3D_Soft.cpp
++++ b/src/GPU3D_Soft.cpp
+@@ -1396,6 +1396,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+ 
+ void SoftRenderer3D::RenderScanline(s32 y, int npolys)
+ {
++    CENSUS_HOOK(Line3D, y);
+     for (int i = 0; i < npolys; i++)
+     {
+         RendererPolygon* rp = &PolygonList[i];
+@@ -1752,6 +1753,7 @@ void SoftRenderer3D::RenderFrame()
+     bool texPalChanged = GPU.MakeVRAMFlat_TexPalCoherent(texPalDirty);
+ 
+     FrameIdentical = !(textureChanged || texPalChanged) && GPU3D.RenderFrameIdentical;
++    CENSUS_HOOK(Frame3D, FrameIdentical);
+ 
+     if (RenderThreadRunning.load(std::memory_order_relaxed))
+     {
+diff --git a/src/GPU_Soft.cpp b/src/GPU_Soft.cpp
+index 861c1a6..63224a6 100644
+--- a/src/GPU_Soft.cpp
++++ b/src/GPU_Soft.cpp
+@@ -114,6 +114,7 @@ void SoftRenderer::DrawScanline(u32 line)
+         // retrieve 3D output
+         Output3D = Rend3D->GetLine(line);
+ 
++        CENSUS_HOOK(Line2D, line);
+         // draw BG/OBJ layers
+         Rend2D_A->DrawScanline(line);
+         Rend2D_B->DrawScanline(line);
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index c6dc85f..9640a52 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -21,6 +21,7 @@
+ #include <string.h>
+ #include <inttypes.h>
+ #include "NDS.h"
++#include "Census.h"
+ #include "ARM.h"
+ #include "NDSCart.h"
+ #include "GBACart.h"
+@@ -47,6 +48,7 @@
+ 
+ namespace melonDS
+ {
++Census::Hooks* Census::Active = nullptr;
+ using namespace Platform;
+ 
+ const s32 kMaxIterationCycles = 64;
+diff --git a/src/NDSCart.cpp b/src/NDSCart.cpp
+index 35394c9..a477c38 100644
+--- a/src/NDSCart.cpp
++++ b/src/NDSCart.cpp
+@@ -27,6 +27,7 @@
+ #include "ROMList.h"
+ #include "FATStorage.h"
+ #include "Utils.h"
++#include "Census.h"
+ 
+ #include "NDSCart/CartCommon.h"
+ #include "NDSCart/CartRetail.h"
+@@ -795,7 +796,10 @@ void NDSCartSlot::Interface::WriteROMCnt(u32 val, u32 mask)
+            datasize);*/
+ 
+     if (Parent.CartActive && Parent.CPUSelect == Num)
++    {
++        CENSUS_HOOK(CartCommand, ROMCommand, datasize);
+         Parent.Cart->ROMCommandStart(Parent, ROMCommand);
++    }
+ 
+     // reset the FIFO
+     ROMDataPosCPU = 0;
+diff --git a/src/SPU.cpp b/src/SPU.cpp
+index e1d49f9..4727f0e 100644
+--- a/src/SPU.cpp
++++ b/src/SPU.cpp
+@@ -25,6 +25,7 @@
+ #include "DSi.h"
+ #include "DSi_I2S.h"
+ #include "SPU.h"
++#include "Census.h"
+ 
+ #include "blip-buf/blip_buf.h"
+ 
+@@ -296,6 +297,7 @@ void SPU::DoSavestate(Savestate* file)
+ 
+ void SPU::SetPowerCnt(u32 val)
+ {
++    CENSUS_HOOK(SPUPower, val);
+     Mute = !(val & (1<<0));
+ }
+ 
+@@ -431,6 +433,7 @@ void SPUChannel::FIFO_BufferData()
+         for (u32 i = 0; i < burstlen; i += 4)
+         {
+             FIFO[FIFOWritePos] = NDS.ARM7Read32(SrcAddr + FIFOReadOffset);
++            CENSUS_HOOK(SPUFetch, SrcAddr + FIFOReadOffset, FIFO[FIFOWritePos]);
+             FIFOReadOffset += 4;
+             FIFOWritePos++;
+             FIFOWritePos &= 0x7;
+@@ -774,6 +777,7 @@ void SPUCaptureUnit::FIFO_FlushData()
+ {
+     for (u32 i = 0; i < 4; i++)
+     {
++        CENSUS_HOOK(SPUCapture, DstAddr + FIFOWriteOffset, FIFO[FIFOReadPos]);
+         NDS.ARM7Write32(DstAddr + FIFOWriteOffset, FIFO[FIFOReadPos]);
+         // Calls the NDS or DSi version, depending on the class
+ 
+@@ -858,6 +862,7 @@ void SPUCaptureUnit::Run(u32 cycles, s32 sample)
+ 
+ void SPU::Mix(u32 spucycles)
+ {
++    CENSUS_HOOK(SPUMix, *this);
+     s32 left = 0, right = 0;
+     s32 leftoutput = 0, rightoutput = 0;
+ 
+@@ -990,6 +995,7 @@ void SPU::Mix(u32 spucycles)
+         output[1] = (s16)std::clamp(rightoutput, -0x8000, 0x7FFF);
+     }
+ 
++    CENSUS_HOOK(SPUMixEnd, output);
+     NDS.Mic.Advance(spucycles << 1);
+ 
+     if (NDS.ConsoleType == 1)
+@@ -1272,6 +1278,7 @@ u32 SPU::Read32(u32 addr)
+ 
+ void SPU::Write8(u32 addr, u8 val)
+ {
++    CENSUS_HOOK(SPUWrite, 8, addr, val);
+     if (addr < 0x04000500)
+     {
+         SPUChannel* chan = &Channels[(addr >> 4) & 0xF];
+@@ -1313,6 +1320,7 @@ void SPU::Write8(u32 addr, u8 val)
+ 
+ void SPU::Write16(u32 addr, u16 val)
+ {
++    CENSUS_HOOK(SPUWrite, 16, addr, val);
+     if (addr < 0x04000500)
+     {
+         SPUChannel* chan = &Channels[(addr >> 4) & 0xF];
+@@ -1362,6 +1370,7 @@ void SPU::Write16(u32 addr, u16 val)
+ 
+ void SPU::Write32(u32 addr, u32 val)
+ {
++    CENSUS_HOOK(SPUWrite, 32, addr, val);
+     if (addr < 0x04000500)
+     {
+         SPUChannel* chan = &Channels[(addr >> 4) & 0xF];

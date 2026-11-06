@@ -1,0 +1,73 @@
+# DS-verified geometry rules for melonDS (docs/geometry-engine.md), applied by build.sh after ds-rules.patch;
+# each under DS_RULE_<name> (defined in CMakeLists.txt) and #ifndef MELONDS_STOCK.
+# DS_RULE_STRIPCLIP: a clipped strip polygon shares no vertices, with the next polygon or the previous one (hwref runs 15-19).
+# DS_RULE_FARREJ: a strip polygon reusing two vertices and beyond the far plane (no attribute bit 12) is rejected (hwref rand3d run 16).
+# DS_RULE_CLIPRED: the clipper interpolates red without the colour fill (hwref rules3d clip_col, run 21).
+diff --git a/src/GPU3D.cpp b/src/GPU3D.cpp
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -808,7 +808,13 @@
+ 
+     if (attribs)
+     {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_CLIPRED)
++        // DS (hwref rules3d clip_col, run 21): red is interpolated without the colour fill (blue and green
++        // with it): from (c << 12) rather than (c << 12) | 0xFFF, so a clipped vertex's red can be a step lower
++        { s64 r0 = vin->Color[0] & ~0xFFF, r1 = vout->Color[0] & ~0xFFF; outbuf->Color[0] = r0 + ((r1 - r0) * factor_num) / factor_den; }
++#else
+         INTERPOLATE(Color[0]);
++#endif
+         INTERPOLATE(Color[1]);
+         INTERPOLATE(Color[2]);
+ 
+@@ -917,6 +923,11 @@
+ 
+     // Z clipping
+     nverts = ClipAgainstPlane<2, attribs>(gpu, vertices, nverts, clipstart);
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_FARREJ)
++    // DS (hwref rand3d run 16): beyond the far plane without attribute bit 12 the polygon is rejected even when it
++    // reuses two strip vertices (clipstart 2), where the Y and X planes would return those two as a polygon
++    if (nverts == 0) return 0;
++#endif
+ 
+     // Y clipping
+     nverts = ClipAgainstPlane<1, attribs>(gpu, vertices, nverts, clipstart);
+@@ -1032,7 +1043,15 @@
+             lastpolyverts = 4;
+         }
+ 
+-        if (LastStripPolygon->NumVertices == lastpolyverts &&
++        bool lastclipped = false;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_STRIPCLIP)
++        // DS (hwref runs 15-19): a strip polygon that was clipped at all is stored as a separate
++        // polygon, so the next one never shares its vertices, even when the clip left
++        // lastpolyverts vertices with both shared ones original
++        for (u32 i = 0; i < LastStripPolygon->NumVertices; i++)
++            if (LastStripPolygon->Vertices[i]->Clipped) lastclipped = true;
++#endif
++        if (LastStripPolygon->NumVertices == lastpolyverts && !lastclipped &&
+             !LastStripPolygon->Vertices[id0]->Clipped &&
+             !LastStripPolygon->Vertices[id1]->Clipped)
+         {
+@@ -1069,6 +1088,12 @@
+     // clipping
+ 
+     nverts = ClipPolygon<true>(*this, clippedvertices, nverts, clipstart);
++    bool curclipped = false;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_STRIPCLIP)
++    // DS: a clipped strip polygon shares no vertices either: the two reused ones are stored again
++    for (int i = clipstart; i < nverts; i++)
++        if (clippedvertices[i].Clipped) curclipped = true;
++#endif
+     if (nverts == 0)
+     {
+         LastStripPolygon = NULL;
+@@ -1215,7 +1240,7 @@
+ 
+     if (LastStripPolygon && clipstart > 0)
+     {
+-        if (nverts == lastpolyverts)
++        if (nverts == lastpolyverts && !curclipped)
+         {
+             poly->Vertices[0] = reusedvertices[0];
+             poly->Vertices[1] = reusedvertices[1];

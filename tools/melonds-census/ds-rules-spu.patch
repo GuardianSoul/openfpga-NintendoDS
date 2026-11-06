@@ -1,0 +1,70 @@
+# DS-verified sound rules for melonDS (AGENTS.md: the real DS is ground truth).
+# Applied to the census build after ds-rules.patch (separate, because the
+# renderer testbench applies ds-rules.patch to GPU3D_Soft.cpp alone).
+# Each rule is under !MELONDS_STOCK && DS_RULE_<name>; the census defines them.
+diff --git a/src/SPU.cpp b/src/SPU.cpp
+index 4727f0e..d7b260a 100644
+--- a/src/SPU.cpp
++++ b/src/SPU.cpp
+@@ -895,9 +895,30 @@ void SPU::Mix(u32 spucycles)
+         {
+             s32 val = left;
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAPTURE)
++            // DS rule (docs/hw-reference.md, sndcap v3 DC grid): the capture's
++            // 16-bit sample is the mixer sum floored by 7 bits, then halved
++            // rounding toward zero (exact on all 256 one-channel cells and the
++            // two-channel set)
++            val >>= 7;
++            val /= 2;
++#else
+             val >>= 8;
++#endif
+             if      (val < -0x8000) val = -0x8000;
+             else if (val > 0x7FFF)  val = 0x7FFF;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAP8)
++            // DS rule (hwref run 30, sndq S1): the 8-bit capture is the sum
++            // floored by 15 bits, then halved toward zero (the 16-bit rule
++            // eight bits up), saturated; Run takes the 8-bit value as sample >> 8
++            if (Capture[0].Cnt & 0x08)
++            {
++                s32 v8 = (left >> 15) / 2;
++                if      (v8 < -0x80) v8 = -0x80;
++                else if (v8 > 0x7F)  v8 = 0x7F;
++                val = v8 * 256;
++            }
++#endif
+ 
+             Capture[0].Run(spucycles, val);
+         }
+@@ -906,9 +927,30 @@ void SPU::Mix(u32 spucycles)
+         {
+             s32 val = right;
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAPTURE)
++            // DS rule (docs/hw-reference.md, sndcap v3 DC grid): the capture's
++            // 16-bit sample is the mixer sum floored by 7 bits, then halved
++            // rounding toward zero (exact on all 256 one-channel cells and the
++            // two-channel set)
++            val >>= 7;
++            val /= 2;
++#else
+             val >>= 8;
++#endif
+             if      (val < -0x8000) val = -0x8000;
+             else if (val > 0x7FFF)  val = 0x7FFF;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_SPU_CAP8)
++            // DS rule (hwref run 30, sndq S1): the 8-bit capture is the sum
++            // floored by 15 bits, then halved toward zero (the 16-bit rule
++            // eight bits up), saturated; Run takes the 8-bit value as sample >> 8
++            if (Capture[1].Cnt & 0x08)
++            {
++                s32 v8 = (right >> 15) / 2;
++                if      (v8 < -0x80) v8 = -0x80;
++                else if (v8 > 0x7F)  v8 = 0x7F;
++                val = v8 * 256;
++            }
++#endif
+ 
+             Capture[1].Run(spucycles, val);
+         }

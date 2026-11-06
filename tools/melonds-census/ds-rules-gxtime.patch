@@ -1,0 +1,92 @@
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -24,6 +24,22 @@
+ #include "FIFO.h"
+ #include "GPU3D_Soft.h"
+ #include "Platform.h"
++#include <stdlib.h>
++
++// DS GX timing terms (hwref runs 28-30: gxburst frames and micro-mixes), fitted to the DS
++// (docs/ds-rules.md): a clipped polygon costs 40 + 25 per new (clipped) vertex as engine time, a
++// quad-strip polygon 9, a 10-bit/XY/XZ/YZ/delta vertex 1 more than melonDS, MTX_LOAD_4x3 2 more.
++// GXDS_<name> overrides a value (refitting).
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_GXTIME)
++#define GXDS_DEF(v) v
++#else
++#define GXDS_DEF(v) 0
++#endif
++static int GxDs(const char* n, int d) { const char* v = getenv(n); return v ? atoi(v) : d; }
++static const int GXDS_CLIPA = GxDs("GXDS_CLIPA", GXDS_DEF(40)), GXDS_CLIPB = GxDs("GXDS_CLIPB", GXDS_DEF(25)),
++                 GXDS_QS = GxDs("GXDS_QS", GXDS_DEF(9)), GXDS_VS = GxDs("GXDS_VS", GXDS_DEF(1)),
++                 GXDS_L43 = GxDs("GXDS_L43", GXDS_DEF(2));
++
+ #include "GPU3D.h"
+ #include "Census.h"
+ #include <stdlib.h>
+@@ -1088,6 +1104,8 @@
+     // clipping
+ 
+     nverts = ClipPolygon<true>(*this, clippedvertices, nverts, clipstart);
++    int gxds_new = 0;
++    for (int i = 0; i < nverts; i++) if (clippedvertices[i].Clipped) gxds_new++;
+     bool curclipped = false;
+ #if !defined(MELONDS_STOCK) && defined(DS_RULE_STRIPCLIP)
+     // DS: a clipped strip polygon shares no vertices either: the two reused ones are stored again
+@@ -1215,6 +1233,9 @@
+         else                   VertexSlotsFree = 0b1110;
+     }
+ 
++    if (gxds_new) AddCycles(GXDS_CLIPA + GXDS_CLIPB * gxds_new);
++    if ((PolygonMode & 3) == 3) CycleCount += GXDS_QS;
++
+     Polygon* poly = &CurPolygonRAM[NumPolygons++];
+     poly->NumVertices = 0;
+ 
+@@ -2007,6 +2028,7 @@
+ 
+         case 0x24: // 10-bit vertex
+             VertexPipelineSubmitCmd();
++            AddCycles(GXDS_VS);
+             CurVertex[0] = (entry.Param & 0x000003FF) << 6;
+             CurVertex[1] = (entry.Param & 0x000FFC00) >> 4;
+             CurVertex[2] = (entry.Param & 0x3FF00000) >> 14;
+@@ -2015,6 +2037,7 @@
+ 
+         case 0x25: // vertex XY
+             VertexPipelineSubmitCmd();
++            AddCycles(GXDS_VS);
+             CurVertex[0] = entry.Param & 0xFFFF;
+             CurVertex[1] = entry.Param >> 16;
+             SubmitVertex();
+@@ -2022,6 +2045,7 @@
+ 
+         case 0x26: // vertex XZ
+             VertexPipelineSubmitCmd();
++            AddCycles(GXDS_VS);
+             CurVertex[0] = entry.Param & 0xFFFF;
+             CurVertex[2] = entry.Param >> 16;
+             SubmitVertex();
+@@ -2029,6 +2053,7 @@
+ 
+         case 0x27: // vertex YZ
+             VertexPipelineSubmitCmd();
++            AddCycles(GXDS_VS);
+             CurVertex[1] = entry.Param & 0xFFFF;
+             CurVertex[2] = entry.Param >> 16;
+             SubmitVertex();
+@@ -2036,6 +2061,7 @@
+ 
+         case 0x28: // 10-bit delta vertex
+             VertexPipelineSubmitCmd();
++            AddCycles(GXDS_VS);
+             CurVertex[0] += (s16)((entry.Param & 0x000003FF) << 6) >> 6;
+             CurVertex[1] += (s16)((entry.Param & 0x000FFC00) >> 4) >> 6;
+             CurVertex[2] += (s16)((entry.Param & 0x3FF00000) >> 14) >> 6;
+@@ -2232,6 +2258,7 @@
+                     break;
+ 
+                 case 0x17: // load 4x3
++                    AddCycles(GXDS_L43);
+                     if (MatrixMode == 0)
+                     {
+                         MatrixLoad4x3(ProjMatrix, (s32*)ExecParams);

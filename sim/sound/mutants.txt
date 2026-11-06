@@ -1,0 +1,26 @@
+# One "file<TAB>sed expression" per line, applied to rtl/sound/<file> by
+# sim/sound/mutate.sh. Each must make `Vsound --synthetic --fuzz 20` fail (docs/sound.md).
+sound.sv	s/ : {fbyte, 8.d0};/ : {8'd0, fbyte};/
+sound.sv	s/assign pan8 = (f_pan == 7.d127) ? 8.d128/assign pan8 = (f_pan == 7'd127) ? 8'd127/
+sound.sv	s/assign data_ok = (tg_q == f_rlap) || lev_sub\[7\];/assign data_ok = 1'b1;/
+sound.sv	s/st <= (f_fmt == 2.d3) ? S_ITA : S_RETAG;/st <= (f_fmt == 2'd3) ? S_ITA : S_FILL;/
+sound.sv	s/if (cword \&\& (cslot == 2.d3 || past_end))/if (cword \&\& (cslot == 2'd1 || past_end))/
+sound.sv	s/(soundcnt\[6:0\] == 7.d127) ? 8.d128/(soundcnt[6:0] == 7'd127) ? 8'd127/
+sound.sv	s/({1.b0, f_val\[15:1\]} ^ 16.h6000)/({1'b0, f_val[15:1]} ^ 16'h4000)/
+sound.sv	s/(remain\[21:2\] == 20.d0) ? {1.b0, remain\[1:0\]}/(remain[21:2] == 20'd0) ? 3'd4/
+sound.sv	s/assign need_fill = !lev_sub\[7\] \&\& (lev_sub <= 8.sd16)/assign need_fill = !lev_sub[7] \&\& (lev_sub <= 8'sd15)/
+sound.sv	s/assign tg_wd = ff_we ? h_lap + {1.b0, c_wsum\[3\]}/assign tg_wd = ff_we ? h_lap/
+sound.sv	s/assign at_loop = (f_pos == lstart);/assign at_loop = 1'b0;/
+sound.sv	s/if (reg_wdata\[31\] \&\& !busy\[r_ch\]) keyon/if (reg_wdata[31]) keyon/
+sound.sv	s/else if (it_loop) ps_sel = PS_LSTART;/else if (1'b0) ps_sel = PS_LSTART;/
+sound.sv	s/op1_be = r_off\[1\] ? 4'b1100 : 4'b0011;/op1_be = 4'b0011;/
+sound.sv	s/(f_pos\[2\] ? 5'b01100 : 5'b00011)/(f_pos[2] ? 5'b00011 : 5'b01100)/
+sound_ram.sv	s/mem\[300\] = 23'h[0-9A-F]\{2\}/mem[300] = 23'h00/
+sound_ram.sv	s/\(mem\[301\] = 23'h[0-9A-F]\{2\}\)[0-9A-F]\{4\}/\10000/
+sound.sv	s/(selpass ? (ent\[1\] ? lsel\[1\] : lsel\[0\]) : !mix_ex)/(selpass ? (ent[1] ? lsel[0] : lsel[1]) : !mix_ex)/
+sound.sv	s/assign cb_wd = ccnt\[3\] ? {4{cap_smp\[15:8\]}}/assign cb_wd = ccnt[3] ? {4{cap_smp[7:0]}}/
+sound.sv	s/assign q_wd = {ent\[4\], cb_q,/assign q_wd = {1'b0, cb_q,/
+sound.sv	s/20'hC0010;/20'hC0000;/
+sound.sv	s/else if (st == S_ITA \&\& adp_upd) cs_sel = CS_ADP;/else if (1'b0) cs_sel = CS_ADP;/
+sound.sv	s/2'd1: begin op1_v = r_off\[3:2\] != 2'd1;/2'd1: begin op1_v = 1'b1;/
+sound.sv	s/assign cap_sh = cap_acc\[27:8\] + {19'd0, cap_acc\[27\] \&\& cap_acc\[7\]};/assign cap_sh = cap_acc[27:8] + {19'd0, cap_acc[27] \&\& cap_acc[7:0] != 8'd0};/

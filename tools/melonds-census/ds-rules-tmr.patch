@@ -1,0 +1,23 @@
+# DS-verified timer rule for melonDS (AGENTS.md: the real DS is ground truth).
+# Applied to the census build after the other ds-rules patches. Under
+# !MELONDS_STOCK && DS_RULE_TMRFREE; the census defines it. sim/sys/golden_sys.h has the same rule.
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index 9640a52..4010a74 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -1739,6 +1739,15 @@ void NDS::TimerStart(u32 id, u16 cnt)
+     {
+         timer->Counter = timer->Reload << 10;
+     }
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TMRFREE)
++    // hwref run 30: the prescaler runs free from power-on, so a start (or a
++    // prescaler change) takes the system-cycle count's phase at the new
++    // prescaler as the fraction (RunTimers above brought TimerTimestamp to now)
++    {
++        u32 pre = TimerPrescaler[cnt & 0x03];
++        timer->Counter = (timer->Counter & ~0x3FFu) | ((u32)(TimerTimestamp[id>>2] & ((1u << pre) - 1)) << (10 - pre));
++    }
++#endif
+ 
+     if ((cnt & 0x84) == 0x80)
+         TimerCheckMask[id>>2] |= 0x01 << (id&0x3);

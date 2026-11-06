@@ -1,0 +1,69 @@
+# DS-verified 2D rules for melonDS (AGENTS.md: the real DS is ground truth), applied
+# to the census build (tools/melonds-census/build.sh). Under #ifndef MELONDS_STOCK.
+# - layer enable: a write anywhere in line n shows on line n + 3 (hwref runs 22/23, lat2d bgon_fine; melonDS: two lines from HBlank) (rtl/ds/nds_disp.sv bgln/bge)
+# - HBlank 24 bus clocks later than melonDS: 1,608 into the line (hwref run 22, lat2d; nds_disp t_hbl, integration)
+--- a/src/GPU2D.cpp
++++ b/src/GPU2D.cpp
+@@ -565,10 +565,20 @@
+ 
+     // enabling BG/OBJ layers or disabling forced blank takes two scanlines to apply
+     // however, disabling layers or enabling forced blank applies immediately
++#ifndef MELONDS_STOCK
++    // DS (hwref runs 22/23, lat2d): a layer enabled in line n shows on line n + 3
++    DsDispCntLatch3 = DsDispCntE2;
++    DsDispCntE2 = DsDispCntE1;
++    DsDispCntE1 = DsDispCntLine;
++#endif
+     DispCntLatch[2] = DispCntLatch[1];
+     DispCntLatch[1] = DispCntLatch[0];
+     DispCntLatch[0] = DispCnt;
++#ifndef MELONDS_STOCK
++    LayerEnable = ((DsDispCntLatch3 & DispCnt) >> 8) & 0x1F;
++#else
+     LayerEnable = ((DispCntLatch[2] & DispCnt) >> 8) & 0x1F;
++#endif
+     OBJEnable = ((DispCntLatch[1] & DispCnt) >> 12) & 0x1;
+     ForcedBlank = ((DispCntLatch[2] | DispCnt) >> 7) & 0x1;
+ 
+--- a/src/GPU2D.h
++++ b/src/GPU2D.h
+@@ -69,6 +69,12 @@
+ 
+     u32 DispCnt;
+     u32 DispCntLatch[3];
++#ifndef MELONDS_STOCK
++    // DS rule (hwref runs 22/23): a layer enable written in line n shows on line n + 3,
++    // wherever in line n it lands: sampled at the line start, then two HBlank stages
++    // (not saved in states)
++    u32 DsDispCntLine = 0, DsDispCntE1 = 0, DsDispCntE2 = 0, DsDispCntLatch3 = 0;
++#endif
+     u8 LayerEnable;         // layer enable - enable delayed by 2 scanlines
+     u8 OBJEnable;           // OBJ enable (for OBJ rendering) - enable delayed by 1 scanline
+     u8 ForcedBlank;         // forced blank - disable delayed by 2 scanlines
+--- a/src/GPU.cpp
++++ b/src/GPU.cpp
+@@ -31,7 +31,12 @@
+ using Platform::LogLevel;
+ 
+ #define LINE_CYCLES  (355*6)
++#ifndef MELONDS_STOCK
++// DS (hwref run 22, lat2d): the HBlank flag rises 1,606-1,610 bus clocks into the line; nds_disp uses 1,608
++#define HBLANK_CYCLES (48+(256*6)+24)
++#else
+ #define HBLANK_CYCLES (48+(256*6))
++#endif
+ #define FRAME_CYCLES  (LINE_CYCLES * 263)
+ 
+ enum
+@@ -1218,6 +1223,11 @@
+ void GPU::StartScanline(u32 line) noexcept
+ {
+     CENSUS_HOOK(Scanline, line);
++#ifndef MELONDS_STOCK
++    // DS rule (hwref run 23): the layer enables are latched at the line boundary
++    GPU2D_A.DsDispCntLine = GPU2D_A.DispCnt;
++    GPU2D_B.DsDispCntLine = GPU2D_B.DispCnt;
++#endif
+     /*
+      * order of operations on hardware:
+      * 1. VCount is incremented

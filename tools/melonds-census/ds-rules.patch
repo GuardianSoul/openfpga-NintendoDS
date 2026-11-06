@@ -1,0 +1,435 @@
+# DS-verified rendering rules for melonDS (AGENTS.md: the real DS is ground
+# truth). Applied to the census build (tools/melonds-census/build.sh) and the
+# renderer testbench golden (sim/gpu3d/gpu3d.mk). Each rule is under
+# #ifndef MELONDS_STOCK, so -DMELONDS_STOCK builds plain melonDS. Rules the
+# RTL doesn't implement yet are also behind DS_RULE_<name>: the census build
+# defines them (tools/melonds-census/CMakeLists.txt); the renderer testbench
+# golden turns each on when the RTL has it (DS_RULE_TOON: on since the RTL
+# implements it, sim/gpu3d/gpu3d.mk and mutate.sh; DS_RULE_HILITE: on too).
+diff --git a/src/GPU3D_Soft.cpp b/src/GPU3D_Soft.cpp
+index e620270..da3b43b 100644
+--- a/src/GPU3D_Soft.cpp
++++ b/src/GPU3D_Soft.cpp
+@@ -17,6 +17,17 @@
+ */
+ 
+ #include "GPU3D_Soft.h"
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TEX4X4)
++// the last 4x4 texel's palette-mode bit 14 (TextureLookup -> RenderPixel)
++static thread_local bool DsTex4x4Mode = false;
++#endif
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TEXRND)
++#define DS_TEXRND_X (1 << 12)
++#define DS_TEXRND_Y (1 << 13)
++#else
++#define DS_TEXRND_X 0
++#define DS_TEXRND_Y 0
++#endif
+ 
+ #include <algorithm>
+ #include <stdio.h>
+@@ -262,6 +273,9 @@ void SoftRenderer3D::TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16*
+ 
+             u16 palinfo = GPU.ReadVRAMFlat_Texture<u16>(slot1addr);
+             u32 paloffset = (palinfo & 0x3FFF) << 2;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TEX4X4)
++            DsTex4x4Mode = (palinfo >> 14) & 1;
++#endif
+             texpal <<= 4;
+ 
+             switch (val & 0x3)
+@@ -423,6 +437,22 @@ bool DepthTest_LessThan_FrontFacing(s32 dstz, s32 z, u32 dstattr)
+ 
+     return false;
+ }
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_ZFACE)
++// DS (hwref runs 14-17, zbuf_same/zbuf_back_front, zwin_*): with the Z-buffer,
++// a front-facing pixel over an opaque back-facing one passes up to 1 unit
++// behind it, and a back-facing pixel over an opaque front-facing one needs to
++// be more than 1 unit in front; the W-buffer is unchanged
++bool DepthTest_LessThan_FrontFacing_ZFace(s32 dstz, s32 z, u32 dstattr)
++{
++    if ((dstattr & 0x00400010) == 0x00000010) return z <= dstz + 1;
++    return z < dstz;
++}
++bool DepthTest_LessThan_BackFacing_ZFace(s32 dstz, s32 z, u32 dstattr)
++{
++    if ((dstattr & 0x00400010) == 0x00000000) return z < dstz - 1;
++    return z < dstz;
++}
++#endif
+ 
+ u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noexcept
+ {
+@@ -454,6 +484,39 @@ u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noex
+     return srcR | (srcG << 8) | (srcB << 16) | (dstalpha << 24);
+ }
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TOON)
++// DS rule (docs/hw-reference.md, rules3d toon_span/tris_toon): the toon and
++// highlight index is the red interpolated from c << 4 (without the vertex
++// colour's + 0xF fill) and >> 4, along X with a truncated 12-bit factor where
++// the colour itself uses the exact linear division. Set per pixel before
++// RenderPixel.
++static thread_local u32 DsToonIndex;
++#ifdef DS_RULE_HILITE
++// DS rule (docs/hw-reference.md, rules3d hilite_span/tris_hilite): in
++// highlight mode the vertex colour (all components = red) is the 6-bit red
++// interpolated without the fill (the DS_TOON value >> 3), and the toon colour
++// is added as c << 1 without the + 1
++static thread_local u32 DsToonRed6;
++#endif
++static inline s32 DsToonInterp(s32 y0, s32 y1, s32 x, s32 x0, s32 x1, s32 w0, s32 w1, s32 perspval)
++{
++#ifdef DS_RULE_LIN17
++    // with DS_LIN17 the toon red goes through the normal interpolator
++    return perspval;
++#endif
++    s32 xdiff = x1 - x0;
++    x -= x0;
++    if (xdiff == 0 || y0 == y1) return y0;
++    if (!((w0 == w1) && !(w0 & 0x7F))) return perspval;   // Interpolator's non-linear path
++    s32 f = (x << 12) / xdiff;
++    if (y0 < y1) return y0 + (s32)(((s64)(y1-y0) * f) >> 12);
++    else         return y1 + (s32)(((s64)(y0-y1) * ((1<<12)-f)) >> 12);
++}
++#define DS_TOON_INDEX(vr) DsToonIndex
++#else
++#define DS_TOON_INDEX(vr) ((vr) >> 1)
++#endif
++
+ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const
+ {
+     u8 r, g, b, a;
+@@ -471,6 +534,9 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
+             // to the red component
+             // the toon color is added to the final color
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TOON) && defined(DS_RULE_HILITE)
++            vr = DsToonRed6;
++#endif
+             vg = vr;
+             vb = vr;
+         }
+@@ -478,7 +544,7 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
+         {
+             // toon mode: vertex color is replaced by toon color
+ 
+-            u16 tooncolor = GPU3D.RenderToonTable[vr >> 1];
++            u16 tooncolor = GPU3D.RenderToonTable[DS_TOON_INDEX(vr)];
+ 
+             vr = (tooncolor << 1) & 0x3E; if (vr) vr++;
+             vg = (tooncolor >> 4) & 0x3E; if (vg) vg++;
+@@ -491,11 +557,24 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
+         u8 tr, tg, tb;
+ 
+         u16 tcolor; u8 talpha;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TEX4X4)
++        DsTex4x4Mode = false;
++#endif
+         TextureLookup(polygon->TexParam, polygon->TexPalette, s, t, &tcolor, &talpha);
+ 
+         tr = (tcolor << 1) & 0x3E; if (tr) tr++;
+         tg = (tcolor >> 4) & 0x3E; if (tg) tg++;
+         tb = (tcolor >> 9) & 0x3E; if (tb) tb++;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TEX4X4)
++        // DS (hwref run 16: replays, rand3d): texels of a 4x4-compressed block
++        // whose palette mode has bit 14 set (modes 1, 3) expand as c << 1
++        if (((polygon->TexParam >> 26) & 0x7) == 5 && DsTex4x4Mode)
++        {
++            tr = (tcolor << 1) & 0x3E;
++            tg = (tcolor >> 4) & 0x3E;
++            tb = (tcolor >> 9) & 0x3E;
++        }
++#endif
+ 
+         if (blendmode & 0x1)
+         {
+@@ -541,11 +620,17 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
+ 
+     if ((blendmode == 2) && (GPU3D.RenderDispCnt & (1<<1)))
+     {
+-        u16 tooncolor = GPU3D.RenderToonTable[vr >> 1];
++        u16 tooncolor = GPU3D.RenderToonTable[DS_TOON_INDEX(vr)];
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_HILITE)
++        vr = (tooncolor << 1) & 0x3E;
++        vg = (tooncolor >> 4) & 0x3E;
++        vb = (tooncolor >> 9) & 0x3E;
++#else
+         vr = (tooncolor << 1) & 0x3E; if (vr) vr++;
+         vg = (tooncolor >> 4) & 0x3E; if (vg) vg++;
+         vb = (tooncolor >> 9) & 0x3E; if (vb) vb++;
++#endif
+ 
+         r += vr;
+         g += vg;
+@@ -721,6 +806,10 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+     bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr);
+     if (polygon->Attr & (1<<14))
+         fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_ZFACE)
++    else if (!polygon->WBuffer)
++        fnDepthTest = polygon->FacingView ? DepthTest_LessThan_FrontFacing_ZFace : DepthTest_LessThan_BackFacing_ZFace;
++#endif
+     else if (polygon->FacingView)
+         fnDepthTest = DepthTest_LessThan_FrontFacing;
+     else
+@@ -949,6 +1038,10 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+     bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr);
+     if (polygon->Attr & (1<<14))
+         fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_ZFACE)
++    else if (!polygon->WBuffer)
++        fnDepthTest = polygon->FacingView ? DepthTest_LessThan_FrontFacing_ZFace : DepthTest_LessThan_BackFacing_ZFace;
++#endif
+     else if (polygon->FacingView)
+         fnDepthTest = DepthTest_LessThan_FrontFacing;
+     else
+@@ -1076,15 +1169,19 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+     s32 gl = interp_start->Interpolate(vlcur->FinalColor[1], vlnext->FinalColor[1]);
+     s32 bl = interp_start->Interpolate(vlcur->FinalColor[2], vlnext->FinalColor[2]);
+ 
+-    s32 sl = interp_start->Interpolate(vlcur->TexCoords[0], vlnext->TexCoords[0]);
+-    s32 tl = interp_start->Interpolate(vlcur->TexCoords[1], vlnext->TexCoords[1]);
++    s32 sl = interp_start->Interpolate(vlcur->TexCoords[0], vlnext->TexCoords[0], DS_TEXRND_Y);
++    s32 tl = interp_start->Interpolate(vlcur->TexCoords[1], vlnext->TexCoords[1], DS_TEXRND_Y);
+ 
+     s32 rr = interp_end->Interpolate(vrcur->FinalColor[0], vrnext->FinalColor[0]);
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TOON)
++    s32 rlT = interp_start->Interpolate(vlcur->FinalColor[0] & ~0xF, vlnext->FinalColor[0] & ~0xF);
++    s32 rrT = interp_end->Interpolate(vrcur->FinalColor[0] & ~0xF, vrnext->FinalColor[0] & ~0xF);
++#endif
+     s32 gr = interp_end->Interpolate(vrcur->FinalColor[1], vrnext->FinalColor[1]);
+     s32 br = interp_end->Interpolate(vrcur->FinalColor[2], vrnext->FinalColor[2]);
+ 
+-    s32 sr = interp_end->Interpolate(vrcur->TexCoords[0], vrnext->TexCoords[0]);
+-    s32 tr = interp_end->Interpolate(vrcur->TexCoords[1], vrnext->TexCoords[1]);
++    s32 sr = interp_end->Interpolate(vrcur->TexCoords[0], vrnext->TexCoords[0], DS_TEXRND_Y);
++    s32 tr = interp_end->Interpolate(vrcur->TexCoords[1], vrnext->TexCoords[1], DS_TEXRND_Y);
+ 
+     // in wireframe mode, there are special rules for equal Z (TODO)
+ 
+@@ -1148,11 +1245,20 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+         }
+ 
+         u32 vr = interpX.Interpolate(rl, rr);
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TOON)
++        {
++            s32 toonred = DsToonInterp(rlT, rrT, x, xstart, xend+1, wl, wr, interpX.Interpolate(rlT, rrT));
++            DsToonIndex = toonred >> 4;
++#ifdef DS_RULE_HILITE
++            DsToonRed6 = toonred >> 3;
++#endif
++        }
++#endif
+         u32 vg = interpX.Interpolate(gl, gr);
+         u32 vb = interpX.Interpolate(bl, br);
+ 
+-        s16 s = interpX.Interpolate(sl, sr);
+-        s16 t = interpX.Interpolate(tl, tr);
++        s16 s = interpX.Interpolate(sl, sr, DS_TEXRND_X);
++        s16 t = interpX.Interpolate(tl, tr, DS_TEXRND_X);
+ 
+         u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+         u8 alpha = color >> 24;
+@@ -1244,11 +1350,20 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+         }
+ 
+         u32 vr = interpX.Interpolate(rl, rr);
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TOON)
++        {
++            s32 toonred = DsToonInterp(rlT, rrT, x, xstart, xend+1, wl, wr, interpX.Interpolate(rlT, rrT));
++            DsToonIndex = toonred >> 4;
++#ifdef DS_RULE_HILITE
++            DsToonRed6 = toonred >> 3;
++#endif
++        }
++#endif
+         u32 vg = interpX.Interpolate(gl, gr);
+         u32 vb = interpX.Interpolate(bl, br);
+ 
+-        s16 s = interpX.Interpolate(sl, sr);
+-        s16 t = interpX.Interpolate(tl, tr);
++        s16 s = interpX.Interpolate(sl, sr, DS_TEXRND_X);
++        s16 t = interpX.Interpolate(tl, tr, DS_TEXRND_X);
+ 
+         u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+         u8 alpha = color >> 24;
+@@ -1336,11 +1451,20 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+         }
+ 
+         u32 vr = interpX.Interpolate(rl, rr);
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_TOON)
++        {
++            s32 toonred = DsToonInterp(rlT, rrT, x, xstart, xend+1, wl, wr, interpX.Interpolate(rlT, rrT));
++            DsToonIndex = toonred >> 4;
++#ifdef DS_RULE_HILITE
++            DsToonRed6 = toonred >> 3;
++#endif
++        }
++#endif
+         u32 vg = interpX.Interpolate(gl, gr);
+         u32 vb = interpX.Interpolate(bl, br);
+ 
+-        s16 s = interpX.Interpolate(sl, sr);
+-        s16 t = interpX.Interpolate(tl, tr);
++        s16 s = interpX.Interpolate(sl, sr, DS_TEXRND_X);
++        s16 t = interpX.Interpolate(tl, tr, DS_TEXRND_X);
+ 
+         u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+         u8 alpha = color >> 24;
+@@ -1584,7 +1708,14 @@ void SoftRenderer3D::ScanlineFinalPass(s32 y)
+             u32 coverage = (attr >> 8) & 0x1F;
+             if (coverage == 0x1F) continue;
+ 
++            // DS rule (docs/hw-reference.md, cap3d ui_text / aa_over_2d): coverage 0
++            // over a transparent lower pixel goes through the blend below (top
++            // colour, alpha 0); only an opaque lower pixel is taken as it is
++#ifndef MELONDS_STOCK
++            if (coverage == 0 && ((ColorBuffer[pixeladdr+BufferSize] >> 24) & 0x1F))
++#else
+             if (coverage == 0)
++#endif
+             {
+                 ColorBuffer[pixeladdr] = ColorBuffer[pixeladdr+BufferSize];
+                 continue;
+diff --git a/src/GPU3D_Soft.h b/src/GPU3D_Soft.h
+index f6034f2..4b552b9 100644
+--- a/src/GPU3D_Soft.h
++++ b/src/GPU3D_Soft.h
+@@ -98,6 +98,11 @@ private:
+             // linear mode is used if both W values are equal and have
+             // low-order bits cleared (0-6 along X, 1-6 along Y)
+             u32 mask = dir ? 0x7E : 0x7F;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_YPERSP)
++            // DS rule (docs/hw-reference.md "Run 6", DS_YPERSP): along Y the
++            // linear mode needs bits 0-5 clear, and the factor uses the full w
++            if (dir) mask = 0x3F;
++#endif
+             if ((w0 == w1) && !(w0 & mask) && !(w1 & mask))
+                 this->linear = true;
+             else
+@@ -107,9 +112,15 @@ private:
+             {
+                 // along Y
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_YPERSP)
++                this->w0n = w0;
++                this->w0d = w0;
++                this->w1d = w1;
++#else
+                 this->w0n = w0 >> 1;
+                 this->w0d = (w0 + ((w0 & ~w1) & 1)) >> 1;
+                 this->w1d = w1 >> 1;
++#endif
+ 
+                 this->shift = 9;
+             }
+@@ -117,9 +128,21 @@ private:
+             {
+                 // along X
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_XPERSP16)
++                // DS rule (docs/hw-reference.md "Run 7", DS_XPERSP16): with
++                // max(w0, w1) >= 0x8000 the X factor uses w >> 8; not on
++                // W-buffered polygons (hwref run 20: wbuf_* panels)
++                {
++                    s32 k = (!wbuffer && (w0 >= 0x8000 || w1 >= 0x8000)) ? 8 : 0;
++                    this->w0n = w0 >> k;
++                    this->w0d = w0 >> k;
++                    this->w1d = w1 >> k;
++                }
++#else
+                 this->w0n = w0;
+                 this->w0d = w0;
+                 this->w1d = w1;
++#endif
+ 
+                 this->shift = 8;
+             }
+@@ -141,7 +164,7 @@ private:
+             }
+         }
+ 
+-        constexpr s32 Interpolate(s32 y0, s32 y1) const
++        constexpr s32 Interpolate(s32 y0, s32 y1, s32 bias = 0) const
+         {
+             if (xdiff == 0 || y0 == y1) return y0;
+ 
+@@ -156,10 +179,29 @@ private:
+             else
+             {
+                 // linear interpolation
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_LIN17)
++                // DS rule (docs/hw-reference.md, "Rule DS_LIN17"): a truncated
++                // 17-bit factor floor((x << 17) / xdiff), descending mirrored,
++                // in X and Y, for every attribute
++                {
++                    s32 f = (s32)(((s64)x << 17) / xdiff);
++#if defined(DS_RULE_TEXRND)
++                    // DS (hwref run 11, tex_exact/_y): texcoords round with a
++                    // bias of 2^12 along X and 2^13 along Y (callers pass it)
++#else
++                    bias = 0;
++#endif
++                    if (y0 < y1)
++                        return y0 + (s32)(((s64)(y1-y0) * f + bias) >> 17);
++                    else
++                        return y1 + (s32)(((s64)(y0-y1) * ((1<<17) - f) + bias) >> 17);
++                }
++#else
+                 if (y0 < y1)
+                     return y0 + (s64)(y1-y0) * x / xdiff;
+                 else
+                     return y1 + (s64)(y0-y1) * (xdiff - x) / xdiff;
++#endif
+             }
+         }
+ 
+@@ -179,6 +221,17 @@ private:
+             {
+                 // Z-buffering: linear interpolation
+                 // still doesn't quite match hardware...
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_LINZ)
++                // DS rule (docs/hw-reference.md, "Z-buffer interpolation"): the
++                // DS_LIN17 factor on the full difference, in X and Y
++                {
++                    s64 f = ((s64)x << 17) / xdiff;
++                    if (z0 < z1)
++                        return z0 + (s32)(((s64)(z1-z0) * f) >> 17);
++                    else
++                        return z1 + (s32)(((s64)(z0-z1) * ((1<<17) - f)) >> 17);
++                }
++#endif
+                 s32 base = 0, disp = 0, factor = 0;
+ 
+                 if (z0 < z1)
+@@ -368,7 +421,13 @@ private:
+             if (Negative) startx = xlen - startx;
+             if (side)     startx = startx - *length + 1;
+ 
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_AACOV)
++            // DS (hwref run 7, aa_xfan/aa_sliver/aa_short/aa): the pixel centre
++            // is +0x200, and Negative edges take 1 off the numerator
++            s32 startcov = (((startx << 10) + 0x200) * ylen - (Negative ? 1 : 0)) / xlen;
++#else
+             s32 startcov = (((startx << 10) + 0x1FF) * ylen) / xlen;
++#endif
+             *coverage = (1<<31) | ((startcov & 0x3FF) << 12) | (xcov_incr & 0x3FF);
+ 
+             if constexpr (swapped) *length = 1;
+@@ -391,7 +450,13 @@ private:
+             else
+             {
+                 s32 cov = ((dx >> 9) + (Increment >> 10)) >> 4;
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_AAYCOV)
++                // DS (hwref run 7): full coverage whenever the edge crosses into
++                // the next pixel within this scanline
++                if (((dx + Increment - 1) >> 18) != (dx >> 18)) cov = 31;
++#else
+                 if ((cov >> 5) != (dx >> 18)) cov = 31;
++#endif
+                 cov &= 0x1F;
+                 if constexpr (swapped)
+                 {

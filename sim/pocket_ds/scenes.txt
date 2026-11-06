@@ -1,0 +1,50 @@
+# Saved scenes for `make test-ds-pocket-scene` (sim/pocket_ds/scenes.py, docs/pocket-sim.md).
+# state: a melonDS savestate in the main checkout's build/census/states, or exports/NAME: a prepared
+# clean export there (build/census/exports/NAME/{exp,mel}). frames: compared
+# frames after the release. top/bottom: the accepted baseline, the most pixels of a screen
+# that differ from melonDS's nearest frame ("-": not measured yet); scenes.py --update writes them.
+# known: an acceptance scene expected to fail until its fix lands (reported as KNOWN, the gate passes)
+# scene      rom            state            frames top    bottom
+hg-title     heartgold.nds  hg-title.mln     10     0      27149
+kh-plaza     kh358.nds      kh-plaza.mln     10     40908  0
+nsmb-11      nsmb.nds       nsmb-11.mln      10     714    0
+mkds-race    mkds.nds       mkds-race.mln    10     43768  0
+kh-menu      kh358.nds      exports/kh-menu  10     0      0
+nsmb-intro   nsmb.nds       nsmb-intro.mln   10     3484   0
+mkds-intro   mkds.nds       mkds-intro.mln   10     -      -      known
+# the maintainer's flicker spots on #1040 (states from mkds-intro.mln at frames 150, 290, 560: census --save-state-at)
+mkds-intro-corner    mkds.nds  mkds-intro-corner.mln     40  -  -  known
+mkds-intro-cut       mkds.nds  mkds-intro-cut.mln        40  -  -  known
+mkds-intro-startline mkds.nds  mkds-intro-startline.mln  40  -  -  known
+nsmb-busy    nsmb.nds       nsmb-busy.mln    10     0      0
+mkds-opening mkds.nds       mkds-opening.mln 10     46890  0
+kh-first-level kh358.nds    kh-first-level.mln 10   19315  0
+gsdd-title   gsdd.nds       gsdd-title.mln   10     -      -      known
+mlpit-title  mlpit.nds      mlpit-title.mln  10     0      0
+mlpit-intro  mlpit.nds      mlpit-intro.mln  10     0      0
+kssu-title   kssu.nds       kssu-title.mln   10     0      0
+kssu-race    kssu.nds       kssu-race.mln    10     2342   0
+pt-title     platinum.nds   pt-title.mln     10     0      4205
+pt-bedroom   platinum.nds   platinum-bedroom.mln 10 1321   0
+hg-goldenrod heartgold.nds  hg-goldenrod.mln 10     3807   0
+layton-title layton.nds     layton-title.mln 10     0      24838
+jus-movie    jus.nds        jus-movie.mln    10     39326  0
+sm64-title   sm64.nds       sm64-title.mln   10     0      4
+sm64-castle  sm64.nds       sm64-castle.mln  10     17396  0
+kh-movie     kh358.nds      kh-movie.mln     10     -      -
+# kh-axel-cut (2026-10-28): Grey Area day 7, talking to Axel; the state is right after the A press that cuts the camera (old angle ~20 frames, crossfade ~22-28, then the new angle). On #697-#746 the cut showed lines and the new angle black lines at the bottom of the top screen.
+kh-axel-cut  kh358.nds      kh-axel-cut.mln  40     -      -      known
+mlpit-castle mlpit.nds      mlpit-castle.mln 10     0      0
+mkds-heavy   mkds.nds       mkds-heavy.mln   64     -      -      known
+mkds-heavy-ss mkds.nds     mkds-heavy-ss.mln 15    -      -      known
+mkds-race-ss mkds.nds      mkds-race-ss.mln 15     -      -      known
+# the maintainer on #1342: slows with several racers on screen; melonDS frames 3040, 3180 of tools/melonds-census/scripts/mkds.txt (race start)
+mkds-pack    mkds.nds      mkds-pack.mln    16    -      -      known
+mkds-pack2   mkds.nds      mkds-pack2.mln   16    -      -      known
+pt-tester      platinum.nds   pt-tester.mln 16 - - known
+# the maintainer on #1342: slows with several racers on screen; melonDS frames 3040, 3180 of tools/melonds-census/scripts/mkds.txt (race start)
+mkds-pack    mkds.nds      mkds-pack.mln    16    -      -      known
+mkds-pack2   mkds.nds      mkds-pack2.mln   16    -      -      known
+kh-heavy     kh358.nds      kh-tester-heavy.mln 16    -      -      known
+kh-heavy2    kh358.nds      kh-tester-heavy2.mln 16   -      -      known
+hg-tester      heartgold.nds  hg-tester.mln 16 - - known

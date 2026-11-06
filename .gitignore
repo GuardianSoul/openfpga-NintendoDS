@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+output_files/
+db/
+incremental_db/
+local-assets/
+/roms/
+/.agents/
+# DS images, firmware and saves stay local
+*.nds
+*.srl
+*.dsi
+bios7.bin
+bios9.bin
+firmware.bin
+*.sav
+*.dsv
+# the Pocket plugin's ROM tables and compressed ROMs (docs/pocket-plugin.md)
+*.ndt
+*.ndz
+*.rbf
+*.sof

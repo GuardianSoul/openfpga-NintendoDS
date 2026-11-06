@@ -1,0 +1,5 @@
+{
+  "name": "DS Game Files",
+  "description": "For the NDS_Pocket DS core: writes each game's ROM tables (.ndt, the ROM cache's read-ahead table and boot fields, so the core doesn't build them) and its game file (.json), and can compress ROMs (.ndz) for faster loading once the core reads them.",
+  "allowed_hosts": []
+}

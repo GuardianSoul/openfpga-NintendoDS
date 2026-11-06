@@ -1,0 +1,72 @@
+--- a/src/GPU3D.cpp
++++ b/src/GPU3D.cpp
+@@ -26,6 +26,8 @@
+ #include "Platform.h"
+ #include "GPU3D.h"
+ #include "Census.h"
++#include <stdlib.h>
++#include <string>
+ 
+ namespace melonDS
+ {
+@@ -1732,10 +1734,60 @@
+     return ret;
+ }
+ 
++// ---- GX timing experiment (docs/budget-3d.md, "Geometry-side options"): with GX_STATS=<file> the cycles
++// the stock model charges per command (key = cmd * 2 + final parameter) are averaged and written at exit;
++// with GX_CHEAP=<file> every command is charged that table's cycles instead (FIFO levels, GXSTAT bits and
++// the DMA/IRQ rules unchanged), and the vertex/normal/polygon pipelines are never busy.
++namespace {
++struct GxTiming
++{
++    bool init = false, cheap = false, stats = false;
++    s32 tab[512] {};
++    u64 cnt[512] {}, sum[512] {};
++    std::string statsPath;
++    void Init()
++    {
++        init = true;
++        if (const char* p = getenv("GX_CHEAP"))
++        {
++            FILE* f = fopen(p, "r");
++            if (f) { int k, v; while (fscanf(f, "%d %d", &k, &v) == 2) if (k >= 0 && k < 512) tab[k] = v; fclose(f); cheap = true; }
++        }
++        if (const char* p = getenv("GX_STATS")) { stats = true; statsPath = p; }
++    }
++    ~GxTiming()
++    {
++        if (!stats) return;
++        FILE* f = fopen(statsPath.c_str(), "w");
++        if (!f) return;
++        for (int k = 0; k < 512; k++) if (cnt[k]) fprintf(f, "%d %llu %llu\n", k, (unsigned long long)cnt[k], (unsigned long long)sum[k]);
++        fclose(f);
++    }
++};
++GxTiming g_gxt;
++}
++
+ void GPU3D::ExecuteCommand() noexcept
+ {
+     CmdFIFOEntry entry = CmdFIFORead();
+     CENSUS_HOOK(GXCommand, entry.Command, entry.Param);
++    if (!g_gxt.init) g_gxt.Init();
++    struct GxScope
++    {
++        GPU3D& g; u32 cmd; s32 c0;
++        ~GxScope()
++        {
++            if (!g_gxt.cheap && !g_gxt.stats) return;
++            u32 key = (cmd & 0xFF) * 2 + (g.ExecParamCount == 0 ? 1 : 0);
++            if (g_gxt.stats) { g_gxt.cnt[key]++; g_gxt.sum[key] += (u64)(g.CycleCount - c0); }
++            if (g_gxt.cheap)
++            {
++                g.CycleCount = c0 + g_gxt.tab[key];
++                g.VertexPipeline = 0; g.NormalPipeline = 0; g.PolygonPipeline = 0;
++                g.VertexSlotCounter = 0; g.VertexSlotsFree = 1;
++            }
++        }
++    } gxScope { *this, entry.Command, CycleCount };
+ 
+     //printf("FIFO: processing %02X %08X. Levels: FIFO=%d, PIPE=%d\n", entry.Command, entry.Param, CmdFIFO->Level(), CmdPIPE->Level());
+ 

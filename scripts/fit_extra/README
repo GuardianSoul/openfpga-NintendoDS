@@ -1,0 +1,2 @@
+# Per-target extra Quartus assignments for scripts/fit_block.sh (settings
+# experiments): add <target>.qsf, commit, fit that commit, then remove it.

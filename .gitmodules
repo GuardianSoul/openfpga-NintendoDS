@@ -1,0 +1,4 @@
+[submodule "references/melonDS"]
+	path = references/melonDS
+	url = https://github.com/melonDS-emu/melonDS.git
+	shallow = true
