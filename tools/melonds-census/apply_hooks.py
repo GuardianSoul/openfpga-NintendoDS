@@ -80,6 +80,28 @@ edit("NDSCart.cpp", '#include "Utils.h"\n', '#include "Utils.h"\n#include "Censu
 edit("NDSCart.cpp", "    if (Parent.CartActive && Parent.CPUSelect == Num)\n        Parent.Cart->ROMCommandStart(Parent, ROMCommand);\n",
      "    if (Parent.CartActive && Parent.CPUSelect == Num)\n    {\n        CENSUS_HOOK(CartCommand, ROMCommand, datasize);\n"
      "        Parent.Cart->ROMCommandStart(Parent, ROMCommand);\n    }\n")
+# Save chip: a game the list marks NAND without a NAND area in its header
+# (0x96 = 0, e.g. Electroplankton) gets EEPROM 8 KiB, as the core's savelist
+# does; NDSCartArgs::SaveMemType (census --save-type) overrides the list.
+edit("NDSCart.cpp", "    if (romparams.ROMSize != romlen)\n",
+     "    // census: the game list marks some carts NAND (8-10) whose header has no\n"
+     "    // NAND save area (0x96 = 0), e.g. Electroplankton (ATIx): the NAND cart\n"
+     "    // would then return FF for every ROM read. Such a cart gets EEPROM 8 KiB,\n"
+     "    // as the core's savelist does (NAND counts as not listed); --save-type wins.\n"
+     "    if (romparams.SaveMemType >= 8 && romparams.SaveMemType <= 10 && header.NANDRWStart == 0)\n"
+     "    {\n"
+     "        Log(LogLevel::Warn, \"census: %.4s listed NAND without a NAND area, using EEPROM 8 KiB\\n\", header.GameCode);\n"
+     "        romparams.SaveMemType = 2;\n"
+     "    }\n"
+     "    if (args && args->SaveMemType)\n"
+     "        romparams.SaveMemType = *args->SaveMemType;\n"
+     "\n"
+     "    if (romparams.ROMSize != romlen)\n")
+edit("NDSCart.h", "    u32 SRAMLength = 0;\n};\n",
+     "    u32 SRAMLength = 0;\n\n"
+     "    /// Save memory type (ROMList SaveMemType, 0-10) to use instead of the\n"
+     "    /// game list's entry. If \\c nullopt, the game list decides.\n"
+     "    std::optional<u32> SaveMemType = std::nullopt;\n};\n")
 edit("GPU.cpp", '#include "GPU.h"\n', '#include "GPU.h"\n#include "Census.h"\n')
 edit("GPU.cpp", "void GPU::StartScanline(u32 line) noexcept\n{\n",
      "void GPU::StartScanline(u32 line) noexcept\n{\n    CENSUS_HOOK(Scanline, line);\n")

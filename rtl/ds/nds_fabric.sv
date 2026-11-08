@@ -56,7 +56,16 @@ module nds_fabric #(
     // (dx_valid) instead of through nds_io: the unit is done once the engine
     // takes it, and an ARM9 access to 0x04000320-0x04000FFF waits until the
     // engine has the word (docs/phase2-integration.md "DMA GX posting")
-    parameter integer DMA_GX = 0
+    parameter integer DMA_GX = 0,
+    // 1 (with MR_BLOCK and nds_psram CWF): an ARM9 line fill asks main RAM for its line from the missed word (the
+    // burst wraps at the line's end); a DMA line still starts at its word 0, aligned here (nds_psram no longer aligns)
+    parameter integer A9_CWF = 0,
+    // 1: a DMA's single-word write to main RAM is posted: acked from S_GO, its word goes to main RAM on the idle port
+    // (pw); every main-RAM access, the sound side path and the read-ahead wait while it's pending (VRAM->main units
+    // waited ~4.3 clk for mr_ack; docs DMA route overheads)
+    parameter integer DMA_PW = 0,
+    // 1: a palette or OAM write ends in S_DONE straight from S_GO (pal_we/oam_we are S_GO's); S_RAM is for reads
+    parameter integer PO_WD = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -150,6 +159,7 @@ module nds_fabric #(
     // VRAM controller CPU port: request held until ack
     output logic        vr_req,
     output logic        vr_cpu,
+    output logic        vr_dma,             // the VRAM request is a DMA's (nds_vram VR_PF)
     output logic        vr_we,
     output logic [23:2] vr_addr,
     output logic [3:0]  vr_be,
@@ -393,7 +403,7 @@ module nds_fabric #(
     typedef enum logic [1:0] { RA_IDLE, RA_MAIN, RA_FILL } ra_t;
     ra_t ra_st;
     wire ra_has = (lb_v[{1'b1, dsl}] && lb_tag[{1'b1, dsl}] == uq) || (lb_v[{1'b1, !dsl}] && lb_tag[{1'b1, !dsl}] == uq);
-    wire ra_start = DMA_RA != 0 && ra_st == RA_IDLE && sd_st == SD_IDLE && !(sn_req && sn_addr[31:24] == 8'h02)
+    wire ra_start = DMA_RA != 0 && ra_st == RA_IDLE && sd_st == SD_IDLE && !(DMA_PW != 0 && pw_v) && !(sn_req && sn_addr[31:24] == 8'h02)
                   && (st == S_WAIT || (st == S_GO && ugw && !dx_ready) || (st == S_IDLE && pc_gap && grant == 4'd0)) && mst == 2'd0 && ura && !ra_has;
     assign ra_busy = ra_st != RA_IDLE;
     assign ra_fill = ra_st == RA_FILL;
@@ -454,7 +464,7 @@ module nds_fabric #(
                     mst <= 2'd1; cpu <= 1'b0; we <= a9_we; addr <= a9_addr; be <= a9_be; wdata <= a9_wdata;
                     ugw <= a9gx;
                     blk <= MR_BLOCK != 0 && a9_n8;
-                    if (MR_BLOCK != 0 && a9_n8) begin addr[4:0] <= 5'd0; be <= 4'hF; end
+                    if (MR_BLOCK != 0 && a9_n8) begin addr[4:0] <= {A9_CWF != 0 && !a9_we ? a9_addr[4:2] : 3'd0, 2'b00}; be <= 4'hF; end
                 end else if (grant[2]) begin
                     mst <= 2'd2; cpu <= 1'b1; we <= a7_we; addr <= a7_addr; be <= a7_be; wdata <= a7_wdata;
                 end else begin
@@ -464,7 +474,11 @@ module nds_fabric #(
             S_GO: begin
                 tgt_q <= tgt;   // (held while waiting for port B)
                 unique case (tgt)
-                    T_MAIN: begin
+                    T_MAIN: if (DMA_PW != 0 && pw_v) ;            // after the posted word
+                    else if (pw_take) begin
+                        for (int c = 0; c < 4; c++) if (t_eq[c]) lb_v[c] <= 1'b0;
+                        st <= S_DONE;
+                    end else begin
                         if (blk) begin
                             // both 16-byte halves leave the line buffers
                             if (we) for (int c = 0; c < 4; c++) if (t_eq5[c]) lb_v[c] <= 1'b0;
@@ -488,8 +502,8 @@ module nds_fabric #(
                     T_BIOS7, T_BIOS9: st <= we ? S_DONE : S_FR;
                     T_BOOT: if (BOOT_SRAM != 0) st <= we ? S_DONE : S_FR;
                             else if (!pb_busy) st <= S_RAM;
-                    T_PAL: st <= S_RAM;
-                    T_OAM: if (OAM_SHARE == 0 || we || oam_cgnt) st <= S_RAM;
+                    T_PAL: st <= PO_WD != 0 && we ? S_DONE : S_RAM;
+                    T_OAM: if (OAM_SHARE == 0 || we || oam_cgnt) st <= PO_WD != 0 && we ? S_DONE : S_RAM;
                     T_IO: if (ugw) begin if (dx_ready) st <= S_DONE; end     // DMA_GX: posted
                           else if (!gx_hold && io_go2) st <= S_WAIT;
                     T_VRAM: st <= drop_w9 ? S_DONE : S_WAIT;
@@ -566,7 +580,7 @@ module nds_fabric #(
     // Requests elsewhere (WRAM) still wait for the machine.
     // (also while a posted GX word waits for the geometry engine: DMA_GX's
     // backpressure held sound out for up to 6.9K clk in mkds-race)
-    wire sd_start = sd_st == SD_IDLE && !ra_busy && (st == S_WAIT || (st == S_GO && ugw && !dx_ready))
+    wire sd_start = sd_st == SD_IDLE && !ra_busy && !(DMA_PW != 0 && pw_v) && (st == S_WAIT || (st == S_GO && ugw && !dx_ready))
                   && sn_req && sn_addr[31:24] == 8'h02;
     assign sd_busy = sd_st != SD_IDLE;
     always_ff @(posedge clk) begin
@@ -608,6 +622,24 @@ module nds_fabric #(
     end
     wire ra_on = ra_st == RA_MAIN || ra_st == RA_FILL;
 
+    // ---------------------------------------------------------------- DMA posted main-RAM write (DMA_PW)
+    logic        pw_v;          // a posted word waits for (or is on) the main-RAM port
+    logic [21:2] pw_a;
+    logic [3:0]  pw_be;
+    logic [31:0] pw_d;
+    wire pw_take = DMA_PW != 0 && st == S_GO && tgt == T_MAIN && mst == 2'd0 && we && !blk && !pw_v
+                 && sd_st == SD_IDLE && ra_st == RA_IDLE;
+    wire pw_on = pw_v && sd_st == SD_IDLE && ra_st == RA_IDLE;
+    always_ff @(posedge clk) begin
+        if (rst) pw_v <= 1'b0;
+        else if (pw_take) begin pw_v <= 1'b1; pw_a <= addr[21:2]; pw_be <= be; pw_d <= wdata; end
+        else if (pw_on && mr_ack) pw_v <= 1'b0;
+    end
+`ifndef ALTERA_RESERVED_QIS
+    always @(posedge clk) if (!rst && pw_v && mr_req && mr_ack && !(pw_on && mr_we && mr_addr == pw_a))
+        $error("nds_fabric: main RAM served another request while a posted DMA word was pending (%m) at %0t", $time);
+`endif
+
     // DMA_PACE: the floor between unit starts
     wire [6:0] pace = dm_dst[31:24] == 8'h04 ? (dm_dst[23:6] == 18'h00010 ? 7'(DMA_PACE_GX) : 7'd34)   // 0x04000400-43F: the GX FIFO
                     : dm_dst[31:24] == 8'h06 ? 7'd51 : 7'd52;
@@ -645,17 +677,20 @@ module nds_fabric #(
 
     assign vr_req   = st == S_WAIT && tgt_q == T_VRAM;
     assign vr_cpu   = cpu;
+    assign vr_dma   = mst == 2'd0;
     assign vr_we    = we;
     assign vr_addr  = addr[23:2];
     assign vr_be    = be;
     assign vr_wdata = wdata;
 
-    assign mr_req   = st == S_MAIN || sd_st == SD_MAIN || ra_st == RA_MAIN;
-    assign mr_we    = sd_on ? sn_we : !ra_on && we;
-    assign mr_addr  = sd_on ? sn_addr[21:2] : ra_on ? {ra_q, 2'b00} : addr[21:2];
-    assign mr_be    = sd_on || ra_on ? 4'hF : be;
-    assign mr_wdata = sd_on ? sn_wdata : blk ? a9_wdata : wdata;
-    assign mr_n8    = !sd_on && (DMA_B8 != 0 && ra_on || !ra_on && (blk || DMA_B8 != 0 && d_line && !we));
+    // (DMA_PW: st never reaches S_MAIN while pw_v, so pw_on has the port to itself)
+    wire pw_m = DMA_PW != 0 && pw_on;
+    assign mr_req   = st == S_MAIN || sd_st == SD_MAIN || ra_st == RA_MAIN || pw_m;
+    assign mr_we    = sd_on ? sn_we : pw_m || !ra_on && we;
+    assign mr_addr  = sd_on ? sn_addr[21:2] : ra_on ? {ra_q, 2'b00} : pw_m ? pw_a : (A9_CWF != 0 && d_line && !we) ? {addr[21:5], 3'd0} : addr[21:2];
+    assign mr_be    = sd_on || ra_on ? 4'hF : pw_m ? pw_be : be;
+    assign mr_wdata = sd_on ? sn_wdata : pw_m ? pw_d : blk ? a9_wdata : wdata;
+    assign mr_n8    = !sd_on && !pw_m && (DMA_B8 != 0 && ra_on || !ra_on && (blk || DMA_B8 != 0 && d_line && !we));
     assign a9_wnext = st == S_MAIN && blk && we && mr_wnext;
     always_ff @(posedge clk) rv9 <= st == S_FILL && blk && mr_rvalid;
     assign a9_rvalid = rv9 || (done && bl_word);

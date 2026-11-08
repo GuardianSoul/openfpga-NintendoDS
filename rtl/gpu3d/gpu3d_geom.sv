@@ -28,6 +28,7 @@ module gpu3d_geom #(
     parameter int VFIN = 0,            // see gpu3d_gxeng: 1 adds the vertex-finish unit gpu3d_gxvfin (with LUNIT), 2 its lite form
     parameter bit FF = 1'b0,           // see gpu3d_gxeng: the geometry redesign (with USORT, without LUNIT and VFIN)
     parameter bit ENG_M10K = 1'b1,     // gpu3d_gxeng VC_M10K, STK_M10K, VOC_M10K: its three MLAB tables in M10K (+3 blocks, -4 MLAB LABs)
+    parameter bit ENG_TM10K = ENG_M10K,   // ... the VC and VOC tables alone (0: MLAB, -2 M10K; STK_M10K stays with ENG_M10K: gpu3d_gxeng's DICT needs it)
     parameter bit GX_PRE = 1'b0,       // 1: io_wpre is gpu3d_gxpre(io_wdata), registered with it (nds_gpu3d); 0: decoded here
     parameter bit SPILL = 1'b0,        // see gpu3d_gxfront: entries beyond the on-chip 512 spill to SDRAM (sp_* ports)
     parameter int SP_ON = 512,         // see gpu3d_gxfront (tests: fewer, to spill often)
@@ -73,6 +74,7 @@ module gpu3d_geom #(
     output logic         so_done,
     output logic [11:0]  so_count,
     output logic         sw_busy,       // a swap taken at a VBlank that the engine has not reached, or its sort output not ended
+    output logic         sw_take,       // the model takes a swap at this VBlank (the DS's own: the engine may sort it later)
     // test bench
     output logic         dbg_stall,
     output logic         dbg_apply,
@@ -199,6 +201,7 @@ module gpu3d_geom #(
     logic swap_go, swap_ack;
     logic [3:0] swap_n;
     wire  swap_in_v = vblank && geom_en && flush_req;
+    assign sw_take = swap_in_v;
     wire  swap_in;
 `ifndef ALTERA_RESERVED_QIS
     // synthesis translate_off
@@ -239,7 +242,7 @@ module gpu3d_geom #(
     logic        e_so_we, e_so_done;
     logic [10:0] e_so_pos, e_so_idx;
     gpu3d_gxeng #(.SMALL(SMALL), .DIV_R4(DIV_R4), .DIV_P2X(DIV_P2X), .DS_STRIPCLIP(DS_STRIPCLIP), .DS_FARREJ(DS_FARREJ), .DS_CLIPRED(DS_CLIPRED), .USORT(USORT), .LUNIT(LUNIT), .VFIN(VFIN), .FF(FF),
-                  .VC_M10K(ENG_M10K), .STK_M10K(ENG_M10K), .VOC_M10K(ENG_M10K)) u_eng (
+                  .VC_M10K(ENG_TM10K), .STK_M10K(ENG_M10K), .VOC_M10K(ENG_TM10K)) u_eng (
         .clk, .clk_2x, .rst, .e_addr, .e_data, .mx, .e_avail, .e_pop, .e_more, .dp, .zerodot,
         .swap_go, .swap_ack, .oc_valid, .oc_rej, .oc_quad,
         .boxres, .test_done, .npoly, .nvert, .ovf_set,

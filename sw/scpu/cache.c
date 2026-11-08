@@ -54,6 +54,10 @@ typedef unsigned int u32;
 #define C_LANDED 512u     /* the background prefetch is finished */
 #define S_HOLD   (1u << 24)
 #define S_DUE    (1u << 23)
+#define S_CPEND  (1u << 21)   /* a controls frame waits (read 4 takes it) */
+#define S_CPEN   (1u << 20)   /* at that frame: the pen was down */
+#define S_CTOFF  (1u << 19)   /* touch mode was off on a clock since the frame before */
+#define S_CTUP   (1u << 18)   /* touch mode was switched on since the frame before */
 
 static u32 rom_size, nblocks, hand, wrapped, SLOTS, scanning;
 /* the run */
@@ -63,6 +67,8 @@ static u32 pf_fly, pf_lb, pf_k;
 /* streams: the next block to fetch (NONE: the file ends), the first block of the last prefetched run (NONE: not
  * watched), the next run's blocks past its first, a prefetch due, last use */
 static u32 s_next[NS], s_trig[NS], s_ahead[NS], s_due[NS], s_used[NS], now;
+
+static void ctl_poll(u32 st);     /* the controls' step while waiting (below) */
 
 static u32 ref_get(u32 s) { IO(4) = s; return IO(0) & S_REF; }
 static void ref_set(u32 s, u32 v) { IO(4) = s | v << 16 | 1u << 17; }
@@ -142,7 +148,7 @@ static u32 fetch(u32 b, u32 pfm, u32 cap)
     for (u32 tries = 0;; tries++) {
         send(len, 0);
         u32 st;
-        while (!((st = IO(0)) & S_MK)) ;
+        while (!((st = IO(0)) & S_MK)) ctl_poll(st);
         if (!(st & S_MKERR)) break;
         if (tries == 3) { IO(6) = C_FAIL; break; }
     }
@@ -180,6 +186,82 @@ static void prefetch(void)
         break;
     }
     for (u32 k = 0; k < NS; k++) if (s_due[k]) { IO(6) = C_DUE; break; }
+}
+
+/* the controls' per-frame work (rtl/pocket/nds_controls.sv FW = 1, its g_hw branch the same rules in hardware;
+ * docs/space-ctl.md): the left stick's D-pad, the cursor and its idle count, the gestures and their points. It runs
+ * in steps (c_ph) between the cache's work: the main loop runs a step only while no miss, held client or new-block
+ * event waits, and the waits for a command's marker or the host run them too, so a miss waits for one step at most */
+static u32 c_ph, c_r, c_st, c_jp, c_x, c_y, c_idle, c_fbq, c_act, c_kind, c_btn, c_step, c_w1;
+/* a gesture point's offset, a sixteenth of a turn apart: Circle 2 round(12 sin), Big Circle round(48 sin) */
+static const signed char c_sin[32] = { 0, 10, 16, 22, 24, 22, 16, 10, 0, -10, -16, -22, -24, -22, -16, -10,
+                                       0, 18, 34, 44, 48, 44, 34, 18, 0, -18, -34, -44, -48, -44, -34, -18 };
+/* the right stick's pixels a frame beyond the dead zone of 32 ((deflection - 32) / 8), signed; v: value / 8 */
+static inline __attribute__((always_inline)) int c_rate(u32 v)
+{
+    u32 m = (v & 16 ? v : ~v) & 15;
+    int d = m > 4 ? (int)m - 4 : 0;
+    return v & 16 ? d : -d;
+}
+/* c + d clamped to 0..hi */
+static inline __attribute__((always_inline)) u32 c_add(u32 c, int d, int hi)
+{
+    int v = (int)c + d;
+    return v < 0 ? 0 : v > hi ? (u32)hi : (u32)v;
+}
+static void ctl_step(void)
+{
+    u32 r = c_r, ph = c_ph, touch = r >> 8 & 1;
+    if (ph == 1) {                                  /* the frame's inputs; the left stick; the cursor and its idle count */
+        c_r = r = IO(4); c_st = IO(0); touch = r >> 8 & 1;
+        u32 w = 0;
+        for (u32 sh = 16; sh >= 10; sh -= 6) {      /* LY, LX: 16 x value / 128 */
+            u32 v = r >> sh & 63;                   /* pressed below 0x40 / above 0xC0, held below 0x58 / above 0xA8 */
+            w = w << 4 | (v < 16) | (v > 48) << 1 | (v < 22) << 2 | (v > 42) << 3;
+        }
+        c_w1 = w;
+        u32 jp = c_jp, dpad = r & 15;
+        c_jp = r;                                   /* the cursor's rate: the frame before's sample */
+        int dx = c_rate(jp >> 22), dy = c_rate(jp >> 27);
+        u32 stick = r >> 9 & 1 && (dx | dy);
+        if (touch) {
+            int s = "\1\3\6\3"[IO(2) >> 30];        /* Cursor Speed */
+            dx = dpad & 4 ? -s : dpad & 8 ? s : 0;
+            dy = dpad & 1 ? -s : dpad & 2 ? s : 0;
+        }
+        if (touch || stick) { c_x = c_add(c_x, dx, 255); c_y = c_add(c_y, dy, 191); }
+        u32 i = c_st & S_CTUP ? 180 : c_idle;       /* (c_idle: 180 - g_hw's idle, 0 hidden) */
+        c_idle = (touch && dpad) || stick || (c_st & S_CPEN) ? 180 : i ? i - 1 : 0;
+    } else if (ph == 2) {                           /* the gesture */
+        u32 fb = r >> 4 & 15;
+        if (!touch || (c_st & S_CTOFF)) { c_act = 0; c_fbq = 15; }   /* (a button held as touch mode starts draws nothing) */
+        if (touch) {
+            u32 g = IO(2) >> 18;
+            if (c_act) {
+                if (c_step == (c_kind & 4 ? 12 : 15)) { c_step = 0; c_act = !(c_kind & 4) && (fb >> c_btn & 1); }
+                else c_step++;
+            } else {
+                for (u32 b = 0; b < 4; b++)         /* the first new press of a button that draws */
+                    if ((fb & ~c_fbq) >> b & 1 && g >> 3 * b & 6) { c_act = 1; c_kind = g >> 3 * b & 7; c_btn = b; c_step = 0; break; }
+            }
+            c_fbq = fb;
+        }
+    } else {                                        /* the gesture's point; the results */
+        int dx = 0, dy = 0, k = (int)c_kind;
+        if (!(k & 4)) { const signed char *t = c_sin + (k & 1) * 16; dx = t[c_step]; dy = -t[(c_step + 4) & 15]; }
+        else { int s = (int)c_step * 8; if (!(k & 2)) s = -s; if (k & 1) dx = s; else dy = s; }
+        u32 w0 = c_x | c_y << 8 | c_add(c_x, dx, 255) << 16 | c_add(c_y, dy, 191) << 24;
+        u32 w1 = c_w1 | c_act << 8 | (c_idle != 0) << 9;
+        if (c_act) { IO(0) = w0; IO(1) = w1; }      /* (the point before a gesture starts, after it ends) */
+        else { IO(1) = w1; IO(0) = w0; }
+        ph = (u32)-1;
+    }
+    c_ph = ph + 1;
+}
+static __attribute__((noinline)) void ctl_poll(u32 st)
+{
+    if (!c_ph && (st & S_CPEND)) c_ph = 1;
+    if (c_ph) ctl_step();
 }
 
 /* a ROM word through the cache (its block fetched if it isn't cached) */
@@ -276,13 +358,15 @@ void main(void)
         scanning = PREFETCH && scan_start();
     }
     for (u32 k = 0; k < NS; k++) { s_next[k] = NONE; s_trig[k] = NONE; }
-    IO(6) = C_READY;
+    c_x = 128; c_y = 96; c_jp = 0x10u << 27 | 0x10u << 22;   /* (sticks centred; c_fbq follows at the first frame, touch off) */
+    IO(6) = C_READY;                                /* (read 2's settings and controls frames from here) */
     if (PREFETCH) IO(5) = 1u << 29;                 /* new-block events */
 
     for (;;) {
         /* the scan yields to a waiting client (a miss, a hold), not to new-block events: those wait a chunk */
-        if (scanning && !(IO(0) & (S_MISS | S_HOLD))) { scanning = scan_step(); continue; }
-        u32 st = IO(3);                             /* waits for a miss, a trigger or a held client */
+        if (c_ph && !(IO(0) & (S_MISS | S_HOLD | S_SEEN))) { ctl_step(); continue; }
+        if (scanning && !(IO(0) & (S_MISS | S_HOLD | S_CPEND))) { scanning = scan_step(); continue; }
+        u32 st = IO(3);                             /* waits for a miss, a trigger, a held client or a controls frame */
         if (st & S_SEEN) {                          /* the client moved to another cached block */
             IO(6) = C_SEEN;
             u32 b = IO(2) & 0x3FFFFu;
@@ -295,7 +379,7 @@ void main(void)
                 }
         } else if (st & S_MISS) {
             if (pf_fly) {                           /* the prefetch's command first, then look again */
-                while (!((st = IO(0)) & S_MK)) ;
+                while (!((st = IO(0)) & S_MK)) ctl_poll(st);
                 finish_prefetch(st);
                 IO(6) = C_MISS;
             } else {
@@ -321,6 +405,6 @@ void main(void)
                 prefetch();
             }
             IO(6) = C_GO;
-        }
+        } else if (st & S_CPEND) c_ph = 1;
     }
 }

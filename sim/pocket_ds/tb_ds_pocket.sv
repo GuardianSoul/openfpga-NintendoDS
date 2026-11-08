@@ -836,6 +836,18 @@ module tb_ds_pocket;
             end
         end
     end
+    // nds_vram's VRAM reads taken while a word of their line is still in the write FIFO (the cause of an ordering error above)
+    int vr_pend_n = 0;
+    always @(posedge dut.clk_sys) if (dut.ds.u_vram.vm_req && dut.ds.u_vram.vm_ack && !dut.ds.u_vram.vm_we) begin
+        int a0, hit;
+        a0 = int'(dut.ds.u_vram.vm_addr) & ~7; hit = 0;
+        for (int k = 0; k < 8; k++) if (chain_pend.exists(a0 + k) && chain_pend[a0 + k] > 0) hit++;
+        if (hit != 0 && vr_pend_n++ < 5)
+            $display("[%0t] vrpend: read %06x blk %0d st %0d with %0d words pending: post_p %0d pr %05x-%05x pd_tgt %0d pcnt %0d fill %0d bt %05x/%05x bw_left %0d",
+                     $time, dut.ds.u_vram.vm_addr, dut.ds.u_vram.vm_blk, dut.ds.u_vram.st, hit, dut.ds.u_vram.post_p,
+                     dut.ds.u_vram.pr_lo, dut.ds.u_vram.pr_hi, dut.ds.u_vram.pd_tgt, dut.ds.u_vram.cw_pcnt, dut.ds.u_vram.cw_fill,
+                     dut.ds.u_vram.bt0, dut.ds.u_vram.bt1, dut.ds.u_vram.bw_left);
+    end
     reg ovf_seen = 0;
     // the SDRAM read-word FIFOs (nds_sdram_words, no back-pressure): a
     // dropped word would shift every later word of its client (an odd count
@@ -939,6 +951,26 @@ module tb_ds_pocket;
         $display("%0s: exported %0d bytes, reader errors %0d, runs %0d", slot == 10 ? "save" : "diag", size, dut.save_read.errors, dut.save_read.runs);
     endtask
 
+    // +busprof: ARM9 fabric requests by region (b9_addr[27:24]) and kind: count, request->ack clocks, ack->next
+    // request clocks, and the fabric states (st) while serving them
+    bit busprof = 0; initial busprof = $test$plusargs("busprof");
+    longint bp_n [16][2], bp_lat [16][2], bp_gap [16][2], bp_st [16][2][8];
+    initial foreach (bp_n[i,j]) begin bp_n[i][j] = 0; bp_lat[i][j] = 0; bp_gap[i][j] = 0; foreach (bp_st[i][j][k]) bp_st[i][j][k] = 0; end
+    bit bp_on = 0; int bp_r, bp_w; longint bp_t0 = 0, bp_ta = 0;
+    always @(posedge dut.clk_sys) if (busprof) begin
+        if (bp_on) bp_st[bp_r][bp_w][dut.ds.u_fab.st]++;
+        if (bp_on && dut.ds.b9_ack) begin bp_on = 0; bp_lat[bp_r][bp_w] += pc - bp_t0; bp_ta = pc; end
+        else if (!bp_on && dut.ds.b9_req && !dut.ds.b9_ack) begin
+            bp_on = 1; bp_r = dut.ds.b9_addr[27:24]; bp_w = dut.ds.b9_we; bp_t0 = pc; bp_n[bp_r][bp_w]++;
+            if (bp_ta != 0) bp_gap[bp_r][bp_w] += pc - bp_ta;
+        end
+    end
+    final if (busprof) foreach (bp_n[i,j]) if (bp_n[i][j] > 100)
+        $display("busprof region %h %s: %0d reqs, req->ack %.2f clk, ack->req %.2f; fabric st idle %.2f go %.2f ram %.2f main %.2f fill %.2f wait %.2f done %.2f fr %.2f",
+                 i, j ? "write" : "read", bp_n[i][j], real'(bp_lat[i][j]) / bp_n[i][j], real'(bp_gap[i][j]) / bp_n[i][j],
+                 real'(bp_st[i][j][0]) / bp_n[i][j], real'(bp_st[i][j][1]) / bp_n[i][j], real'(bp_st[i][j][2]) / bp_n[i][j], real'(bp_st[i][j][3]) / bp_n[i][j],
+                 real'(bp_st[i][j][4]) / bp_n[i][j], real'(bp_st[i][j][5]) / bp_n[i][j], real'(bp_st[i][j][6]) / bp_n[i][j], real'(bp_st[i][j][7]) / bp_n[i][j]);
+
     // ---------------- finish ----------------
     integer timeout_ms = 2000, frames = 30;
     function automatic [31:0] ram_word(input integer w);
@@ -951,10 +983,16 @@ module tb_ds_pocket;
         fork
             wait (v_frames >= frames);
             begin #(timeout_ms * 1ms); $display("TIMEOUT"); end
+            // +stop_done: end once a test ROM's result block says done (polled each video frame)
+            begin   // (without +stop_done this branch waits forever, so it never ends the fork)
+                if (!$test$plusargs("stop_done")) wait (0);
+                forever begin @(v_frames); if (ram_word(32'hFC000) == 32'h52545344 && ram_word(32'hFC003) == 32'd1) break; end
+            end
         join_any
         disable fork;
         magic = ram_word(32'hFC000); n = ram_word(32'hFC001); mask = ram_word(32'hFC002); done = ram_word(32'hFC003);
         $display("result: magic %h checks %0d mask %h done %0d", magic, n, mask, done);
+        if (magic == 32'h52545344) for (int i = 0; i < n && i < 32; i++) $display("value %0d %0d", i, ram_word(32'hFC004 + i));
         $display("video: %0d frames, %0d errors; DS frames %0d, retired 9:%0d 7:%0d; underruns %0d",
                  v_frames, v_errors, `G_LOG(frames), `G_LOG(ret9), `G_LOG(ret7), dut.underruns);
         $display("models: sdram errors %0d, cram errors %0d/%0d; cart words %0d, %0d on clk_bus edges", sdram_chip.errors, cram0.errors, cram1.errors,

@@ -26,7 +26,7 @@ module gpu3d_gxfront #(
     // 1: GX cheap timing (docs/budget-3d.md, option (a); a DS deviation the maintainer approved): every entry costs a
     // fixed number of cycles by command (cheap_idx/cheap_val), the vertex, normal and polygon pipelines never fill,
     // so no NextVertexSlot / StallPolygonPipeline and no polygon outcomes; the FIFO, PIPE, GXSTAT bits,
-    // IRQ/DMA rules and stalls are unchanged. Matches the census melonDS with GX_CHEAP=gx-cheap-table-full.txt.
+    // IRQ/DMA rules and stalls are unchanged. Matches the census melonDS with GX_CHEAP=gx-cheap-table-rtl.txt.
     // 0: melonDS's timing model, exact
     parameter bit CHEAP = 1'b0,
     // 1: wr_pre carries gpu3d_gxpre(wr_data), registered with the write's data a clock before (a timing
@@ -112,8 +112,11 @@ module gpu3d_gxfront #(
     endfunction
 
     // GX cheap timing (CHEAP): cycles per entry by key = command * 2 + (ExecParamCount is 0 after the entry),
-    // tools/melonds-census/gx-cheap-table-full.txt (gx-cheap-table.txt, the census average, every other key 1).
-    // The entry RAM keeps an index into the 16 distinct costs (cheap_idx), and the head reads its cost back
+    // tools/melonds-census/gx-cheap-table-full.txt (gx-cheap-table.txt, the census average, every other key 1),
+    // plus the DS's costs of commands the census never saw (hwref run 3, ds-rules "GX command costs"):
+    // POS_TEST 1 + 6 (DS 7.1), VEC_TEST 5 (DS 5.3), MTX_MULT_4x4 by matrix mode and the NORMAL pipeline (below).
+    // The entry RAM keeps an index into the 16 distinct costs (cheap_idx) and a +7 bit, and the head reads the
+    // cost back (cheap_val)
     function automatic [3:0] cheap_idx(input [8:0] key);
         case (key)
             9'd35: cheap_idx = 4'd7;
@@ -144,27 +147,68 @@ module gpu3d_gxfront #(
             9'd131: cheap_idx = 4'd4;
             9'd161: cheap_idx = 4'd15;
             9'd225: cheap_idx = 4'd14;
+            9'd49:  cheap_idx = 4'd8;      // MTX_MULT_4x4 (modes 0/1; 2 and 3 at the write)
+            9'd227: cheap_idx = 4'd5;      // POS_TEST
+            9'd229: cheap_idx = 4'd4;      // VEC_TEST
             default: cheap_idx = 4'd0;
         endcase
     endfunction
-    function automatic [8:0] cheap_val(input [3:0] i);
+    function automatic [8:0] cheap_base(input [3:0] i);
         case (i)
-            4'd0: cheap_val = 9'd1;
-            4'd1: cheap_val = 9'd2;
-            4'd2: cheap_val = 9'd3;
-            4'd3: cheap_val = 9'd4;
-            4'd4: cheap_val = 9'd5;
-            4'd5: cheap_val = 9'd6;
-            4'd6: cheap_val = 9'd8;
-            4'd7: cheap_val = 9'd17;
-            4'd8: cheap_val = 9'd21;
-            4'd9: cheap_val = 9'd33;
-            4'd10: cheap_val = 9'd36;
-            4'd11: cheap_val = 9'd50;
-            4'd12: cheap_val = 9'd57;
-            4'd13: cheap_val = 9'd62;
-            4'd14: cheap_val = 9'd255;
-            4'd15: cheap_val = 9'd388;
+            4'd0: cheap_base = 9'd1;
+            4'd1: cheap_base = 9'd2;
+            4'd2: cheap_base = 9'd3;
+            4'd3: cheap_base = 9'd4;
+            4'd4: cheap_base = 9'd5;
+            4'd5: cheap_base = 9'd6;
+            4'd6: cheap_base = 9'd8;
+            4'd7: cheap_base = 9'd17;
+            4'd8: cheap_base = 9'd21;
+            4'd9: cheap_base = 9'd33;
+            4'd10: cheap_base = 9'd36;
+            4'd11: cheap_base = 9'd50;
+            4'd12: cheap_base = 9'd57;
+            4'd13: cheap_base = 9'd62;
+            4'd14: cheap_base = 9'd255;
+            4'd15: cheap_base = 9'd388;
+            default: cheap_base = 9'd1;
+        endcase
+    endfunction
+    // bit 4: the entry also pays the NORMAL pipeline a NORMAL before it left (7 cycles)
+    function automatic [8:0] cheap_val(input [4:0] i);   // cheap_base(i[3:0]) + 7 * i[4], as one table
+        case (i)
+            5'd0: cheap_val = 9'd1;
+            5'd1: cheap_val = 9'd2;
+            5'd2: cheap_val = 9'd3;
+            5'd3: cheap_val = 9'd4;
+            5'd4: cheap_val = 9'd5;
+            5'd5: cheap_val = 9'd6;
+            5'd6: cheap_val = 9'd8;
+            5'd7: cheap_val = 9'd17;
+            5'd8: cheap_val = 9'd21;
+            5'd9: cheap_val = 9'd33;
+            5'd10: cheap_val = 9'd36;
+            5'd11: cheap_val = 9'd50;
+            5'd12: cheap_val = 9'd57;
+            5'd13: cheap_val = 9'd62;
+            5'd14: cheap_val = 9'd255;
+            5'd15: cheap_val = 9'd388;
+            5'd16: cheap_val = 9'd8;
+            5'd17: cheap_val = 9'd9;
+            5'd18: cheap_val = 9'd10;
+            5'd19: cheap_val = 9'd11;
+            5'd20: cheap_val = 9'd12;
+            5'd21: cheap_val = 9'd13;
+            5'd22: cheap_val = 9'd15;
+            5'd23: cheap_val = 9'd24;
+            5'd24: cheap_val = 9'd28;
+            5'd25: cheap_val = 9'd40;
+            5'd26: cheap_val = 9'd43;
+            5'd27: cheap_val = 9'd57;
+            5'd28: cheap_val = 9'd64;
+            5'd29: cheap_val = 9'd69;
+            5'd30: cheap_val = 9'd262;
+            5'd31: cheap_val = 9'd395;
             default: cheap_val = 9'd1;
         endcase
     endfunction
@@ -479,20 +523,21 @@ module gpu3d_gxfront #(
     logic [2:0]  ws_vnip;
     logic        ws_ncons;
     logic [5:0]  ws_xpc;
+    logic        ws_nrm, wn_nrm, wd_np7;   // CHEAP: the entry before was a NORMAL; this entry pays its pipeline
     logic [1:0]  wn_mmode, wn_pmode;
     logic [3:0]  wn_pattr, wn_cattr;
     logic [2:0]  wn_vnip;
     logic        wn_ncons;
     logic [5:0]  wn_xpc;
     generate if (CHEAP) begin : g_narc
-        // what the cheap model reads of an entry: 19 bits, one M10K (512 x 20)
-        logic [18:0] nq;
-        gpu3d_ram #(.W(19), .AW(9)) u_nar (
-            .clk, .we(ram_we), .waddr(wr), .wdata({wd.k[3:0], wd.flush, wd.pushpop, wd.ntest, wd.stk, wd.mmode, wd.hp}),
+        // what the cheap model reads of an entry: 20 bits, one M10K (512 x 20)
+        logic [19:0] nq;
+        gpu3d_ram #(.W(20), .AW(9)) u_nar (
+            .clk, .we(ram_we), .waddr(wr), .wdata({wd_np7, wd.k[3:0], wd.flush, wd.pushpop, wd.ntest, wd.stk, wd.mmode, wd.hp}),
             .raddr(mx_n), .rdata(nq));
         always_comb begin
             hd = '0;
-            hd.k = cheap_val(nq[18:15]); hd.flush = nq[14]; hd.pushpop = nq[13]; hd.ntest = nq[12:11];
+            hd.k = cheap_val(nq[19:15]); hd.flush = nq[14]; hd.pushpop = nq[13]; hd.ntest = nq[12:11];
             hd.stk = nq[10:8]; hd.mmode = nq[7:6]; hd.hp = nq[5:0];
         end
     end else begin : g_nar
@@ -512,6 +557,7 @@ module gpu3d_gxfront #(
         wd.mmode = ws_mmode; wd.hp = hp;
         wn_mmode = ws_mmode; wn_pmode = ws_pmode; wn_pattr = ws_pattr; wn_cattr = ws_cattr;
         wn_vnip = ws_vnip; wn_ncons = ws_ncons; wn_xpc = ws_xpc;
+        wn_nrm = c == 8'h21 && np_ <= 6'd1; wd_np7 = 1'b0;
         submit = 1'b0;
         if (np_ <= 6'd1) begin
             case (c)
@@ -583,6 +629,15 @@ module gpu3d_gxfront #(
             // the cost of the entry by its key (melonDS: ExecParamCount == 0 after it; a single-parameter
             // command leaves a partial command's count as it was); nothing else of the pipelines' timing
             wd.k = 9'(cheap_idx({c, wn_xpc == 6'd0}));     // an index, cheap_val at the head
+            // MTX_MULT_4x4 by matrix mode (DS run 3: 34.5 / 35.0 / 65.4 / 33.0 for modes 0-3): 15 entries of 1 and
+            // 21 / 21 / 50 / 17 (the nearest of the 16 costs; melonDS's exact 20 / 20 / 50 / 18)
+            if (c == 8'h18 && np_ > 6'd1 && wn_xpc == 6'd0 && ws_mmode[1])
+                wd.k = (ws_mmode == 2'd2) ? 9'd11 : 9'd7;
+            // the NORMAL pipeline (melonDS NormalPipeline 7, which a vertex hides and any other command pays): a
+            // NORMAL straight after a NORMAL costs 1 + max(1, lights) + 7 (DS run 3: 9.0 / 9.0 / 10.1 / 11.1 / 12.1
+            // for 0-4 lights), anything else but a vertex after a NORMAL + 7; a NORMAL before a vertex stays 2
+            if (c == 8'h21 && np_ <= 6'd1 && ws_nrm) wd.k = (lights == 4'd0) ? 9'd1 : 9'(lights);
+            wd_np7 = ws_nrm && !(c >= 8'h23 && c <= 8'h28);
             wd.bsel = 2'd0; wd.stall = 1'b0; wd.delay = 4'd0; wd.needpp = 1'b0; wd.vsc = 1'b0;
             wd.vp4 = 1'b0; wd.sub = 1'b0; wd.strip = 1'b0; wd.npm = 2'd0;
         end
@@ -591,7 +646,7 @@ module gpu3d_gxfront #(
     // ------------------------------------------------------------------
     // model state
     // ------------------------------------------------------------------
-    // CHEAP: CycleCount stays in -1..388 (at most 0 at an execution, which adds k <= 388: sim check below)
+    // CHEAP: CycleCount stays in -1..395 (at most 0 at an execution, which adds k <= 388 + 7: sim check below)
     localparam int CW = CHEAP ? 10 : 16;
     typedef struct packed {
         logic signed [CW-1:0] cyc;     // CycleCount
@@ -974,7 +1029,7 @@ module gpu3d_gxfront #(
             tm <= '0; tm.vsf <= 5'd1;
             pend_strip <= 1'b0; oc_skip <= 2'd0; f <= 9'd0; p <= 3'd0;
             ws_mmode <= 2'd0; ws_pattr <= 4'd0; ws_cattr <= 4'd0; ws_pmode <= 2'd0; ws_vnip <= 3'd0;
-            ws_ncons <= 1'b0; ws_xpc <= 6'd0; flush <= 1'b0;
+            ws_ncons <= 1'b0; ws_xpc <= 6'd0; ws_nrm <= 1'b0; flush <= 1'b0;
             busy <= 1'b0; b14 <= 1'b0; b0 <= 1'b0; b15 <= 1'b0; npush <= 9'd0; ntest <= 9'd0; npush_x <= 1'b0; ntest_x <= 2'd0; st_aq <= 3'd0;
             psp <= 6'd0; jsp <= 1'b0; tsp <= 1'b0; irqm <= 2'd0; zdot <= 24'hFFFFFF;
             phase <= 1'b0; flush_t <= 1'b0; mx <= 9'd0; wr <= 9'd0;
@@ -1040,7 +1095,7 @@ module gpu3d_gxfront #(
             if (ram_we) begin
                 st_w <= st_w + 3'd1; wr <= wr + 9'd1;
                 ws_mmode <= wn_mmode; ws_pmode <= wn_pmode; ws_pattr <= wn_pattr; ws_cattr <= wn_cattr;
-                ws_vnip <= wn_vnip; ws_ncons <= wn_ncons; ws_xpc <= wn_xpc;
+                ws_vnip <= wn_vnip; ws_ncons <= wn_ncons; ws_xpc <= wn_xpc; ws_nrm <= wn_nrm;
             end
 
             // GXSTAT (0x600) and DISP_1DOT_DEPTH (0x610)

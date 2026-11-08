@@ -87,6 +87,22 @@ echo "PROJECT_REVISION = \"$top\"" > $top.qpf
   # took a LAB input in every LAB they reach; LAB input limits cost 400 ALMs)
   echo 'set_instance_assignment -name GLOBAL_SIGNAL "GLOBAL CLOCK" -to "core_top:ic|rst_sys_s[2]"'
   echo 'set_instance_assignment -name GLOBAL_SIGNAL "GLOBAL CLOCK" -to "core_top:ic|nds_top:ds|cpu_rst_q"'
+  # fabric registers kept out of DSP input registers: the fitter packs them there for setup, where the DSP's
+  # clock tap is ~0.5 ns after the LAB flops' and the predecessor (a duplicate placed by the DSP) is ~0.45 ns
+  # away, a hold the router cannot pad (#2037 sound p_l -0.082, #2039 raster r6_dn -0.083 at the fast corner;
+  # #502/#492 before; (* preserve *) does not stop it)
+  echo 'set_instance_assignment -name QII_AUTO_PACKED_REGISTERS OFF -to "*gpu3d_raster:u_raster|g_drec.r6_dn*"'
+  echo 'set_instance_assignment -name QII_AUTO_PACKED_REGISTERS OFF -to "*nds_audio_interp:audio_interp|p_l*"'
+  echo 'set_instance_assignment -name QII_AUTO_PACKED_REGISTERS OFF -to "*nds_audio_interp:audio_interp|p_r*"'
+  # the edge units without resource sharing (the "s" modes turn it on globally): X_L2's xmin/xmax/xl adders and
+  # X_E's dx sum are in exclusive states, and sharing one chain put the vertex RAM's compare in front of dx's adder
+  # (#2041 1asR: u_vtx vm_q[1] -> LessThan5 -> xmax -> Add10 -> di -> Add18 -> dx[30], -0.007 ns at slow 0C)
+  echo 'set_instance_assignment -name AUTO_RESOURCE_SHARING OFF -to "*|gpu3d_edge:*"'
+  # nds_pll_ds's main clocks on the first output counters (the Pocket Saturn core's lock: Y4-Y8 add ~0.55 ns of
+  # insertion delay, skew on every crossing): clk_sys (general[5]) on Y0, clk_mem (general[1]) on Y2; #1983 had
+  # clk_sys on Y5. The PSRAM pin paths cross clk_sys -> clk_mem (comb5: 15 of 18 fits failed there)
+  echo 'set_location_assignment PLLOUTPUTCOUNTER_X54_Y0_N1 -to "core_top:ic|nds_pll_ds:core_pll|altera_pll:pll|general[5].gpll~PLL_OUTPUT_COUNTER"'
+  echo 'set_location_assignment PLLOUTPUTCOUNTER_X54_Y2_N1 -to "core_top:ic|nds_pll_ds:core_pll|altera_pll:pll|general[1].gpll~PLL_OUTPUT_COUNTER"'
   case "$qmode" in
     *a*) echo 'set_global_assignment -name OPTIMIZATION_MODE "AGGRESSIVE AREA"' ;;
     *p*) echo 'set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"'
@@ -230,6 +246,16 @@ foreach c {cram0 cram1} n {chip0 chip1} {
 # fixed by the protocol, not by placement
 set_false_path -to [get_ports "sram_a\[*\] sram_dq\[*\] sram_oe_n sram_we_n sram_ub_n sram_lb_n"]
 set_false_path -from [get_ports "sram_dq\[*\]"]
+# The audio interpolator (rtl/pocket/nds_audio_interp.sv) loads p_l/p_r from the mixer's out_l/out_r only
+# with in_pre (sound out_pre: st == S_OUT && cnt == 0); out_l/out_r change only at cnt == 1 / 2 (rtl/sound/
+# sound.sv), so p_l/p_r never capture at an edge where their source changes. Quartus packs p_l/p_r into the
+# DSP's AY input registers, whose clock arrives ~0.52 ns after the LAB flops', and duplicates out_l next to
+# the DSP: a 0.44 ns path the router could not pad (#2037 1asR fast corner: dac_l[4]~_Duplicate_1 ->
+# p_l[10] -0.082 ns hold). -hold 1 checks hold against the edge before, which that enable makes safe
+# (nds_audio_interp's simulation check: in_l never changes the clock after an in_pre load).
+set ai_src [get_registers "*|sound:g_snd.u_snd|out_l\[*\]* *|sound:g_snd.u_snd|out_r\[*\]* *|sound:g_snd.u_snd|dac_l\[*\]* *|sound:g_snd.u_snd|dac_r\[*\]*"]
+set ai_dst [get_registers "*|nds_audio_interp:audio_interp|p_l\[*\] *|nds_audio_interp:audio_interp|p_r\[*\]"]
+set_multicycle_path -hold 1 -from $ai_src -to $ai_dst
 # nds_psram (rtl/pocket/nds_psram.sv): main RAM's held request fields
 # (b_word/b_wdata/b_be, clk_sys) are read on clk_mem only in the sequencer's
 # WR/RD state, after the IDLE edge that sees req_valid, raised on the first

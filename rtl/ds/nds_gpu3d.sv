@@ -34,6 +34,7 @@ module nds_gpu3d
     parameter bit TC_FAST = 0,
     parameter bit TC_MIF2 = 0,
     parameter int TC_WAYS = 1,  // texture cache ways (1 or 2: 2^TL sets each)
+    parameter int TC_V2W = 1,   // TC_V2: nds_g3d_cache2 WAYS (1, 2, 4) at the same size (2^TL lines)
     // TC_V2: nds_g3d_cache2 for both (direct mapped; scanner, two blocks in
     // flight; TC_FAST / TC_MIF2 / TC_WAYS unused). Pixels unchanged
     parameter bit TC_V2 = 0,
@@ -68,8 +69,13 @@ module nds_gpu3d
     parameter bit LB2 = 0,      // gpu3d_raster LB2: line buffers as two RAMs per layer (2:1 read muxes)
     parameter bit LOV = 0,      // gpu3d_raster LOV: the next line starts while this one's pixels drain
     parameter bit EDIV4 = 0,    // gpu3d_raster EDIV4: the edge's perspective divider four bits a clock
+    parameter bit SPO = 0,      // gpu3d_raster SPO: the walker loads a span without waiting for P0-P13 to empty
+    parameter int SPO_SL = 4,   // ... its descriptor slots (gpu3d_raster SPO_SL)
+    parameter bit SPOG = 0,     // ... or its descriptor through registers per pair of stages (gpu3d_raster SPOG)
+    parameter int SPOG_N = 2,   // ... stages per group (gpu3d_raster SPOG_N)
     parameter bit EDGE2 = 0,    // gpu3d_raster EDGE2: a second edge unit (a polygon's two edges at once)
     parameter bit EP2 = 0,      // gpu3d_raster EP2: the edge unit as two stages (two edges at once)
+    parameter bit FDB = 0,      // gpu3d_raster FDB (EP2): the input stage one polygon ahead of stage 1
     // RING: the 3D line ring in SDRAM (nds_g3d_ring on the rg_* ports, a 46-line
     // lead) instead of the 8 lines on chip (u_ring)
     parameter bit RING = 0,
@@ -101,6 +107,8 @@ module nds_gpu3d
     parameter bit STORE_SD = 1'b0,
     parameter bit GX_SPILL = 1'b0, // gpu3d_geom SPILL: GX entries beyond the on-chip 512 spill to SDRAM (shares the rg_* ports)
     parameter bit GX_GATH16 = 1'b0, // gpu3d_gxfront GATH16: the spill's gather 16 entries deep
+    parameter bit GX_ENGM10K = 1'b1, // gpu3d_geom ENG_TM10K: the engine's VC and VOC tables in M10K (0: MLAB, -2 M10K)
+    parameter bit VYS_M10K = 1'b1,   // gpu3d_front VYS_M10K: the vertex y table in an M10K (0: MLAB, -1 M10K)
     parameter int GX_SPAW = 12,     // gpu3d_gxfront SP_AW: the spill ring 2^GX_SPAW entries (8 bytes each) in SDRAM
     parameter bit DX_SKID = 1'b0,  // a second posted DMA_GX word waits in a skid register while g_* waits for the front
     // the texture and palette caches' tag stores double-pumped on clk_2x (nds_lcache PUMP: 2 -> 1 M10K each)
@@ -109,8 +117,14 @@ module nds_gpu3d
     // for its sort output (at most SWM clocks) instead of the swap waiting for the next VBlank (below)
     parameter bit SWHOLD = 1'b0,
     parameter bit SWPC = 1'b0,      // SWHOLD: a late sort runs once the started frame is drawn, not at the next VBlank
+    // LMARK (debug cards only): a late 3D line shows an opaque colour by cause instead of the rear plane: red, the
+    // raster not done and the frame start held (SWHOLD); yellow, the raster not done, the frame started at line
+    // 215; green, the raster done but the ring could not deliver it (RING); magenta, a skipped frame (RESTART 0)
+    parameter bit LMARK = 1'b0,
     // SSL: nds_g3d_store SL, log2 pool slots (the most polygons on one line: MKDS race intro 252-260)
     parameter int SSL = 8,
+    parameter int SCL = 10,     // nds_g3d_store CL, log2 pool vertex chunks (ff4-newgame: 1,084 vertices on one line)
+    parameter bit SDROP = 0,    // nds_g3d_store DROP: a line's arrival the pool can't hold is dropped, not the frame (item 16)
     // RLEAD (RING): nds_g3d_ring LEAD, the lines the raster may run ahead of the composed line (the DS's 48-line buffer: 46)
     parameter int RLEAD = 46
 ) (
@@ -185,6 +199,11 @@ module nds_gpu3d
                                         // engine held by the store, swap built, entry executed, fetcher
                                         // waiting for the loader, loader waiting for the PSRAM grant
     output logic [31:0] diag_g_val,     // {polygons, vertices} at the last swap built
+    // the swap's display path (nds_top G3D_SWROUTE): the DS model takes a swap at the VBlank, the engine's sort of a
+    // swap ends (the store builds that bank), a frame starts (it draws the newest bank)
+    output logic        ev_swtake,
+    output logic        ev_swdone,
+    output logic        ev_frgo,
     output logic [15:0] diag_g_used,    // most entry-RAM entries in use in the last frame
     output logic        diag_s_start,   // the store's PSRAM read granted
     output logic        diag_s_stop,    // its first beat
@@ -308,7 +327,16 @@ module nds_gpu3d
     logic         fg_vb;                // a frame started since the VBlank (frame_go, below)
     logic         fg_pend;              // line 215 has come, the frame start waits for sw_busy
     wire          fg_req = (line215 || fg_pend) && rend_en && geom_en;
-    wire          fg_hold = SWHOLD && (sw_busy || st_bld) && sw_hok;
+`ifndef ALTERA_RESERVED_QIS
+    // +fgdelay=N (simulation): every frame start waits N lines (4,260 clk) past line 215, as a held one would
+    int fgd_n; logic [20:0] fgd_c;
+    initial if (!$value$plusargs("fgdelay=%d", fgd_n)) fgd_n = 0;
+    always_ff @(posedge clk) fgd_c <= line215 ? 21'd0 : fgd_c + (fgd_c[20] ? 21'd0 : 21'd1);
+    wire          fg_simhold = fgd_n != 0 && (line215 || 32'(fgd_c) < fgd_n * 4260);   // (the count restarts after line215)
+`else
+    wire          fg_simhold = 1'b0;
+`endif
+    wire          fg_hold = (SWHOLD && (sw_busy || st_bld) && sw_hok) || fg_simhold;
     wire          fg_now = fg_req && !fg_hold;     // the frame starts (line215 && rend_en && geom_en without SWHOLD)
     always_ff @(posedge clk) fg_pend <= !rst && fg_req && fg_hold;
     // SWPC: once the frame has started, a late sort may run as soon as the store has drawn that frame (st_draw
@@ -347,13 +375,13 @@ module nds_gpu3d
     logic [23:0] q_waddr, q_raddr;
     logic [31:0] q_wdata;
     // the divider on clk_2x where clk_2x runs (PUMP)
-    gpu3d_geom #(.USORT(GX_USORT), .LUNIT(GX_LUNIT), .VFIN(GX_VFIN), .FF(GX_FF), .GX_PRE(1'b1), .DIV_P2X(1'b0), .SPILL(GX_SPILL), .GATH16(GX_GATH16), .SP_AW(GX_SPAW)) u_geom (
+    gpu3d_geom #(.USORT(GX_USORT), .LUNIT(GX_LUNIT), .VFIN(GX_VFIN), .FF(GX_FF), .GX_PRE(1'b1), .DIV_P2X(1'b0), .SPILL(GX_SPILL), .GATH16(GX_GATH16), .SP_AW(GX_SPAW), .ENG_TM10K(GX_ENGM10K)) u_geom (
         .clk, .clk_2x, .rst, .tick, .geom_en, .vblank,
         .io_req(g_req), .io_we(g_we), .io_be(g_be), .io_addr(g_addr), .io_wdata(g_wdata), .io_wpre(g_wpre),
         .io_rdata(g_rdata), .io_ack(g_ack), .io_wait(g_wait),
         .irq_gxfifo, .dma_gx_low, .gx_stall(), .ovf_set,
         .po_valid, .po_ready, .s_draw, .po_type, .po_data, .po_index, .po_wv, .po_wk, .po_wd,
-        .so_we, .so_pos, .so_idx, .so_done, .so_count, .sw_busy,
+        .so_we, .so_pos, .so_idx, .so_done, .so_count, .sw_busy, .sw_take(ev_swtake),
         .dbg_stall(), .dbg_apply(), .dbg_upc(), .dbg_flush(), .dbg_idle(g_idle), .dbg_gxstat(),
         .dbg_npoly(g_npoly), .dbg_nvert(g_nvert), .dbg_eq_bad(), .diag_ev(g_dev), .diag_used(g_dused),
         .sp_wreq(s_wreq), .sp_waddr(s_waddr), .sp_wdata(s_wdata), .sp_wack(s_wack), .sp_wdrained(rg_wdrained), .sp_rreq(s_rreq), .sp_raddr(s_raddr),
@@ -380,7 +408,7 @@ module nds_gpu3d
     wire          r_abort = RESTART && fg_now && r_busy;
     generate if (EXT_STORE != 0) begin : g_ext
         // full capacity, in PSRAM (nds_g3d_store)
-        nds_g3d_store #(.SL(SSL)) u_store (.clk, .rst,
+        nds_g3d_store #(.SL(SSL), .CL(SCL), .DROP(SDROP)) u_store (.clk, .rst,
             .po_valid, .po_ready, .po_type, .po_data, .po_index, .po_wv, .po_wk, .po_wd,
             .so_we, .so_pos, .so_idx, .so_done, .so_count, .drawing(st_draw), .lists_bld(st_bld),
             .frame_go, .abort(r_abort), .diag_ld(st_diag), .ps_line_req, .ps_line_y, .y_lim, .ps_valid, .ps_ready, .ps_type, .ps_data,
@@ -525,6 +553,8 @@ module nds_gpu3d
                               dd_t[0], dd_t[1], dd_t[2], dd_t[3], dd_t[4], dd_t[5], dd_t[6], dd_t[7]);
 `endif
     always_ff @(posedge clk) frame_go <= !rst && fg_now && (RESTART || !r_busy);
+    assign ev_swdone = so_done;
+    assign ev_frgo = frame_go;
     always_ff @(posedge clk) fg_vb <= !rst && !vblank && (fg_vb || frame_go);
     // the caches answer in order: those for requests made before a restart
     // (outstanding when it comes) go nowhere
@@ -557,8 +587,8 @@ module nds_gpu3d
     assign r_ps_valid = ps_valid && stall_en;
     assign ps_ready   = r_ps_ready && stall_en;
     // AREA=0: full rate; the half-rate option measured no area gain (#187)
-    gpu3d_raster #(.AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
-                   .FEAT_EDGE(FEAT_EDGE), .FEAT_SHADOW(FEAT_SHADOW), .FEAT_LOWER(FEAT_LOWER), .TR3(TR3 && !FEAT_EDGE && !LB2)) u_raster (
+    gpu3d_raster #(.AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
+                   .FEAT_EDGE(FEAT_EDGE), .FEAT_SHADOW(FEAT_SHADOW), .FEAT_LOWER(FEAT_LOWER), .TR3(TR3 && !FEAT_EDGE && !LB2), .VYS_M10K(VYS_M10K)) u_raster (
         .clk, .rst(rst || r_abort),
         .dispcnt(r_dispcnt), .alpharef(r_alpharef), .clear_attr1(r_clear_attr1), .clear_depth(r_clear_depth),
         .fog_color(r_fog_color), .fog_offset(r_fog_offset),
@@ -576,7 +606,7 @@ module nds_gpu3d
     logic [13:0] tc_blk, pc_blk;
     localparam int CQL = TXD == 0 || 2 * (TXD + 3) <= 16 ? 4 : 5;
     generate if (TC_V2) begin : g_c2
-        nds_g3d_cache2 #(.AW(19), .LW(TL), .QL(CQL), .NF(TC_NF), .PUMP(PUMP)) u_tc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
+        nds_g3d_cache2 #(.AW(19), .LW(TL), .QL(CQL), .NF(TC_NF), .PUMP(PUMP), .WAYS(TC_V2W)) u_tc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
             .req(tex_req), .addr(tex_addr), .valid(tc_v), .data(tex_data),
             .b_req(tc_req), .b_blk(tc_blk), .b_ack(tc_ack), .b_rvalid(tc_rv), .b_rdata(t_rdata));
         nds_g3d_cache2 #(.AW(17), .LW(PL), .QL(CQL), .SCAN(TC_PSCAN), .PUMP(PUMP)) u_pc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
@@ -749,6 +779,9 @@ module nds_gpu3d
     always_ff @(posedge clk) lv_skip <= !rst && fg_now && !(RESTART || !r_busy);
     logic        lv_on, lv_go, l3d_rear;
     wire         ring_have;
+    // LMARK: the frame start was held past line 215; the composed line's cause (2'b00: on time)
+    logic        lm_held;
+    logic [2:0]  lm_why;              // 1 yellow, 2 red, 3 green, 4 magenta
     always_ff @(posedge clk) begin
         lv_go <= !rst && l3d_go;
         if (rst) begin lv_fin <= 9'd0; lv_lo <= 9'd0; lv_on <= 1'b0; l3d_rear <= 1'b0; end
@@ -760,11 +793,25 @@ module nds_gpu3d
                                              (RING ? !ring_have
                                                    : {1'b0, l3d_line} >= lv_fin && !(px_valid && px_x == 8'hFF && px_y == l3d_line)));
         end
+        if (LMARK) begin
+            if (rst) begin lm_held <= 1'b0; lm_why <= 3'd0; end
+            else begin
+                if (fg_now) lm_held <= fg_pend;
+                if (lv_go) lm_why <= {1'b0, l3d_line} < lv_lo ? 3'd4 :
+                                     {1'b0, l3d_line} >= lv_fin && !(px_valid && px_x == 8'hFF && px_y == l3d_line) ?
+                                         (lm_held ? 3'd2 : 3'd1) : 3'd3;
+            end
+        end else begin lm_held <= 1'b0; lm_why <= 3'd0; end
     end
     function automatic [5:0] cexp5(input [4:0] c);   // as gpu3d_raster's exp5
         cexp5 = (c != 0) ? {c, 1'b1} : 6'd0;
     endfunction
-    wire  [22:0] rear_q = {r_clear_attr1[20:16], cexp5(r_clear_attr1[14:10]), cexp5(r_clear_attr1[9:5]), cexp5(r_clear_attr1[4:0])};
+    // LMARK: {a5, b6, g6, r6}
+    wire  [22:0] lm_q = lm_why == 3'd4 ? {5'd31, 6'd63, 6'd0, 6'd63} :     // magenta
+                        lm_why == 3'd1 ? {5'd31, 6'd0, 6'd63, 6'd63} :     // yellow
+                        lm_why == 3'd2 ? {5'd31, 6'd0, 6'd0, 6'd63} :      // red
+                                         {5'd31, 6'd0, 6'd63, 6'd0};       // green
+    wire  [22:0] rear_q = LMARK ? lm_q : {r_clear_attr1[20:16], cexp5(r_clear_attr1[14:10]), cexp5(r_clear_attr1[9:5]), cexp5(r_clear_attr1[4:0])};
 `ifdef G3D_NOREAR
     wire  [22:0] l3d_q = ring_q;           // (simulation mutant: late lines show the stale slot)
 `else
@@ -1306,7 +1353,14 @@ module nds_g3d_cache2 #(
     // scanner has nothing to look up, its block asked for on a miss
     parameter bit PF = 0,
     // PUMP: the tag store's two copies as one block double-pumped on clk2 (nds_lcache PUMP)
-    parameter bit PUMP = 0
+    parameter bit PUMP = 0,
+    // WAYS (1, 2, 4): set-associative at the same size (2^LW lines): a tag store and a data RAM per way, looked
+    // up in parallel; a new block goes into an invalid way of its set, else a pseudo-random one (an LFSR: as
+    // good as LRU on the bench's texel traces, and no state per set). 1: direct mapped as before
+    parameter int WAYS = 1,
+    // TSHARE (WAYS > 1): one tag store controller for every way (nds_lcache_n: generation, scrubber, masks shared;
+    // synthesis #1711: four nds_lcache repeat ~90 ALUTs and ~80 registers each); 0: an nds_lcache a way
+    parameter bit TSHARE = 1
 ) (
     input  logic          clk,
     input  logic          clk2,         // PUMP: 2 x clk, phase 0
@@ -1324,7 +1378,10 @@ module nds_g3d_cache2 #(
     input  logic          pf_v,
     input  logic [AW-1:0] pf_a
 );
-    localparam int TW = AW - 5 - LW;
+    localparam int WB = WAYS > 1 ? $clog2(WAYS) : 0;
+    localparam int WN = WB > 0 ? WB : 1;
+    localparam int SB = LW - WB;        // set index bits
+    localparam int TW = AW - 5 - SB;
     localparam int BW = AW - 5;         // block address bits
     localparam int QN = QL + 1;
     logic [QL-1:0] rp, wp;
@@ -1337,12 +1394,23 @@ module nds_g3d_cache2 #(
     gpu3d_lram #(.W(AW - 1), .AW(QL)) u_q0 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(rp), .rdata(h));
     gpu3d_lram #(.W(AW - 1), .AW(QL)) u_q1 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(QL'(rp + 1'b1)), .rdata(h1));
     wire  [BW-1:0] hb = h[AW-1:5];
-    wire  [LW-1:0] line = h[LW+4:5];
-    logic          vld_q, tc_busy;
-    logic [TW-1:0] tag_q;
-    logic [63:0]   d_q;
-    logic          mk_q;            // the lookup's line was being filled
-    wire           hit = vld_q && !mk_q && tag_q == h[AW-1:LW+5];
+    wire  [SB-1:0] line = h[SB+4:5];    // the head's set
+    logic [WAYS-1:0] vld_q, tc_bw, mk_q, s_vw, hit_w;   // per way: valid, tag store busy, being filled
+    wire           tc_busy = |tc_bw;
+    logic [TW-1:0] tag_q [0:WAYS-1];
+    logic [TW-1:0] s_tagw [0:WAYS-1];
+    logic [63:0]   d_w [0:WAYS-1];
+    // the head's halfword: each way's from its row first (h is a register), then the hit way's (WAYS > 1: a
+    // 16-bit select after the tag compares, not a 64-bit one)
+    logic [15:0]   d_q;
+    always_comb begin
+        d_q = '0;
+        for (int w = 0; w < WAYS; w++) begin
+            hit_w[w] = vld_q[w] && !mk_q[w] && tag_q[w] == h[AW-1:SB+5];
+            if (hit_w[w]) d_q = d_w[w][h[2:1]*16 +: 16];
+        end
+    end
+    wire           hit = |hit_w;
     wire           nxt  = st == C_LOOK && hit && n >= QN'(2) && !tc_busy;
     wire           b_go = req && !tc_busy && ((st == C_IDLE && n == '0) || (st == C_LOOK && hit && n == QN'(1)));
     wire  [AW-1:1] ha   = nxt ? h1 : b_go ? addr[AW-1:1] : h;
@@ -1352,6 +1420,8 @@ module nds_g3d_cache2 #(
     // [0] up; its beats fb) and r (asked for); NF of them at most
     logic [NF-1:0] f_v, f_st;       // valid, VRAM written since it was asked for
     logic [BW-1:0] f_a [0:NF-1];
+    logic [WN-1:0] f_w [0:NF-1];    // its way
+    logic [WN-1:0] r_w;
     logic [1:0]    fb;
     logic          r_v;
     logic [BW-1:0] r_a;
@@ -1362,15 +1432,26 @@ module nds_g3d_cache2 #(
         for (int i = 0; i < NF; i++) o |= f_v[i] && f_a[i] == b;
         return o;
     endfunction
-    function automatic logic lbusy(input logic [LW-1:0] l);
+    function automatic logic lbusy(input logic [SB-1:0] l);    // (WAYS > 1: any way of the set)
         logic o;
-        o = r_v && r_a[LW-1:0] == l;
-        for (int i = 0; i < NF; i++) o |= f_v[i] && f_a[i][LW-1:0] == l;
+        o = r_v && r_a[SB-1:0] == l;
+        for (int i = 0; i < NF; i++) o |= f_v[i] && f_a[i][SB-1:0] == l;
         return o;
     endfunction
     wire           f_last = b_rvalid && fb == 2'd3;
     wire  [NF-1:0] fv_a = f_last ? f_v >> 1 : f_v;         // after this cycle's pop
-    wire  [LW-1:0] f_line = f_a[0][LW-1:0];
+    wire  [SB-1:0] f_line = f_a[0][SB-1:0];
+    // a new block's way: the first invalid way of its set (by the lookup's or the check's valid bits), else
+    // the LFSR's; the head's is taken at its lookup (C_NEED asks later)
+    logic [15:0]   lfsr;
+    always_ff @(posedge clk) lfsr <= rst ? 16'hACE1 : {lfsr[14:0], lfsr[15] ^ lfsr[13] ^ lfsr[12] ^ lfsr[10]};
+    function automatic logic [WN-1:0] victim(input logic [WAYS-1:0] v);
+        logic [WN-1:0] o;
+        o = WN'(lfsr);
+        for (int w = WAYS - 1; w >= 0; w--) if (!v[w]) o = WN'(w);
+        return o;
+    endfunction
+    logic [WN-1:0] h_w;             // the head's way to fill, from its last lookup
     wire           filling = f_v[0] && (b_rvalid || fb != 2'd0);
 
     // the scanner: sq the next entry to look up (rp < sq <= wp), sa the one
@@ -1383,8 +1464,7 @@ module nds_g3d_cache2 #(
     end else begin : g_nqs
         assign hs = '0;
     end endgenerate
-    logic          s_v;
-    logic [TW-1:0] s_tag;
+    logic          s_hit;           // the scanned block is in some way
     // the head asks first (its miss now, or waiting for room)
     wire           s_free = !r_v && slot && st != C_NEED && !(st == C_LOOK && !hit);
     wire           s_go  = SCAN && s_free && QN'(QL'(sq - rp)) < n && !tc_busy;
@@ -1394,19 +1474,59 @@ module nds_g3d_cache2 #(
     wire           p_go  = PF && SCAN && s_free && !s_go && pq_n != 3'd0 && !tc_busy;
     wire  [AW-1:1] s_in  = p_go ? {pq[0], 4'd0} : hs;
     // (a block on the way holds its line, so !lbusy covers !onway for sa)
-    wire           s_req = s_q && s_free && !(s_v && s_tag == sa[AW-1:LW+5]) &&
-                           sa[LW+4:5] != line && !lbusy(sa[LW+4:5]);
+    // WAYS > 1: the check's words (PUMP: taken half a clock late) go into registers at this edge and are
+    // compared the next clock, so the scanner asks a clock later (#1723: hb -> r_a -0.872 ns with four compares
+    // and the victim in half a clock); a block that lands meanwhile may be asked for again into another way
+    // (both copies hold its data). WAYS 1: as before
+    logic          s_q2;
+    logic [AW-1:1] sa2;
+    logic [WAYS-1:0] s_vw2;
+    logic [TW-1:0] s_tagw2 [0:WAYS-1];
+    always_ff @(posedge clk) begin
+        s_q2 <= !rst && s_q; sa2 <= sa; s_vw2 <= s_vw;
+        for (int w = 0; w < WAYS; w++) s_tagw2[w] <= s_tagw[w];
+    end
+    wire           s_qx = WAYS > 1 ? s_q2 : s_q;
+    wire  [AW-1:1] sx   = WAYS > 1 ? sa2 : sa;
+    wire  [WAYS-1:0] s_vx = WAYS > 1 ? s_vw2 : s_vw;
+    always_comb begin
+        s_hit = 1'b0;
+        for (int w = 0; w < WAYS; w++) s_hit |= s_vx[w] && (WAYS > 1 ? s_tagw2[w] : s_tagw[w]) == sx[AW-1:SB+5];
+    end
+    wire           s_req = s_qx && s_free && !s_hit &&
+                           sx[SB+4:5] != line && !lbusy(sx[SB+4:5]);
 
-    gpu3d_ram #(.W(64), .AW(LW + 2)) u_d (.clk, .we(b_rvalid), .waddr({f_line, fb}), .wdata(b_rdata),
-        .raddr({ha[LW+4:5], ha[4:3]}), .rdata(d_q));
-    nds_lcache #(.LB(LW), .TW(TW), .G(3), .CHECK(SCAN ? 1 : 0), .PUMP(PUMP && SCAN)) u_t (.clk, .clk2, .rst,
-        .l_en, .l_idx(ha[LW+4:5]), .l_v(), .l_vn(vld_q), .l_tag(tag_q),
-        .c_idx(s_in[LW+4:5]), .c_v(s_v), .c_tag(s_tag),
-        .f_busy(1'b0), .f_idx(f_line), .f_end(f_last), .f_ok(!f_st[0]), .f_tag(f_a[0][BW-1:LW]),
-        .inv(1'b0), .inv_idx('0), .inv_all(flush), .busy(tc_busy));
+    genvar gw;
+    generate for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_way
+        wire mine = WAYS == 1 || f_w[0] == WN'(gw);     // the block being filled goes into this way
+`ifdef G3D_TC2_MUT
+        // (mutant: a fill's data goes into the next way, its tag into the right one)
+        wire dmine = WAYS == 1 || f_w[0] == WN'((gw + 1) % WAYS);
+`else
+        wire dmine = mine;
+`endif
+        gpu3d_ram #(.W(64), .AW(SB + 2)) u_d (.clk, .we(b_rvalid && dmine), .waddr({f_line, fb}), .wdata(b_rdata),
+            .raddr({ha[SB+4:5], ha[4:3]}), .rdata(d_w[gw]));
+        if (!(WAYS > 1 && TSHARE && SCAN)) begin : g_t
+        nds_lcache #(.LB(SB), .TW(TW), .G(3), .CHECK(SCAN ? 1 : 0), .PUMP(PUMP && SCAN)) u_t (.clk, .clk2, .rst,
+            .l_en, .l_idx(ha[SB+4:5]), .l_v(), .l_vn(vld_q[gw]), .l_tag(tag_q[gw]),
+            .c_idx(s_in[SB+4:5]), .c_v(s_vw[gw]), .c_tag(s_tagw[gw]),
+            .f_busy(1'b0), .f_idx(f_line), .f_end(f_last && mine), .f_ok(!f_st[0]), .f_tag(f_a[0][BW-1:SB]),
+            .inv(1'b0), .inv_idx('0), .inv_all(flush), .busy(tc_bw[gw]));
+        end
+        always_ff @(posedge clk) mk_q[gw] <= filling && mine && f_line == ha[SB+4:5];
+    end endgenerate
+    generate if (WAYS > 1 && TSHARE && SCAN) begin : g_tsh
+        logic tb;
+        nds_lcache_n #(.LB(SB), .TW(TW), .G(3), .WAYS(WAYS), .PUMP(PUMP)) u_t (.clk, .clk2, .rst,
+            .l_en, .l_idx(ha[SB+4:5]), .l_vn(vld_q), .l_tag(tag_q),
+            .c_idx(s_in[SB+4:5]), .c_v(s_vw), .c_tag(s_tagw),
+            .f_idx(f_line), .f_end(f_last), .f_way(f_w[0][$clog2(WAYS)-1:0]), .f_ok(!f_st[0]), .f_tag(f_a[0][BW-1:SB]),
+            .inv_all(flush), .busy(tb));
+        assign tc_bw = {WAYS{tb}};
+    end endgenerate
     assign b_req = r_v;
     assign b_blk = 14'(r_a);
-    always_ff @(posedge clk) mk_q <= filling && f_line == ha[LW+4:5];
     always_ff @(posedge clk) begin
         valid <= 1'b0;
         if (rst) begin
@@ -1418,13 +1538,13 @@ module nds_g3d_cache2 #(
             case (st)
                 C_IDLE: if ((n != '0 && !tc_busy) || b_go) st <= C_LOOK;   // RAMs read the head this cycle
                 C_LOOK: if (hit) begin
-                    valid <= 1'b1; data <= d_q[h[2:1]*16 +: 16]; rp <= rp + 1'b1;
+                    valid <= 1'b1; data <= d_q; rp <= rp + 1'b1;
                     st <= nxt || b_go ? C_LOOK : C_IDLE;
                 end else if (onway(hb)) st <= C_WAIT;
-                else if (!r_v && slot) begin r_v <= 1'b1; r_a <= hb; st <= C_WAIT; end
-                else st <= C_NEED;
+                else if (!r_v && slot) begin r_v <= 1'b1; r_a <= hb; r_w <= victim(vld_q); st <= C_WAIT; end
+                else begin h_w <= victim(vld_q); st <= C_NEED; end
                 C_NEED: if (onway(hb)) st <= C_WAIT;
-                        else if (!r_v && slot) begin r_v <= 1'b1; r_a <= hb; st <= C_WAIT; end
+                        else if (!r_v && slot) begin r_v <= 1'b1; r_a <= hb; r_w <= h_w; st <= C_WAIT; end
                 default: if (!onway(hb)) st <= C_IDLE;                 // C_WAIT: landed, look it up again
             endcase
             // the scan stays behind the head
@@ -1432,18 +1552,18 @@ module nds_g3d_cache2 #(
             if (s_go) begin sa <= hs; sq <= sq + 1'b1; end
             if (p_go) sa <= s_in;
             if (st == C_LOOK && hit && sq == QL'(rp + 1'b1) && !s_go) sq <= sq + 1'b1;
-            if (s_req) begin r_v <= 1'b1; r_a <= sa[AW-1:5]; end
+            if (s_req) begin r_v <= 1'b1; r_a <= sx[AW-1:5]; r_w <= victim(s_vx); end
             // in flight: pop the oldest at its last beat, push r at its ack
             if (b_rvalid) fb <= fb + 2'd1;
             if (b_ack) r_v <= 1'b0;
-            if (f_last) for (int i = 0; i < NF - 1; i++) begin f_a[i] <= f_a[i + 1]; f_st[i] <= f_st[i + 1]; end
+            if (f_last) for (int i = 0; i < NF - 1; i++) begin f_a[i] <= f_a[i + 1]; f_w[i] <= f_w[i + 1]; f_st[i] <= f_st[i + 1]; end
             // the asked-for block goes into the next free slot every clock it is
             // asked for, not only at its ack: the slot is not valid until f_v
             // takes it at the ack, and r_a holds meanwhile, so the ack (late:
             // the block port's arbiter, 2D first) only sets f_v (timing)
             if (r_v)
                 for (int i = 0; i < NF; i++)
-                    if (!fv_a[i] && (i == 0 || fv_a[(i == 0) ? 0 : i - 1])) begin f_a[i] <= r_a; f_st[i] <= flush; end
+                    if (!fv_a[i] && (i == 0 || fv_a[(i == 0) ? 0 : i - 1])) begin f_a[i] <= r_a; f_w[i] <= r_w; f_st[i] <= flush; end
             f_v <= b_ack ? (fv_a << 1) | NF'(1) : fv_a;
             if (flush) f_st <= '1;
         end

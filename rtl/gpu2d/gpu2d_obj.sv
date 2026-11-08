@@ -59,11 +59,16 @@ module gpu2d_obj
     logic        stall;
 
     // ---------------------------------------------------------------- OAM entry decode
+    // p - 1 for a power of two p (the OBJ sizes): the ones below its bit
+    function automatic logic [6:0] ones_below(input logic [6:0] p);
+        for (int i = 0; i < 7; i++) ones_below[i] = |(p >> (i + 1));
+    endfunction
     logic [15:0] a0, a1, a2;
     logic [1:0]  e_type;
     logic        e_win;
     logic [6:0]  e_w, e_h;       // 8..64
     logic [7:0]  e_bw, e_bh;     // bound size
+    logic [7:0]  e_bwm, e_bhm;   // bound size - 1 (every size is a power of two: a ones mask)
     logic [7:0]  e_yy, e_ym, e_ypos;
     logic signed [9:0] e_xpos;
     logic        e_on, e_skip;
@@ -88,11 +93,17 @@ module gpu2d_obj
         endcase
         e_bw = e_type == 2'd3 ? {e_w, 1'b0} : {1'b0, e_w};
         e_bh = e_type == 2'd3 ? {e_h, 1'b0} : {1'b0, e_h};
+        e_bwm = e_type == 2'd3 ? {ones_below(e_w), 1'b1} : {1'b0, ones_below(e_w)};
+        e_bhm = e_type == 2'd3 ? {ones_below(e_h), 1'b1} : {1'b0, ones_below(e_h)};
         e_yy = j_line - a0[7:0];
         e_xpos = {a1[8], a1[8:0]};
-        e_on = e_type != 2'd2 && {1'b0, e_yy} < {1'b0, e_bh} && (e_xpos + $signed({2'b0, e_bw})) > 0;
+        // (power-of-two sizes: y < bh is a zero test of the bits at and above
+        // bh, and xpos + bw > 0 for a negative xpos is xpos >= -bw (the bits
+        // at and above bw all ones) and xpos != -bw)
+        e_on = e_type != 2'd2 && (e_yy & ~e_bhm) == 8'd0
+               && (!e_xpos[9] || ((a1[7:0] | e_bwm) == 8'hFF && (a1[7:0] & e_bwm) != 8'd0));
         e_ym = st.obj_mos_line - a0[7:0];
-        e_ypos = (MOSAIC && a0[12] && !e_win) ? ({1'b0, e_ym} >= {1'b0, e_bh} ? 8'd0 : e_ym) : e_yy;
+        e_ypos = (MOSAIC && a0[12] && !e_win) ? ((e_ym & ~e_bhm) != 8'd0 ? 8'd0 : e_ym) : e_yy;
         // bitmap OBJs with alpha 0, and bitmap OBJs in the reserved mode, draw nothing
         e_skip = !e_win && a0[11:10] == 2'd3 && (a2[15:12] == 4'd0 || (st.dispcnt[6] && st.dispcnt[5]));
     end
@@ -168,7 +179,7 @@ module gpu2d_obj
         else if (vram_wr) dirty <= 1'b1;
         else if (cclear) dirty <= 1'b0;
     blk_t        t_ablk, e_ablk;
-    logic [1:0]  t_aword, e_aword;
+    logic [1:0]  t_aword, e_aword, t_aword_h;
     logic [63:0] t_q, e_q;
     logic        t_hit, e_hit;
     blk_t        t_cur, e_cur;
@@ -182,12 +193,12 @@ module gpu2d_obj
     logic           c_scrub_v;
     gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub),
         .scrub_q(c_scrub_q), .scrub_v(c_scrub_v));
-    gpu2d_cache #(.IDXW(TEX_IDXW)) u_tc (.clk, .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub[TEX_IDXW-1:0]),
-        .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword),
+    gpu2d_cache #(.IDXW(TEX_IDXW), .HALF(1)) u_tc (.clk, .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub[TEX_IDXW-1:0]),
+        .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword), .a_half(t_aword_h),
         .q(t_q), .hit(t_hit), .cur_blk(t_cur), .cur_word(t_curw),
         .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
     gpu2d_cache #(.IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .VLO(8)) u_ec (.clk, .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub[ESW-1:0]),
-        .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword),
+        .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword), .a_half(2'd0),
         .q(e_q), .hit(e_hit), .cur_blk(e_cur), .cur_word(e_curw),
         .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
 
@@ -293,7 +304,9 @@ module gpu2d_obj
             else if (o_bpp8) p0_off = {7'd0, tx[7:3], 6'd0} | {15'd0, tx[2:0]};
             else begin       p0_off = {8'd0, tx[7:3], 5'd0} | {16'd0, tx[2:1]}; p0_hi = tx[0]; end
         end else begin
-            p0_in = o_rx >= 0 && o_rx < $signed({12'd0, o_w, 8'd0}) && o_ry >= 0 && o_ry < $signed({12'd0, o_h, 8'd0});
+            // 0 <= r < size << 8, size a power of two: the bits at and above it are 0
+            p0_in = o_rx[26:15] == 12'd0 && (o_rx[14:8] & ~ones_below(o_w)) == 7'd0
+                 && o_ry[26:15] == 12'd0 && (o_ry[14:8] & ~ones_below(o_h)) == 7'd0;
             if (o_bmp)       p0_off = {9'd0, o_rx[15:8], 1'b0};
             else if (o_bpp8) p0_off = {12'd0, o_ry[10:8], 3'd0} | {7'd0, o_rx[15:11], 6'd0} | {15'd0, o_rx[10:8]};
             else begin       p0_off = {13'd0, o_ry[10:8], 2'd0} | {8'd0, o_rx[15:11], 5'd0} | {16'd0, o_rx[10:9]}; p0_hi = o_rx[8]; end
@@ -301,6 +314,7 @@ module gpu2d_obj
         p0_a = o_base + (o_aff ? arow : 18'd0) + p0_off;
         t_ablk  = {SP_OBJ, j_eng, 1'b0, 13'((p0_a & o_mask) >> 5)};
         t_aword = p0_a[4:3];
+        t_aword_h = p0_a[2:1];
     end
 
     // ---------------------------------------------------------------- P1: colour index, palette address
@@ -310,8 +324,8 @@ module gpu2d_obj
     logic        op1;
     logic [12:0] ea1;
     always_comb begin
-        b1 = t_q[p1.a[2:0]*8 +: 8];
-        h1 = t_q[p1.a[2:1]*16 +: 16];
+        b1 = p1.a[0] ? t_q[15:8] : t_q[7:0];     // (t_q: the halfword p1.a[2:1])
+        h1 = t_q[15:0];
         ci = o_bpp8 ? b1 : {4'd0, p1.hi ? b1[7:4] : b1[3:0]};
         op1 = o_bmp ? h1[15] : ci != 8'd0;
         ea1 = {o_pal, ci, 1'b0};
@@ -441,11 +455,13 @@ module gpu2d_obj
                         o_mask <= j_eng ? 18'h1FFFF : 18'h3FFFF;
                         if (e_xpos >= 0) begin
                             o_xo <= 8'd0; o_sx <= e_xpos[7:0];
-                            o_xend <= ({2'b0, e_xpos} + {2'b0, (e_type[0] ? e_bw : {1'b0, e_w})} > 10'd256)
-                                    ? 8'(10'd256 - {2'b0, e_xpos}) : (e_type[0] ? e_bw : {1'b0, e_w});
+                            // (e_bw is e_w except for double size; xpos + bw > 256: the
+                            // bits at and above bw all ones, and some below them set)
+                            o_xend <= ((e_xpos[7:0] | e_bwm) == 8'hFF && (e_xpos[7:0] & e_bwm) != 8'd0)
+                                    ? 8'(-e_xpos[7:0]) : e_bw;
                         end else begin
                             o_xo <= 8'(-e_xpos); o_sx <= 8'd0;
-                            o_xend <= e_type[0] ? e_bw : {1'b0, e_w};
+                            o_xend <= e_bw;
                         end
                         // sprite base address
                         if (!e_type[0]) begin
@@ -462,6 +478,9 @@ module gpu2d_obj
                             o_dy <= $signed({1'b0, e_ypos}) - $signed({2'b0, e_bh[7:1]});
                             o_dx_g <= a1[13:9];
                             o_k <= 3'd0;
+                            // the texture centre; O_AFF adds both products to it
+                            o_rx <= $signed({13'd0, e_w, 7'd0});
+                            o_ry <= $signed({13'd0, e_h, 7'd0});
                             os <= O_AFF;
                         end
                     end else if (n == 7'd127) os <= O_DRAIN;
@@ -472,10 +491,9 @@ module gpu2d_obj
                     // parameter k (A, B, C, D) is read at k, registered, used at k + 2
                     o_k <= o_k + 3'd1;
                     case (o_k)
-                        3'd2: begin o_pa <= m_b; o_rx <= 27'(m_p) + $signed({13'd0, o_w, 7'd0}); end
-                        3'd3: o_rx <= o_rx + 27'(m_p);
-                        3'd4: begin o_pc <= m_b; o_ry <= 27'(m_p) + $signed({13'd0, o_h, 7'd0}); end
-                        3'd5: begin o_ry <= o_ry + 27'(m_p); os <= O_DRAW; end
+                        3'd2: o_pa <= m_b;
+                        3'd4: o_pc <= m_b;
+                        3'd5: os <= O_DRAW;
                         default: ;
                     endcase
                 end
@@ -483,7 +501,6 @@ module gpu2d_obj
                     if (o_xo < o_xend) begin
                         o_xo <= o_xo + 8'd1;
                         o_sx <= o_sx + 8'd1;
-                        if (o_aff) begin o_rx <= o_rx + o_pa; o_ry <= o_ry + o_pc; end
                     end else os <= O_DRAIN;
                 end
                 O_DRAIN: if (pipe_empty) begin
@@ -493,6 +510,13 @@ module gpu2d_obj
                 default: os <= O_IDLE;
             endcase
 
+            // one adder per axis: the parameter products in O_AFF (k = 2, 3 for
+            // x, 4, 5 for y; no fill is pending there, O_DRAIN emptied the
+            // pipe), the steps PA/PC while an affine OBJ draws
+            if (os == O_AFF ? (o_k == 3'd2 || o_k == 3'd3) : (os == O_DRAW && !stall && o_aff && o_xo < o_xend))
+                o_rx <= o_rx + (os == O_AFF ? 27'(m_p) : 27'(o_pa));
+            if (os == O_AFF ? (o_k == 3'd4 || o_k == 3'd5) : (os == O_DRAW && !stall && o_aff && o_xo < o_xend))
+                o_ry <= o_ry + (os == O_AFF ? 27'(m_p) : 27'(o_pc));
             if (!stall) begin
                 p1.v <= p0_v && p0_in;
                 p1.x <= o_sx;

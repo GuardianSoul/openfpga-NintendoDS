@@ -18,6 +18,10 @@ arm7_boot:
         mov     r10, #0x04000000
         add     r9, r10, #0xF00
         ldr     sp, =0x0380FF00
+        @ (each wait loop in one 16-byte line: the ARM7's boot ROM fetches go through the fabric
+        @ (BOOT_SRAM), and a loop across two lines refetches every pass, slowing the ARM9's RAM and
+        @ VRAM clear beside it: db4b38a6 moved this loop across a line, first card read 0.55 s later)
+        .balign 16
 1:      ldr     r0, [r9, #4]            @ wait for the ARM9
         and     r1, r0, #0xFF
         cmp     r1, #1
@@ -133,6 +137,7 @@ arm7_boot:
 
         mov     r0, #2                  @ done; wait for the ARM9's answer
         str     r0, [r9, #4]
+        .balign 16
 6:      ldr     r0, [r9, #4]
         cmp     r0, #3
         bne     6b

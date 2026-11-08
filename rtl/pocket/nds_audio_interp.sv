@@ -31,5 +31,14 @@ module nds_audio_interp (
             out_r <= s_r[26:11];
         end
     end
+    // synthesis translate_off
+    // ds.sdc's -hold 1 into p_l/p_r rests on this: the sample a load takes is still there the clock after
+    reg pre_q = 0;
+    reg signed [15:0] il_q, ir_q;
+    always @(posedge clk) begin
+        pre_q <= in_pre; il_q <= in_l; ir_q <= in_r;
+        if (pre_q && (in_l != il_q || in_r != ir_q)) $error("nds_audio_interp: in_l/in_r changed the clock after an in_pre load");
+    end
+    // synthesis translate_on
 endmodule
 `default_nettype wire

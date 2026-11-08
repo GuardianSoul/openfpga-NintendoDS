@@ -5,7 +5,7 @@ itself (both CPUs, the memory system, the 2D and 3D engines, sound and the
 other hardware) was written from scratch for this core, against
 measurements of a real DS.
 
-> **Status (0.5.1, 2026-11-06): experimental.** Several big 3D games boot
+> **Status (0.5.2, 2026-11-08): experimental.** Several big 3D games boot
 > and play, with sound and saves. Some 3D effects are switched off to fit
 > the chip, the heaviest 3D scenes can run a little below full speed, and
 > some 3D scenes show line glitches. See [Pocket limitations](#pocket-limitations),
@@ -108,7 +108,7 @@ The Pocket lacks some of the DS's hardware, so these can't work:
 
 ## Known issues
 
-As of 0.5.1 (2026-11-06):
+As of 0.5.2 (2026-11-08):
 
 - **3D effects are switched off** to fit the chip: shadow polygons, toon and
   highlight shading, fog, edge marking and anti-aliasing. Games draw without
@@ -126,7 +126,7 @@ As of 0.5.1 (2026-11-06):
 
 The core's rules come from measurements on a real DS. Where the Pocket's
 memory or chip budget forces a difference, it is recorded. The main ones as
-of 0.5.1:
+of 0.5.2:
 
 - The ARM9's caches are larger than the DS's: 16 KiB instruction and
   16 KiB data, 2-way, instead of 8 and 4 KiB, 4-way. This makes up for the

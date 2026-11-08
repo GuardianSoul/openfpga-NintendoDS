@@ -7,6 +7,7 @@
 # read-ahead table (ndt 1, 2-3 streams x512) the new side's misses must total at most 90% of REF's.
 # DSROM=1 (with PACE): no .ndt but a DS header and FAT in the ROM (scpu_eq.cpp --dsrom): the new side's
 # read-ahead fields must equal the plugin's rule, and the misses criterion counts every x512 2-3 stream seed.
+# CTL=N: a controls frame every N clocks on the new side (tb_scpu_eq.sv; nds_controls FW = 1, docs/space-ctl.md).
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 PATH=${TOOLS:-build/tools/oss-cad-suite/bin}:$PATH
@@ -19,11 +20,11 @@ if [ -n "${MUTATE_FILE:-}" ]; then
     case "$MUTATE_FILE" in
     *.sv) sed -i -e "$MUTATE_EXPR" "$out/new.sv"; cmp -s rtl/pocket/nds_cart_scpu.sv "$out/new.sv" && { echo "mutation did not change it"; exit 2; } ;;
     *.c)  cp sw/scpu/cache.c "$out/cache.c"; sed -i -e "$MUTATE_EXPR" "$out/cache.c"; cmp -s sw/scpu/cache.c "$out/cache.c" && { echo "mutation did not change it"; exit 2; }
-          clang --target=riscv32 -march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -fno-builtin -fuse-ld=lld -Wl,-T,sw/scpu/link.ld sw/scpu/start.s "$out/cache.c" -o "$out/cache.elf"
+          clang --target=riscv32 -march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -fno-builtin -fuse-ld=lld -Wl,--relax-gp -Wl,-T,sw/scpu/link.ld sw/scpu/start.s "$out/cache.c" -o "$out/cache.elf"
           llvm-objcopy -O binary "$out/cache.elf" "$out/new.bin" ;;
     esac
 fi
-verilator --cc --exe --build -j 8 -O2 -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL -Wno-PINMISSING -GSLOTS="$slots" \
+verilator --cc --exe --build -j "${JOBS:-6}" -O2 -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL -Wno-PINMISSING -GSLOTS="$slots" -GCTL="${CTL:-0}" \
     --top-module tb_scpu_eq --Mdir "$out/obj" "$out/new.sv" "$out/ref.sv" rtl/serv/*.v sim/pocket/scpu_eq/tb_scpu_eq.sv \
     "$PWD/sim/pocket/scpu_eq/scpu_eq.cpp" > "$out/build.log" 2>&1 || { grep -E "%Error" "$out/build.log" | head; exit 1; }
 pass=0

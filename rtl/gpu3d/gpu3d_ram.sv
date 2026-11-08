@@ -52,9 +52,14 @@ endmodule
 
 // Small table with a combinational read (a register file in MLAB): one
 // write port, the read sees the entry as written by the last clock edge.
+// FE = 1: in M10K instead, the read address taken on the falling edge (the Saturn core's FERAM): the word is out
+// in the clock's second half, as the MLAB's asynchronous read gives it (the write at this clock's rising edge
+// seen). raddr must settle in the first half and rdata be used within the second (gxeng's u_vm: from registers,
+// into registers)
 module gpu3d_lram #(
     parameter int W  = 8,
-    parameter int AW = 2
+    parameter int AW = 2,
+    parameter bit FE = 1'b0
 ) (
     input  logic          clk,
     input  logic          we,
@@ -63,9 +68,15 @@ module gpu3d_lram #(
     input  logic [AW-1:0] raddr,
     output logic [W-1:0]  rdata
 );
-    (* ramstyle = "MLAB, no_rw_check" *) logic [W-1:0] mem [0:(1<<AW)-1];
-    always_ff @(posedge clk) if (we) mem[waddr] <= wdata;
-    assign rdata = mem[raddr];
+    generate if (FE) begin : g_fe
+        (* ramstyle = "M10K, no_rw_check" *) logic [W-1:0] mem [0:(1<<AW)-1];
+        always_ff @(posedge clk) if (we) mem[waddr] <= wdata;
+        always_ff @(negedge clk) rdata <= mem[raddr];
+    end else begin : g_ml
+        (* ramstyle = "MLAB, no_rw_check" *) logic [W-1:0] mem [0:(1<<AW)-1];
+        always_ff @(posedge clk) if (we) mem[waddr] <= wdata;
+        assign rdata = mem[raddr];
+    end endgenerate
 endmodule
 
 // True dual-port RAM with one write port: port A writes or reads (a write returns the new word on
@@ -342,6 +353,75 @@ module gpu3d_ram_be2 #(
 `endif
 `endif
 endmodule
+// Four W-bit tables (W <= 10) written at one address by separate enables and
+// read together at one address, in one M10K: quarters of a 40-bit word with
+// byte enables (10-bit bytes; nds_lcache_n's four ways). Registered read; a
+// same-address read and write returns the old word (mixed-port OLD_DATA), as
+// the inferred RAM it replaces. Power-up 0. Synthesis instantiates altsyncram
+// (byte enables are not inferred for 10-bit bytes).
+module gpu3d_ram_be4 #(
+    parameter int W  = 10,
+    parameter int AW = 7
+) (
+    input  logic               clk,
+    input  logic [3:0]         we,            // table k written at waddr
+    input  logic [AW-1:0]      waddr,
+    input  logic [3:0][W-1:0]  wdata,
+    input  logic [AW-1:0]      raddr,
+    output logic [3:0][W-1:0]  rdata
+);
+    logic [39:0] q;
+    always_comb
+        for (int k = 0; k < 4; k++) rdata[k] = q[10*k +: W];
+`ifdef ALTERA_RESERVED_QIS
+    logic [39:0] d;
+    always_comb begin
+        d = '0;
+        for (int k = 0; k < 4; k++) d[10*k +: W] = wdata[k];
+    end
+    altsyncram #(
+        .operation_mode                     ("DUAL_PORT"),
+        .ram_block_type                     ("M10K"),
+        .intended_device_family             ("Cyclone V"),
+        .width_a                            (40),
+        .widthad_a                          (AW),
+        .numwords_a                         (1 << AW),
+        .width_b                            (40),
+        .widthad_b                          (AW),
+        .numwords_b                         (1 << AW),
+        .width_byteena_a                    (4),
+        .byte_size                          (10),
+        .outdata_reg_b                      ("UNREGISTERED"),
+        .address_reg_b                      ("CLOCK0"),
+        .rdcontrol_reg_b                    ("CLOCK0"),
+        .address_aclr_b                     ("NONE"),
+        .outdata_aclr_b                     ("NONE"),
+        .read_during_write_mode_mixed_ports ("OLD_DATA"),
+        .power_up_uninitialized             ("FALSE"),
+        .lpm_type                           ("altsyncram")
+    ) u_ram (
+        .clock0    (clk),
+        .wren_a    (|we),
+        .address_a (waddr),
+        .data_a    (d),
+        .byteena_a (we),
+        .address_b (raddr),
+        .q_b       (q)
+    );
+`else
+    logic [W-1:0] m [4][0:(1<<AW)-1];
+    initial for (int k = 0; k < 4; k++) for (int i = 0; i < (1 << AW); i++) m[k][i] = '0;
+    always_ff @(posedge clk) begin
+        for (int k = 0; k < 4; k++) if (we[k]) m[k][waddr] <= wdata[k];
+        q <= '0;
+        for (int k = 0; k < 4; k++) q[10*k +: W] <= m[k][raddr];
+    end
+`ifndef SYNTHESIS
+    initial if (W > 10) $error("gpu3d_ram_be4: W <= 10");
+`endif
+`endif
+endmodule
+
 // True dual-port RAM on two clocks (a double-pumped block, docs/phase2-integration.md
 // "Double-pumped RAMs"): port A only reads, on clk_a; port B reads or writes, on clk_b
 // (2 x clk_a, phase 0, in its users). Registered reads, unregistered outputs; power-up 0.

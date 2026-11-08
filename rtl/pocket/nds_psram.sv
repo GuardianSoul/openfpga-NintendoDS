@@ -25,7 +25,10 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     // (a word count crosses to clk_sys, Gray-coded through two flops),
     // instead of after the whole burst is in and done_t has crossed
     // (docs/psram-ds.md "STREAM"); 0: as before
-    parameter integer STREAM = 0) (
+    parameter integer STREAM = 0,
+    // 1: a block read starts at its first word (s_addr[2:0], the ARM9's missed word: nds_fabric A9_CWF), and the
+    // chips burst 8 words wrapping at the 32-byte line (BCR wrap on, length 8): critical word first
+    parameter integer CWF = 0) (
     input wire clk_sys, clk_mem, reset_sys, reset_mem,
     output reg initialized = 0,
     // clk_sys: s_req held until s_ack (one pulse); s_req drops the cycle after
@@ -47,6 +50,8 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     output wire cram0_oe_n, cram1_oe_n, cram0_we_n, cram1_we_n,
     output wire cram0_ub_n, cram0_lb_n, cram1_ub_n, cram1_lb_n
 );
+    // CWF: BCR bit 3 = 0 (the burst wraps), bits 2:0 = 010 (8 words)
+    localparam [15:0] BCR_Q = CWF != 0 ? {BCR[15:4], 4'b0010} : BCR;
     // BW: a block write's words, taken while bw_c
     reg bw_c = 0;
     reg [2:0] bw_k = 0;
@@ -89,7 +94,7 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
                 bw_c <= 1; bw_k <= 3'd0; b_word <= {s_addr[20:3], 3'b000};
             end else if (!busy && !bw_c && s_req && !s_ack && out_n == 0 && !blk && !strm && s_n8) begin
                 blk <= B8 == 0; half <= 0; b_write <= 1'b0; b_n8 <= B8 != 0; strm <= st_on;
-                b_word <= {s_addr[20:3], 3'b000};
+                b_word <= CWF != 0 ? s_addr[20:0] : {s_addr[20:3], 3'b000};
                 busy <= 1; s_ack <= 1; req_t <= !req_t;
             end else if (!busy && !bw_c && s_req && !s_ack && out_n == 0 && !blk && !strm) begin
                 busy <= 1; s_ack <= 1; req_t <= !req_t;
@@ -162,7 +167,7 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     psx_pq_psram #(.CLOCK_SPEED(CLOCK_MHZ), .LATCH_DATA(0), .EARLY(B8 != 0)) chip0 (.clk(clk_mem), .bank_sel(bank), .addr(chip_addr),
         .write_en(write_en && we0), .data_in(wdata0), .write_high_byte(be0[1]), .write_low_byte(be0[0]),
         .read_en(1'b0), .sync_burst_en(burst_en), .sync_burst_len(req_n8 ? 6'd7 : 6'd3),
-        .config_en(config_en), .config_data(BCR),
+        .config_en(config_en), .config_data(BCR_Q),
         .read_avail(avail[0]), .data_out(rdata0), .busy(cbusy[0]),
         .dbg_wait_seen(), .dbg_wait_cycles(), .dbg_burst_count(), .dbg_stale_count(),
         .cram_a(cram0_a), .cram_dq(cram0_dq), .cram_wait(cram0_wait), .cram_clk(),
@@ -171,7 +176,7 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     psx_pq_psram #(.CLOCK_SPEED(CLOCK_MHZ), .LATCH_DATA(0), .EARLY(B8 != 0)) chip1 (.clk(clk_mem), .bank_sel(bank), .addr(chip_addr),
         .write_en(write_en && we1), .data_in(wdata1), .write_high_byte(be1[1]), .write_low_byte(be1[0]),
         .read_en(1'b0), .sync_burst_en(burst_en), .sync_burst_len(req_n8 ? 6'd7 : 6'd3),
-        .config_en(config_en), .config_data(BCR),
+        .config_en(config_en), .config_data(BCR_Q),
         .read_avail(avail[1]), .data_out(rdata1), .busy(cbusy[1]),
         .dbg_wait_seen(), .dbg_wait_cycles(), .dbg_burst_count(), .dbg_stale_count(),
         .cram_a(cram1_a), .cram_dq(cram1_dq), .cram_wait(cram1_wait), .cram_clk(),

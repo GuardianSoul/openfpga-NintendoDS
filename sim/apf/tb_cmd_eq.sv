@@ -1,6 +1,6 @@
 // core_bridge_cmd_lean equivalence: this tree's handler against REF's on the APF's legal traffic (random host
 // commands with parameters, target commands answered "bu" then "ok" + an error code, reads of every register and the
-// data table). Everything the core uses and every read answer is compared each clock; the RTC's words once valid.
+// data table), with bridge_endian_little 1 as core_top_ds ties it. Everything the core uses and every read answer is compared each clock; the RTC's words once valid.
 `timescale 1ns/1ps
 module tb_cmd_eq;
     reg clk = 0; always #5 clk = !clk;
@@ -13,7 +13,7 @@ module tb_cmd_eq;
         wire [31:0] rdata_``S, dtq_``S, date_``S, time_``S; \
         wire rst_``S, rq_``S, rtc_``S, allc_``S, upd_``S, ack_``S, done_``S, menu_``S; \
         wire [15:0] rqid_``S, updid_``S; wire [2:0] err_``S; \
-        M u_``S (.clk(clk), .reset_n(rst_``S), .bridge_endian_little(1'b0), .bridge_addr(addr), .bridge_rd(rd), .bridge_rd_data(rdata_``S), \
+        M u_``S (.clk(clk), .reset_n(rst_``S), .bridge_endian_little(1'b1), .bridge_addr(addr), .bridge_rd(rd), .bridge_rd_data(rdata_``S), \
             .bridge_wr(wr), .bridge_wr_data(wdata), .status_boot_done(boot_done), .status_setup_done(setup_done), .status_running(running), \
             .dataslot_requestread(rq_``S), .dataslot_requestread_id(rqid_``S), .dataslot_requestread_ack(rq_ack), .dataslot_requestread_ok(rq_ok), \
             .dataslot_requestwrite(), .dataslot_requestwrite_id(), .dataslot_requestwrite_size(), .dataslot_requestwrite_ack(wq_ack), .dataslot_requestwrite_ok(wq_ok), \
@@ -38,12 +38,14 @@ module tb_cmd_eq;
         if (bad <= 5) $display("%0t: differ new %h ref %h (addr %h)", $time, on, or_, addr);
     end
     task automatic write(input [31:0] a, input [31:0] d);
-        @(negedge clk); addr = a; wdata = d; wr = 1; @(negedge clk); wr = 0;
+        @(negedge clk); addr = a; wdata = bs(d); wr = 1; @(negedge clk); wr = 0;
     endtask
     task automatic read(input [31:0] a);
         @(negedge clk); addr = a; rd = 1; @(negedge clk); rd = 0; n_rd = n_rd + 1; @(negedge clk);
     endtask
     function automatic [31:0] pick(); pick = $random(seed); endfunction
+    // the APF's words are little-endian (bridge_endian_little 1): the handler swaps them both ways
+    function automatic [31:0] bs(input [31:0] w); bs = {w[7:0], w[15:8], w[23:16], w[31:24]}; endfunction
     task automatic host(input [15:0] c);
         write(32'hF800_0020, pick() & (c == 16'h00A0 || c == 16'h00A4 ? 32'hFFFFFFFE : 32'hFFFFFFFF)); write(32'hF800_0024, pick()); write(32'hF800_0028, pick()); write(32'hF800_002C, pick());
         write(32'hF800_0000, {16'h434D, c});
@@ -54,7 +56,7 @@ module tb_cmd_eq;
             rq_ok = pick(); wq_ok = rq_ok; rq_ack = 1; wq_ack = 1; repeat (6) @(negedge clk); rq_ack = 0; wq_ack = 0;
         end
         begin : poll
-            forever begin read(32'hF800_0000); if (rdata_r[31:16] == 16'h4F4B) disable poll; end
+            forever begin read(32'hF800_0000); if (bs(rdata_r) >> 16 == 16'h4F4B) disable poll; end
         end
         n_cmd = n_cmd + 1;
     endtask
@@ -62,7 +64,7 @@ module tb_cmd_eq;
     task automatic answer();
         reg [2:0] code;
         begin : poll
-            forever begin read(32'hF800_1000); if (rdata_r[31:16] == 16'h636D) disable poll; end
+            forever begin read(32'hF800_1000); if (bs(rdata_r) >> 16 == 16'h636D) disable poll; end
         end
         read(32'hF800_1004); read(32'hF800_1008); read(32'hF800_1020); read(32'hF800_1024); read(32'hF800_1028); read(32'hF800_102C);
         write(32'hF800_1000, 32'h6275_0000); repeat (pick() % 8) @(negedge clk); read(32'hF800_1000);

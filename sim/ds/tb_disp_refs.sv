@@ -3,14 +3,17 @@
 // assigned last), compared every cycle on both read ports. Stimulus: the
 // sequencer's Q_POST bursts (eight read-modify-writes on consecutive clocks)
 // and Q_PRE reads, CPU writes at random (one in CPU_GAP clocks at most),
-// often of the reference the sequencer writes in the same clock; resets.
+// often of the reference the sequencer writes in the same clock; resets,
+// each followed by the owner's clear (z_we for 8 clocks, no other access).
 //   +cycles=N  +seed=S  +gap=CPU_GAP
 module tb_disp_refs;
     logic clk = 0;
     always #5 clk = !clk;
     logic        rst = 1;
     logic [2:0]  c_a = 0, s_a = 0, p_a = 0;
-    logic        c_we = 0, p_we = 0;
+    logic        c_we = 0, p_we = 0, z_we = 0;
+    logic [2:0]  z_a = 0;
+    int          zc = 8;              // clear clocks left after a reset
     logic [31:0] c_wd = 0, p_wd = 0;
     logic [31:0] c_q, s_q;
     nds_disp_refs dut (.*);
@@ -30,7 +33,7 @@ module tb_disp_refs;
         while (cyc < cycles) begin
             @(negedge clk);
             // compare (the value now, before this edge's writes)
-            if (!rst) begin
+            if (!rst && zc == 0) begin
                 if (c_q !== r[c_a]) begin errs++; if (errs < 8) $display("cycle %0d: c_q[%0d] %h, the register %h", cyc, c_a, c_q, r[c_a]); end
                 if (s_q !== r[s_a]) begin errs++; if (errs < 8) $display("cycle %0d: s_q[%0d] %h, the register %h", cyc, s_a, s_q, r[s_a]); end
             end
@@ -54,6 +57,10 @@ module tb_disp_refs;
                 c_wd = $urandom;
                 if (p_we && c_a == p_a) n_coll++;
             end
+            // after a reset the owner clears every entry before any other access
+            if (rst) zc = 8;
+            z_we = zc != 0; z_a = 3'(zc);
+            if (zc != 0) begin p_we = 0; c_we = 0; pk = 0; zc--; end
             if ($urandom % 100000 == 0) rst = 1; else rst = 0;
             @(posedge clk);
             cyc++;

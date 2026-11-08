@@ -31,6 +31,7 @@ two before; the instruction just before them must pass R (a NOP), so that
 padding keeps the value. An R operand (stage O) is the result of the
 instruction just before.
 """
+import os
 import isa
 
 _A = isa.offsets(isa.SLICE_A)
@@ -372,7 +373,192 @@ class Prog:
                 raise ValueError(f"{it.where}: unknown field {k}")
         return a, b
 
-    def emit(self, path, depth=1024, module="gpu3d_gxrom"):
+    @staticmethod
+    def emit_dict(module, words, bs, aw, bw, tab, pcs, groups=None):
+        """The same control store as an index ROM plus dictionaries ({module}d, docs/space-gxdict.md): the
+        word's fields, A and B together, in field groups (groups: lists of ("A"|"B", field); default A and
+        B), each group's distinct values in its own M10K ROM, read at the indices dx of the word at upc_n,
+        which the engine selects as it selects upc_n: the index ROM (read at upc_n, like the old ROM) gives
+        the next word's, the group holding A's tgt the jump target's, the return stack the return
+        address's, h_dx the DISP handlers' and k_* the fixed entry points'. No clock is added: the
+        dictionaries are read at the clock the old ROM was, so a_q/b_q/b_p/t_imm are the old ones.
+        In each group the values at jump targets take the first indices, so a target's indices are
+        sum(T_g) bits; the columns constant over the image are not stored (docs/geom-area-2.md)."""
+        depth = len(words)
+        As = [a for a, _ in words]
+        OA, OB = isa.offsets(isa.SLICE_A), isa.offsets(isa.SLICE_B)
+        if groups is None:
+            groups = [[("A", n) for n, _ in isa.SLICE_A], [("B", n) for n, _ in isa.SLICE_B]]
+        assert sorted(f for g in groups for f in g) == sorted([("A", n) for n in OA] + [("B", n) for n in OB])
+        NX, TGT = OA["nx"], OA["tgt"]
+        jumps = {E["NX"][k] for k in ("JMP", "JC", "JNC", "CALL", "DISP", "DJNZ")}
+
+        def tgt(a):        # the PC an A word jumps to, or None
+            nx, t = (a >> NX[0]) & ((1 << NX[1]) - 1), (a >> TGT[0]) & ((1 << TGT[1]) - 1)
+            return t if nx in jumps else None
+        tg = sorted({tgt(a) for a in As} - {None})
+        WW = aw + bw
+        Ws = [(bs[p] << aw) | As[p] for p in range(depth)]      # the whole word: {B, A}
+        o, n = 0, (1 << WW) - 1
+        for w in Ws:
+            o |= w
+            n &= w
+        const = [not ((o >> k) & 1) or bool((n >> k) & 1) for k in range(WW)]
+
+        def bits(s, f):    # the whole word's bit positions of field f of slice s
+            lo, w = (OA if s == "A" else OB)[f]
+            return [lo + j + (0 if s == "A" else aw) for j in range(w)]
+        gb = [[k for s, f in g for k in sorted(bits(s, f)) if not const[k]] for g in groups]
+        gt = [i for i, g in enumerate(groups) if ("A", "tgt") in g][0]
+
+        def key(g, w):
+            return sum(((w >> k) & 1) << j for j, k in enumerate(gb[g]))
+        G = len(groups)
+        tabs, idx, I, T = [], [], [], []
+        for g in range(G):
+            tk = sorted({key(g, Ws[t]) for t in tg})
+            u = tk + sorted({key(g, w) for w in Ws} - set(tk))
+            tabs.append(u)
+            idx.append({v: i for i, v in enumerate(u)})
+            I.append(max(1, (len(u) - 1).bit_length()))
+            T.append((len(tk) - 1).bit_length())
+        off = [sum(I[:g]) for g in range(G)]
+        toff = [sum(T[:g]) for g in range(G)]
+        DW, TW = sum(I), sum(T)
+
+        def dxw(w):
+            return sum(idx[g][key(g, w)] << off[g] for g in range(G))
+        dx = [dxw(w) for w in Ws]
+
+        def tdx(w):        # the target's indices, T_g bits a group (0 when the word does not jump)
+            t = tgt(w & ((1 << aw) - 1))
+            if t is None:
+                return 0
+            r = 0
+            for g in range(G):
+                i = idx[g][key(g, Ws[t])]
+                assert i < (1 << T[g])
+                r |= i << toff[g]
+            return r
+        tdk = {}
+        for w in Ws:
+            k = key(gt, w)
+            assert tdk.setdefault(k, tdx(w)) == tdx(w), "a tgt group value with two targets"
+        SW = [len(gb[g]) + (TW if g == gt else 0) for g in range(G)]
+        store = [[v | ((tdk[v] << len(gb[g])) if g == gt else 0) for v in tabs[g]] for g in range(G)]
+        src = {}           # whole-word bit k -> (group, stored bit)
+        for g in range(G):
+            for j, k in enumerate(gb[g]):
+                src[k] = (g, j)
+
+        def unstore(qs):   # the whole word and the target indices from the dictionaries' outputs
+            w = n & ~sum(1 << k for k in src)
+            for k, (g, j) in src.items():
+                w |= ((qs[g] >> j) & 1) << k
+            return w, qs[gt] >> len(gb[gt])
+        # the round trip: every word, and every jump's target indices, from what is stored
+        for p in range(depth):
+            w, td = unstore([store[g][(dx[p] >> off[g]) & ((1 << I[g]) - 1)] for g in range(G)])
+            assert w == Ws[p] and td == tdx(Ws[p])
+
+        def cat(lo, hi):   # the whole word's bits hi..lo as a concatenation of stored and constant bits
+            pieces, k = [], hi
+            while k >= lo:
+                if k in src:
+                    g, j = src[k]
+                    h, hj = k, j
+                    while k - 1 >= lo and src.get(k - 1) == (g, j - 1):
+                        k -= 1
+                        j -= 1
+                    pieces.append(f"q{g}[{hj}:{j}]" if hj != j else f"q{g}[{j}]")
+                else:
+                    h = k
+                    while k - 1 >= lo and (k - 1) not in src:
+                        k -= 1
+                    c = (n >> k) & ((1 << (h - k + 1)) - 1)
+                    pieces.append(f"{h - k + 1}'h{c:x}")
+                k -= 1
+            return "{" + ", ".join(pieces) + "}"
+        tparts = []        # a_tdx: each group's T_g stored bits zero-extended to I_g, MSB first
+        for g in reversed(range(G)):
+            if I[g] > T[g]:
+                tparts.append(f"{I[g] - T[g]}'d0")
+            if T[g]:
+                b0 = len(gb[gt]) + toff[g]
+                tparts.append(f"q{gt}[{b0 + T[g] - 1}:{b0}]")
+        ab = (depth - 1).bit_length()
+        m = module + "d"
+        dh = (DW + 3) // 4
+        gdesc = "; ".join(f"q{g}: {len(tabs[g])} x {SW[g]} ({', '.join(s + '.' + f for s, f in groups[g])})" for g in range(G))
+        L = ["",
+             f"// {m}: {module}'s words as an index ROM plus dictionaries (tools/gxasm asm.py emit_dict;",
+             "// docs/space-gxdict.md, docs/geom-area-2.md): the engine gives dx, the indices of the word at upc_n,",
+             "// selected as upc_n is: s_dx (the index ROM at s_addr = upc_n, which holds the indices of word s_addr + 1),",
+             "// a_tdx (the indices of a_q's jump target, stored with the tgt group), the return stack's copy of s_dx,",
+             "// h_dx (DISP handler h), the k_* constants, or the current word's (hold). a_q, b_q, b_p and t_imm",
+             f"// are {module}'s at every clock. The fields in {G} groups, each group's distinct values (those at the",
+             f"// {len(tg)} jump targets first) in its own ROM: {gdesc}; {sum(const)} constant columns not stored.",
+             f"module {m} #(parameter bit B2 = 1'b0) (",
+             "    input  logic        clk,",
+             f"    input  logic [{ab - 1}:0] s_addr,",
+             f"    output logic [{DW - 1}:0] s_dx,",
+             f"    input  logic [{DW - 1}:0] dx,",
+             f"    output logic [{aw - 1}:0] a_q,",
+             f"    output logic [{DW - 1}:0] a_tdx,",
+             f"    output logic [{bw - 1}:0] b_q,",
+             f"    output logic [{bw - 1}:0] b_p,",
+             f"    input  logic [{isa.IMI_W - 1}:0] t_idx,",
+             f"    output logic [{isa.IMX_W - 1}:0] t_imm,",
+             "    input  logic [5:0]  h,",
+             f"    output logic [{DW - 1}:0] h_dx,"]
+        L += [f"    output logic [{DW - 1}:0] k_{x.lower()}," for x in pcs]
+        L[-1] = L[-1].rstrip(",")
+        L += [");",
+              f"    localparam int G = {G}, DW = {DW};   // index bits: " + ", ".join(f"q{g} {I[g]} at {off[g]}" for g in range(G)),
+              f"    (* romstyle = \"M10K\", rom_style = \"block\" *) logic [{DW - 1}:0] rs [0:{depth - 1}];"]
+        L += [f"    (* romstyle = \"M10K\", rom_style = \"block\" *) logic [{SW[g] - 1}:0] rd{g} [0:{(1 << I[g]) - 1}];"
+              for g in range(G)]
+        L += [f"    logic [{SW[g] - 1}:0] q{g};" for g in range(G)]
+        L += [f"    logic [{bw - 1}:0] b_q1;", "    initial begin"]
+        for p in range(depth):
+            L.append(f"        rs[{p}] = {DW}'h{dx[(p + 1) % depth]:0{dh}x};")
+        for g in range(G):
+            for i in range(1 << I[g]):
+                L.append(f"        rd{g}[{i}] = {SW[g]}'h{(store[g][i] if i < len(store[g]) else 0):0{(SW[g] + 3) // 4}x};")
+        L += ["    end",
+              "    always_ff @(posedge clk) begin",
+              f"        s_dx <= rs[s_addr[{ab - 1}:0]];"]
+        L += [f"        q{g} <= rd{g}[dx[{off[g] + I[g] - 1}:{off[g]}]];" for g in range(G)]
+        L += ["    end",
+              f"    assign a_q = {cat(0, aw - 1)};",
+              f"    assign b_q1 = {cat(aw, WW - 1)};",
+              "    assign a_tdx = {" + ", ".join(tparts) + "};",
+              "    generate if (B2) begin : g_b2",
+              "        always_ff @(posedge clk) b_q <= b_q1;",
+              "    end else begin : g_b1",
+              "        assign b_q = b_q1;",
+              "    end endgenerate",
+              "    assign b_p = b_q1;",
+              "    always_comb",
+              "        case (h)"]
+        for x in range(64):
+            L.append(f"            6'd{x}: h_dx = {DW}'h{dx[x]:0{dh}x};")
+        L += ["        endcase"]
+        L += [f"    assign k_{x.lower()} = {DW}'h{dx[pc]:0{dh}x};   // pc {pc:#x}" for x, pc in pcs.items()]
+        L += [f"    (* romstyle = \"M10K\", rom_style = \"block\" *) logic [{isa.IMX_W - 1}:0] imt [0:{(1 << isa.IMI_W) - 1}];",
+              "    initial begin"]
+        for i in range(1 << isa.IMI_W):
+            L.append(f"        imt[{i}] = {isa.IMX_W}'h{(tab[i] if i < len(tab) else 0):08x};")
+        L += ["    end",
+              "    always_ff @(posedge clk) t_imm <= imt[t_idx];",
+              "endmodule"]
+        # the engine's dx width (gpu3d_gxeng DX_W) must be this image's
+        eng = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../rtl/gpu3d/gpu3d_gxeng.sv")
+        if f"localparam int DX_W = {DW};" not in open(eng).read():
+            raise ValueError(f"gpu3d_gxeng DX_W must be {DW} (the dictionaries' index bits)")
+        return L
+
+    def emit(self, path, depth=1024, module="gpu3d_gxrom", dict_pcs=None, dict_groups=None):
         self.assemble()
         aw, bw = isa.width(isa.SLICE_A), isa.width(isa.SLICE_B)
         if max(self.at) >= depth:
@@ -464,6 +650,8 @@ class Prog:
         lines += ["    end",
                   "    always_ff @(posedge clk) t_imm <= imt[t_idx];",
                   "endmodule"]
+        if dict_pcs:
+            lines += self.emit_dict(module, words, [pack(b) for _, b in words], aw, bw, tab, dict_pcs, dict_groups)
         open(path, "w").write("\n".join(lines) + "\n")
         return len(self.at), sum(1 for it in self.at.values() if it.where.endswith("(pad)"))
 

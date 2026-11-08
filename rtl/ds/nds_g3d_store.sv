@@ -45,7 +45,21 @@ module nds_g3d_store #(
     parameter bit WQ_PACK = 1'b1,
     // WQ_PACK: log2 write-queue entries. A polygon's beats come ~17 clocks apart and a PSRAM record takes 20-40, so 4 entries
     // hold the engine ~21 clocks a beat; the M10Ks hold 16 as well as 4 (B_DRAIN empties the queue before the bank is read)
-    parameter int WQ_AW = 4
+    parameter int WQ_AW = 4,
+    // 1: the fetcher starts a line once the loader is on it and takes each arrival as soon as it is loaded
+    // (the loader and the fetcher walk the line's arrival list in the same order), so a polygon that ends on
+    // the line frees its slot and chunks for the line's later arrivals. 0: the fetcher waits until the whole
+    // line's arrivals are in the pool, which then must hold every polygon that covers the line at once: a
+    // line with more than 2^SL polygons or 2^CL vertices (Burnout Legends' horizon: 381 polygons and 1,363
+    // vertices on line 96, mostly one-line polygons) stalled the loader and the fetcher on each other until
+    // the next swap abandoned the frame (3D below that line missing). Same beats in the same order.
+    parameter bit STREAM = 1'b1,
+    // DROP (item 16, ds-rules "A line draws at most 2,047 polygons"): when the pool can't take a line's next arrival
+    // while the fetcher waits for exactly that arrival (nothing can retire: the frame would stop until the next swap
+    // abandons it), the loader drops the polygon (its position marked in u_sp) and the fetcher skips it: the frame
+    // goes on without that polygon. Polygons go in render order, so the ones lost are the later ones, as the DS keeps
+    // the first 2,047 of a line. 0: the stall (the frame abandoned)
+    parameter bit DROP = 1'b0
 ) (
     input  logic         clk,
     input  logic         rst,
@@ -229,8 +243,8 @@ module nds_g3d_store #(
     // position -> slot (the loader writes it, the fetcher reads it)
     logic        sp_we;
     logic [10:0] sp_wa, sp_ra;
-    logic [SL-1:0] sp_wd, sp_q;
-    gpu3d_ram #(.W(SL), .AW(11)) u_sp (.clk, .we(sp_we), .waddr(sp_wa), .wdata(sp_wd), .raddr(sp_ra), .rdata(sp_q));
+    logic [SL+DROP-1:0] sp_wd, sp_q;     // (DROP: the top bit marks a dropped position)
+    gpu3d_ram #(.W(SL + DROP), .AW(11)) u_sp (.clk, .we(sp_we), .waddr(sp_wa), .wdata(sp_wd), .raddr(sp_ra), .rdata(sp_q));
 
     logic        rb;                     // bank being drawn
     logic [11:0] rcount;
@@ -328,6 +342,8 @@ module nds_g3d_store #(
     assign sh_q[127:96] = {sh3_q[CL+8:9], {(21-CL){1'b0}}, sh_hi, sh3_q[8:0]};
     gpu3d_ram #(.W(CL),  .AW(CL)) u_cn (.clk, .we(cn_we), .waddr(cn_wa), .wdata(cn_wd), .raddr(cn_ra), .rdata(cn_q));
     logic          f_live, f_dead, f_clr, f_clr_go;    // an abandoned frame (below, with lgo)
+    logic          l_drop;            // DROP: the loader drops the arrival it can't place (the fetcher waits for it)
+    logic          f_drop;            // DROP: the fetcher's position is a dropped one
     assign drawing = f_live;
     nds_g3d_fl #(.W(SL)) u_fs (.clk, .rst, .clr(f_clr_go), .pop(fs_pop), .push(fs_push), .pd(fs_pd), .q(fs_q), .ok(fs_ok), .n(fs_n));
     nds_g3d_fl #(.W(CL)) u_fc (.clk, .rst, .clr(f_clr_go), .pop(fc_pop), .push(fc_push), .pd(fc_pd), .q(fc_q), .ok(fc_ok), .n(fc_n));
@@ -397,6 +413,7 @@ module nds_g3d_store #(
             L_POS2: begin lidx <= or_q; lst <= L_HREQ; end
             // the header's words go to the next free slot, so one must be there
             L_HREQ: if (fs_ok) begin l_req <= 1'b1; l_addr <= {2'b10, rb, 5'd0, lidx, 2'b00}; lw <= 2'd0; lst <= L_HDAT; end
+                    else if (l_drop) begin sp_we <= 1'b1; sp_wa <= lpos; sp_wd <= (SL + DROP)'(1) << SL; lst <= L_LINK; end
             L_HDAT: begin
                 if (l_ack) l_req <= 1'b0;
                 if (l_beat) begin
@@ -408,6 +425,7 @@ module nds_g3d_store #(
             L_ROOM: begin
                 lk <= 4'd0;
                 if (fs_ok && fc_n >= {{(CL-3){1'b0}}, lnv}) begin lslot <= fs_q; lst <= L_VREQ; end
+                else if (l_drop) begin sp_we <= 1'b1; sp_wa <= lpos; sp_wd <= (SL + DROP)'(1) << SL; lst <= L_LINK; end
             end
             L_VREQ: if (fc_ok) begin
                 l_req <= 1'b1; l_addr <= {2'b10, rb, 18'd0} + {6'd0, 13'h0800 + lv, 2'b00}; lw <= 2'd0;
@@ -428,7 +446,7 @@ module nds_g3d_store #(
             end
             L_SLOT: begin
                 sh_we <= 1'b1; sh_wa <= lslot; sh_wd <= {lc_first, lh3[8:0]};
-                sp_we <= 1'b1; sp_wa <= lpos; sp_wd <= lslot;
+                sp_we <= 1'b1; sp_wa <= lpos; sp_wd <= (SL + DROP)'(lslot);
                 lst <= L_LINK;                                       // link[lpos]
             end
             L_LINK: if (lpos == ltail) lst <= L_DONE; else begin lpos <= lk_q; lst <= L_POS; end
@@ -488,6 +506,13 @@ module nds_g3d_store #(
     logic [3:0]    f_k;
     logic [CL-1:0] f_c;
     logic          f_keep;
+    // STREAM: l_av counts the arrivals of line ly in the pool that the fetcher has not taken: +1 at L_LINK
+    // (the edge where sp[lpos] and the slot's lane 3 are written), -1 when the fetcher takes one of line
+    // ly; 0 from L_DONE (ly moves on) and L_IDLE. The line's next arrival is in the pool when the loader
+    // has passed the line or l_av is not 0.
+    logic [11:0]   l_av;
+    wire           f_lyeq = ly == {1'b0, fy};
+    wire           f_got = l_through || (lgo && (ly > {1'b0, fy} || (f_lyeq && l_av != 12'd0)));
     logic          rq_v;                 // a line asked for, not yet started
     logic [7:0]    rq_y;
     wire           out_free = !ps_valid || ps_ready;
@@ -519,6 +544,21 @@ module nds_g3d_store #(
 `endif
     wire  [10:0]   ha_p = al_q[10+SL:SL];
     wire  [SL-1:0] ha_s = al_q[SL-1:0];
+    wire           f_take = fst == F_PICK && (ha_v || hr_v) && !(ha_v && (!hr_v || ha_p < hr_p)) && f_got;
+    // DROP: the fetcher waits for the loader's line's next arrival (nothing of it in the pool to take) while the loader
+    // waits for room for that arrival (L_HREQ, L_ROOM below): nothing can move until the next swap
+    assign l_drop = DROP && fst == F_PICK && hr_v && !(ha_v && ha_p < hr_p) && !f_got && f_lyeq && lgo;
+`ifndef ALTERA_RESERVED_QIS
+    int dr_n = 0;            // DROP: polygons dropped (the first ones are logged)
+    always_ff @(posedge clk)
+        if (!rst && l_drop && ((lst == L_HREQ && !fs_ok) || (lst == L_ROOM && !(fs_ok && fc_n >= {{(CL-3){1'b0}}, lnv})))) begin
+            dr_n <= dr_n + 1;
+            if (dr_n < 20 || dr_n % 1000 == 0) $display("g3d store: DROP position %0d on line %0d (%0d so far)", lpos, ly, dr_n + 1);
+        end
+`endif
+    always_ff @(posedge clk)
+        if (rst || so_done || lst == L_IDLE || lst == L_DONE || !STREAM) l_av <= 12'd0;
+        else l_av <= l_av + 12'(lst == L_LINK) - 12'(f_take && f_lyeq);
     always_comb begin
         // read addresses
         yt_ra  = or_q;
@@ -536,7 +576,7 @@ module nds_g3d_store #(
         cn_ra  = f_c;
         al_ra  = {fa, fa_i[SL-1:0]};
     end
-    assign fs_push = fst == F_ADV && !f_keep;
+    assign fs_push = fst == F_ADV && !f_keep && !(DROP && f_drop);
     assign fs_pd   = f_slot;
     assign fc_push = fst == F_VOUT && (out_free || fquiet) && !f_keep;
     assign ch_re   = PSREG || !(ps_valid && !ps_ready && ps_type == 2'd1);
@@ -559,7 +599,8 @@ module nds_g3d_store #(
             end
             F_WAIT: begin
                 // the line's arrivals loaded and the 3D ring has room
-                if (!l_re && (!ready || (lgo && (l_through || ly > {1'b0, fy}) && {1'b0, fy} <= y_lim))) begin
+                if (!l_re && (!ready || (lgo && (l_through || ly > {1'b0, fy} || STREAM && ly == {1'b0, fy}) &&
+                                         {1'b0, fy} <= y_lim))) begin
                     fa_i <= '0; fst <= F_HEADS;
                 end
             end
@@ -573,14 +614,21 @@ module nds_g3d_store #(
                 fst <= F_PICK;
             end
             F_PICK: begin
+                f_drop <= 1'b0;
                 if (!ha_v && !hr_v) fst <= F_END;
                 else if (ha_v && (!hr_v || ha_p < hr_p)) begin
                     f_arr <= 1'b0; f_pos <= ha_p; f_slot <= ha_s; fst <= F_SH;
-                end else begin
+                end else if (!STREAM || f_got) begin
                     f_arr <= 1'b1; f_pos <= hr_p; fst <= F_SP;      // pos -> slot
                 end
             end
-            F_SP: begin f_slot <= sp_q; fst <= F_SH; end
+            F_SP: begin
+                f_slot <= SL'(sp_q);
+                f_drop <= DROP && sp_q[SL + DROP - 1];
+                // DROP: a dropped position goes nowhere: no beats, not kept, no slot back (fs_push)
+                if (DROP && sp_q[SL + DROP - 1]) begin f_keep <= 1'b0; fst <= F_ADV; end
+                else fst <= F_SH;
+            end
             F_SH: fst <= F_HDR;                                      // slot header
             F_HDR: if (out_free || fquiet) begin
                 if (!fquiet) begin ps_valid <= 1'b1; ps_type <= 2'd0; if (PSREG) ps_data_r <= {21'd0, sh_q[106:0]}; end

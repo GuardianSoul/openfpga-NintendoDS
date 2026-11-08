@@ -30,10 +30,13 @@ if [ $# -ge 2 ]; then one "$@"; exit; fi
 rc=0
 one sys_math.sv   "s/6'd18 : 6'd34) - 6'(tick)/6'd17 : 6'd34) - 6'(tick)/" --only div   || rc=1
 one sys_math.sv   "s/r2 = sq_step(r1, q1, nib\[1:0\]);/r2 = sq_step(r1, q1, {nib[0], nib[1]});/" --only sqrt || rc=1
-one sys_timers.sv "s/tg\[s_k\] <= s_gt + togo;/tg[s_k] <= s_gt + togo + 5'd1;/" --only timers || rc=1
+one sys_timers.sv "s/? s_gt + togo : 4'hF;/? s_gt + togo + 4'd1 : 4'hF;/" --only timers   || rc=1
+one sys_timers.sv "s/? s_gt + togo : 4'hF;/? s_gt + togo : 4'hE;/" --only timers           || rc=1
 one sys_timers.sv "s/dn \&\& ch\[k\];/1'b0;/" --only timers                                  || rc=1
-one sys_timers.sv "s/near = \&s_nc \&\& s_dv\[5\];/near = \&s_nc \&\& s_dv[4];/" --only timers  || rc=1
+one sys_timers.sv "s/\&dv\[5:4\]}/dv[5]}/" --only timers                                      || rc=1
+one sys_timers.sv "s/near = \&s_nc\[15:4\]/near = \&s_nc[15:5]/" --only timers                   || rc=1
 one sys_ipc.sv    "s/n\[o\] == 5'd1 \&\& sirq\[o\]/n[o] == 5'd2 \&\& sirq[o]/" --only ipc   || rc=1
+one sys_ipc.sv    "s/fl\[c\] <= n\[c\] == 5'd15/fl[c] <= n[c] == 5'd14/" --only ipc          || rc=1
 one sys_irq.sv    "s/assign irq    = ime \&\& /assign irq    = /" --only irq               || rc=1
 one sys_dma.sv    "s/(r > 21'd112 || r == 21'd0)) ? 7'd112/(r > 21'd111 || r == 21'd0)) ? 7'd111/" --only dma || rc=1
 one sys_dma.sv    "s/e_cnt\[22:21\] == 2'd3) e_dst/e_cnt[22:21] == 2'd2) e_dst/" --only dma || rc=1

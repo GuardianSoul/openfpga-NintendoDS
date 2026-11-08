@@ -89,18 +89,18 @@ module sound #(
     // melonDS's capture FIFO does, and restarting a unit drops them, as in
     // melonDS. The buffer slot and the byte in the word follow from the
     // position.
-    logic [31:0] w0, w1, w2, w3;
+    logic [31:0] w0, w2, w3;            // (w1 stays on the register RAM's output: cr_ra)
     logic [39:0] w4, w5, w6, w7;
     logic [4:0]  ent;                   // the entry: 0-15 channels, 16-17 captures
     logic [159:0] rr_q;                 // the entry's run-time row as stored
 
-    logic [6:0]  f_vol;   assign f_vol  = w0[6:0];
-    logic [1:0]  f_div;   assign f_div  = w0[9:8];
-    logic [6:0]  f_pan;   assign f_pan  = w0[22:16];
+    logic [6:0]  f_vol;   assign f_vol  = cr_q[6:0];     // (mixing only: word 0 on cr_q, cr_ra)
+    logic [1:0]  f_div;   assign f_div  = cr_q[9:8];
+    logic [6:0]  f_pan;   assign f_pan  = cr_q[22:16];
     logic [2:0]  f_duty;  assign f_duty = w0[26:24];
     logic [1:0]  f_rep;   assign f_rep  = w0[28:27];
     logic [1:0]  f_fmt;   assign f_fmt  = w0[30:29];
-    logic [24:0] f_sad;   assign f_sad  = w1[26:2];
+    logic [24:0] f_sad;   assign f_sad  = cr_q[26:2];
     logic [15:0] f_tmr;   assign f_tmr  = w2[15:0];
     logic [15:0] f_pnt;   assign f_pnt  = w2[31:16];
     logic [20:0] f_len;   assign f_len  = w3[20:0];
@@ -244,7 +244,7 @@ module sound #(
     // (tot - roff, then sad + roff) don't wait for this carry chain too
     logic [21:0] tot;
     logic        short;                 // under 16 bytes: melonDS's Run plays nothing
-    assign short = f_pnt[15:2] == 14'd0 && f_len[20:2] == 19'd0 && {1'b0, f_pnt[1:0]} + {1'b0, f_len[1:0]} < 3'd4;
+    assign short = tot[21:2] == 20'd0;  // (a channel's tot is loop start + length; used from S_CH on)
     logic        inactive;              // S_CH: the channel outputs 0 and keeps its state
     assign inactive = !e_busy || (f_fmt == 2'd3 && !ent[3]) || (f_fmt != 2'd3 && short);
 
@@ -253,13 +253,27 @@ module sound #(
     // same shift of the word counts for all of them.
     logic [2:0]  pinc;
     assign pinc = (e_fmt == 2'd0) ? 3'd2 : (e_fmt == 2'd1) ? 3'd4 : 3'd1;
+    // The position adder also sums the loop start and length at the load
+    // (tot, in S_LOAD's last clock, from the w2 and w3 flops: the RAM's
+    // output stays off the adder): the position isn't used there
+    logic        pld;
+    assign pld = (st == S_LOAD);
     logic [25:0] posn;
-    assign posn = f_pos + {23'b0, pinc};
+    assign posn = (pld ? {10'b0, w2[31:16]} : f_pos) + (pld ? {5'b0, w3[20:0]} : {23'b0, pinc})
+                + {25'b0, pld && e4 && w3[20:0] == 21'd0};
     logic [25:0] lim, lstart;
     assign lim = {1'b0, tot, 3'b0};
     assign lstart = {7'b0, f_pnt, 3'b0};
+    // past_end from its own position sum: every use is in S_ITA or S_CAPA (it_act, ita_go, capa_go), where posn is
+    // this sum; S_LOAD's tot on the shared adder stays off it (rel052 #2080 2asR: w3 -> w3 == 0 -> posn -> past_end -> w5,
+    // -0.318 ns)
+    logic [25:0] posi;
+    assign posi = f_pos + {23'b0, pinc};
     logic past_end;
-    assign past_end = !posn[25] && (posn >= lim);
+    assign past_end = !posi[25] && (posi >= lim);
+`ifndef SYNTHESIS
+    always_ff @(posedge clk) if (!rst && !pld && posi !== posn) $error("sound: posi %h differs from posn %h outside S_LOAD", posi, posn);
+`endif
     logic sat;                          // position stops counting near the top
     assign sat = (f_pos[25:24] == 2'b01) && f_pos[23:2] == 22'h3FFFFF;
     logic psg_hi;
@@ -312,21 +326,19 @@ module sound #(
     assign rom_ra = {f_idx, nib_b[2:0]};
     logic [3:0]  nib;
     assign nib = f_byte[3:0];
-    // f_val -/+ the ROM's difference as one sum: the difference's four
-    // step terms (u_adp's, gated with its index check: both from the
-    // registered address) each inverted for a subtraction, plus 4 (the four
-    // +1s of -(a+b+c+d) = ~a+~b+~c+~d+4): one adder tree from the FIFO RAM's
-    // word to w7 instead of the difference's and then the add/subtract
-    // (#842: u_fifo -> w7[12] -0.684 ns)
-    logic        d_ok;
-    assign d_ok = rom_ra_q[9:3] <= 7'd88;
-    logic [17:0] dt0, dt1, dt2, dt3;
-    assign dt0 = {18{nib[3]}} ^ (d_ok                ? {6'd0, ff_q[14:3]} : 18'd0);
-    assign dt1 = {18{nib[3]}} ^ (d_ok && rom_ra_q[0] ? {5'd0, ff_q[14:2]} : 18'd0);
-    assign dt2 = {18{nib[3]}} ^ (d_ok && rom_ra_q[1] ? {4'd0, ff_q[14:1]} : 18'd0);
-    assign dt3 = {18{nib[3]}} ^ (d_ok && rom_ra_q[2] ? {3'd0, ff_q[14:0]} : 18'd0);
+    // f_val -/+ the ROM's difference as one sum: the difference's step terms
+    // (step/8, or the table word's step/4 + step/8 when nibble bit 0 is set;
+    // step/2; step) each inverted for a subtraction, plus 3 (the three +1s
+    // of -(a+b+c) = ~a+~b+~c+3): one adder tree from the FIFO RAM's word to
+    // w7 instead of the difference's and then the add/subtract (#842:
+    // u_fifo -> w7[12] -0.684 ns). Indexes over 88 read a 0 word, so every
+    // term is 0 there, as u_adp's index check gives.
+    logic [17:0] dt0, dt2, dt3;
+    assign dt0 = {18{nib[3]}} ^ (rom_ra_q[0] ? {4'd0, ff_q[28:15]} : {6'd0, ff_q[14:3]});
+    assign dt2 = {18{nib[3]}} ^ (rom_ra_q[1] ? {4'd0, ff_q[14:1]} : 18'd0);
+    assign dt3 = {18{nib[3]}} ^ (rom_ra_q[2] ? {3'd0, ff_q[14:0]} : 18'd0);
     logic signed [17:0] vsum;
-    assign vsum = {{2{f_val[15]}}, f_val} + dt0 + dt1 + dt2 + dt3 + {15'd0, nib[3], 2'b00};
+    assign vsum = {{2{f_val[15]}}, f_val} + dt0 + dt2 + dt3 + {16'd0, nib[3], nib[3]};
 `ifndef ALTERA_RESERVED_QIS
     always @(posedge clk)
         if (!rst && st == S_ITC && vsum !== (nib[3] ? $signed({{2{f_val[15]}}, f_val}) - $signed({2'b0, rom_q[15:0]})
@@ -394,6 +406,9 @@ module sound #(
     assign acc_r = (st == S_MIX) ? cnt[2] : (st == S_OUT) ? cnt == 4'd1 : ent[0];
     logic signed [27:0] cap_acc;        // (also the mixer adder's input)
     assign cap_acc = acc_r ? accr : accl;
+    logic signed [27:0] cx;
+    logic signed [27:0] acc_sum;        // one adder for both sides, and the capture's rounding
+    assign acc_sum = cap_acc + cx;
     // DS rule DS_SPU_CAPTURE (docs/hw-reference.md, sndcap v3 DC grid): the
     // sample is (sum >> 7) / 2, halved toward zero (melonDS: sum >> 8): one
     // more when the sum is negative and bit 7 is set
@@ -402,8 +417,11 @@ module sound #(
     // u_cb's data (#1015/#1030/#1031 cnt -> u_cb -0.006..-0.561 ns)
     logic signed [27:0] cu_acc;
     assign cu_acc = ent[0] ? accr : accl;
+    // (sum >> 8) + the rounding bit on the mixer's adder: during a capture
+    // entry it adds {round, 8'd0} to cap_acc, which is cu_acc there (acc_r
+    // is ent[0] outside S_MIX and S_OUT, and the mixer runs only for channels)
     logic signed [19:0] cap_sh;
-    assign cap_sh = cu_acc[27:8] + {19'd0, cu_acc[27] && cu_acc[7]};
+    assign cap_sh = acc_sum[27:8];
     logic [15:0] cap_smp;               // clamp(acc >> 8)
     logic        c_ovf;
     assign c_ovf = cap_sh[19:15] != {5{cap_sh[19]}};
@@ -512,7 +530,15 @@ module sound #(
     logic [3:0]  op_be;
     assign op_a = (st == S_REG2) ? op2_a : op1_a;
     assign op_be = (st == S_REG2) ? 4'b0011 : op1_be;
-    assign cr_ra = (st == S_REG || st == S_REG2) ? {rd_a[1:0], rd_a[6:2]} : {cnt[1:0], ent};   // held: reg_rdata reads cr_q with reg_ack; S_LOAD: word cnt
+    // held: reg_rdata reads cr_q with reg_ack; S_LOAD: word cnt; from S_LOAD's
+    // last clock to the entry's end word 1 (SAD/DAD: the refill and capture
+    // address read it from cr_q, as no register access comes inside an entry),
+    // except word 0 for the mixing (volume, divider, pan) from the clock
+    // before S_MIX: S_CH (an inactive channel or the second pass mixes next)
+    // and S_STORE; the next refill comes at least two clocks after S_CH
+    assign cr_ra = (st == S_REG || st == S_REG2) ? {rd_a[1:0], rd_a[6:2]} :
+                   (st == S_LOAD && !cnt[2]) ? {2'd0 - cnt[1:0], ent} :   // words 0, 3, 2, 1
+                   (st == S_CH || st == S_STORE || st == S_MIX) ? {2'd0, ent} : {2'd1, ent};
     logic        clearing;
     assign clearing = CLEAR_REGS && st == S_CLEAR;
     assign cr_we = clearing || (st == S_REG2 && reg_we) || (st == S_REG && reg_we && op1_v);
@@ -620,14 +646,11 @@ module sound #(
 
     always_ff @(posedge clk) if (ce) begin
         // register words (load only)
-        // words 0-3 arrive in S_LOAD's clocks 1-4
+        // words 0, 3, 2 and 1 arrive in S_LOAD's clocks 1-4 (word 1 stays on cr_q)
         if (st == S_LOAD && cnt == 4'd1) w0 <= cr_q;
-        if (st == S_LOAD && cnt == 4'd2) w1 <= cr_q;
+        if (st == S_LOAD && cnt == 4'd2) w3 <= cr_q;
         if (st == S_LOAD && cnt == 4'd3) w2 <= cr_q;
-        if (st == S_LOAD && cnt == 4'd4) begin
-            w3 <= cr_q;
-            tot <= {6'b0, w2[31:16]} + {1'b0, cr_q[20:0]} + {21'b0, e4 && cr_q[20:0] == 21'd0};
-        end
+        if (st == S_LOAD && cnt == 4'd4) tot <= posn[21:0];   // loop start + length (+1 for an empty capture)
 
         // w4
         if (ld) w4 <= rr_q[39:0];
@@ -694,8 +717,7 @@ module sound #(
     // again from their stored samples.
     logic signed [25:0] contrib;
     assign contrib = mul_p[35:10];
-    logic signed [27:0] cx;
-    assign cx = {{2{contrib[25]}}, contrib};
+    assign cx = e4 ? {19'd0, cap_acc[27] && cap_acc[7], 8'd0} : {{2{contrib[25]}}, contrib};
     logic [1:0]  lsel, rsel;
     // (no capture: the mixer goes straight out. A game's output select plays channels 1 and 3 back
     // from capture buffers that are never written here, so they stay out of the mix as well)
@@ -709,8 +731,6 @@ module sound #(
     assign mix_l = (st == S_MIX) && cnt == 4'd2 && (selpass ? (ent[1] ? lsel[1] : lsel[0]) : !mix_ex);
     assign mix_r = (st == S_MIX) && cnt == 4'd4 && (selpass ? (ent[1] ? rsel[1] : rsel[0]) : !mix_ex);
     assign acc_clr = (st == S_IDLE) && !(reg_req && !reg_ack) && tick_pend;
-    logic signed [27:0] acc_sum;        // one adder for both sides
-    assign acc_sum = cap_acc + cx;
     always_ff @(posedge clk) if (ce) begin
         if (acc_clr || (sel_go && lsel != 2'd0)) accl <= '0;
         else if (mix_l) accl <= acc_sum;

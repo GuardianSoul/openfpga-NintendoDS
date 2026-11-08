@@ -58,7 +58,8 @@ module arm7_ds import arm_pkg::*; (
   logic [2:0]  d_tk, tk;                   // Thumb branch kind
   logic        d_pcal, tpcal;              // Thumb: r15 reads as (PC+4) & ~3
   logic [3:0]  k;                          // E's kind
-  logic        e_mem, e_blk, e_mul, e_mull, e_swp, e_sr, e_rs0, b_usr;   // (registered: k's most used decodes)
+  logic        e_mem, e_blk, e_mul, e_mull, e_swp, e_sr, e_rs0, b_usr;
+  logic        e_irot;                     // i_rot, registered with k (rel052 #2081 3asR: k -> i_rot -> shn -> rotator -> sho, -0.485 ns)   // (registered: k's most used decodes)
   logic [2:0]  es;                         // E's step
   logic [31:0] sho;                        // the rotator's result
   logic        shc;
@@ -169,8 +170,8 @@ module arm7_ds import arm_pkg::*; (
   always_ff @(posedge clk) ra1_q <= phys_reg(r1_d, mode);
   // ph 0's numbers from registers, taken with the instruction (a mode change flushes D, so it is E's mode): only the
   // choice and a block's next register are left in front of the RAM (es -> r0_n -> phys_reg -> RAM -> rotator -> sho, #1486/#1489)
-  logic [4:0]  ra_rm, ra_rs, ra_rd;
-  wire  [4:0]  ra0 = e_rs ? ra_rs : (es == ES_MEM && !is_load) ? (e_blk ? phys_reg(br, bmode) : e_mem ? ra_rd : ra_rm) : ra_rm;
+  logic [4:0]  ra_rm, ra_rs, ra_rd, ra_br;                     // ra_br: br's, taken with br (its bank: bmode at ES_MEM)
+  wire  [4:0]  ra0 = e_rs ? ra_rs : (es == ES_MEM && !is_load) ? (e_blk ? ra_br : e_mem ? ra_rd : ra_rm) : ra_rm;
   wire [31:0] rq = rf[ph ? ra1_q : ra0];
 
   // ---------------------------------------------------------------- rotator (ph 0)
@@ -193,7 +194,7 @@ module arm7_ds import arm_pkg::*; (
       default: ;
     endcase
   end
-  wire        i_rot = (k == K_DP || k == K_MSR) && ins[25];      // the rotated immediate
+  wire        i_rot = e_irot;                                    // the rotated immediate ((k == K_DP || k == K_MSR) && ins[25])
   wire [31:0] shv = s_imm ? immv : (es == ES_0 && rm == 4'hF) ? r15 : rq;
   wire [1:0]  sht = s_pass ? 2'b00 : i_rot ? 2'b11 : ins[6:5];
   wire [7:0]  shn = s_pass ? 8'd0 : i_rot ? {3'b000, ins[11:8], 1'b0} : e_sr ? opc[7:0] : {3'b000, ins[11:7]};
@@ -236,6 +237,9 @@ module arm7_ds import arm_pkg::*; (
   // a multiply's and a block's operand, and a store's offset for its base's write, stay for E's later cycles
   wire sho_en = es == ES_0 ? !ph || e_mul || e_mull : !ph && es == ES_LAST && (e_sr || e_swp);
   always_ff @(posedge clk) if (sho_en) begin sho <= sho_u; shc <= shc_u; end
+`ifndef SYNTHESIS
+  always_ff @(posedge clk) if (!rst && e_irot !== ((k == K_DP || k == K_MSR) && ins[25])) $error("arm7_ds: e_irot differs from k/ins");
+`endif
 
   // ---------------------------------------------------------------- the adder (ph 1)
   logic [31:0] a, b, alu;
@@ -522,6 +526,7 @@ module arm7_ds import arm_pkg::*; (
           ins <= d_ins; k <= dk; tk <= d_tk; tpcal <= d_pcal;
           e_mem <= dk == K_SDT || dk == K_HW; e_blk <= dk == K_BLK; e_mul <= dk == K_MUL; e_mull <= dk == K_MULL;
           e_swp <= dk == K_SWP; e_sr <= dk == K_DP && !d_ins[25] && d_ins[4];   // shift by register: Rs first
+          e_irot <= (dk == K_DP || dk == K_MSR) && d_ins[25];
           e_rs0 <= dk == K_MUL || dk == K_MULL || (dk == K_DP && !d_ins[25] && d_ins[4]);
           b_usr <= dk == K_BLK && d_ins[22] && !(d_ins[20] && d_ins[15]);
           ra_rm <= phys_reg(d_ins[3:0], mode); ra_rs <= phys_reg(d_ins[11:8], mode); ra_rd <= phys_reg(d_ins[15:12], mode);
@@ -537,7 +542,13 @@ module arm7_ds import arm_pkg::*; (
 
   // the block cursor's registers: from E's first cycle (the list) and each answered step
   always_ff @(posedge clk)
-    if (step && (es == ES_0 || (es == ES_MEM && d_ok))) begin rl <= rl_d; br <= lowest(rl_d); end
+    if (step && (es == ES_0 || (es == ES_MEM && d_ok))) begin
+      rl <= rl_d; br <= lowest(rl_d); ra_br <= phys_reg(lowest(rl_d), b_usr ? M_USR : mode);
+    end
+  // synthesis translate_off
+  always_ff @(posedge clk) if (!rst && es == ES_MEM && e_blk && !is_load && ra_br != phys_reg(br, bmode))
+    $error("arm7_ds RABR: %0d, not %0d", ra_br, phys_reg(br, bmode));
+  // synthesis translate_on
 
   // halt: a store of 0x80 to HALTCNT, accepted (d_ok) the cycle after
   logic haltst;

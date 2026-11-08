@@ -3055,10 +3055,22 @@ if __name__ == "__main__":
     lu += [f"    localparam logic [5:0] FF_HV{k} = 6'd{HT[c]};" for k, c in (("16", 0x23), ("10", 0x24), ("XY", 0x25), ("XZ", 0x26), ("YZ", 0x27), ("DF", 0x28))]
     lu += [f"    localparam logic [63:0] LU_SAFE = 64'h{lu_safe:016X};",
            f"    localparam logic [5:0] LU_HNORMAL = 6'd{HT[0x21]};"]
+    DICT_GROUPS = [[("A", f) for f in ("tgt", "ra", "rax", "rb", "wa", "we")] +
+                   [("B", f) for f in ("xs", "ys", "aop", "ma", "xsh", "out", "dv")],
+                   [("A", f) for f in ("nx", "cond", "rbx", "wx", "xop", "xarg")] +
+                   [("B", f) for f in ("fl", "imi", "mb", "acc")]]
     isa.gen_pkg(os.path.join(root, "rtl/gpu3d/gpu3d_gxu_pkg.sv"), lu)
     us = "_uf" if FF else "_uw" if VFIN == 2 else "_uv" if VFIN else "_ul" if LUNIT else "_us" if USORT else ""
     n, pads = P_.emit(os.path.join(root, f"rtl/gpu3d/gpu3d_gxrom{us}.sv"), depth=int(os.environ.get("GX_DEPTH", 2048)),
-                      module=f"gpu3d_gxrom{us}")
+                      module=f"gpu3d_gxrom{us}",
+                      # FF: also as an index ROM plus dictionaries (gpu3d_gxrom_ufd, docs/space-gxdict.md) with
+                      # the engine's fixed entry points (gpu3d_gxeng RESET, DPARAM, FF_A_SUBV, PU_A_SV1)
+                      dict_pcs={"RESET": 40, "DPARAM": 38, "SUBV": P_.labels["SUBV"],
+                                "SV1": P_.labels["SV1"]} if FF else None,
+                      # the fields in two dictionaries by how often they vary together, not by slice
+                      # (docs/geom-area-2.md): 1022 x 80 and 248 x 35 (8 + 1 M10K, 18 index bits) where
+                      # A and B were 961 x 80 and 312 x 35 (8 + 2, 19)
+                      dict_groups=DICT_GROUPS if FF else None)
     os.makedirs(os.path.join(root, "build/geom"), exist_ok=True)
     with open(os.path.join(root, f"build/geom/ucode{us}.labels"), "w") as f:
         for k, v in sorted(P_.labels.items(), key=lambda x: x[1]):

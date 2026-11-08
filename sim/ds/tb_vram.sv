@@ -33,8 +33,13 @@ module tb_vram;
     reg  sv_req = 0;
     wire sv_ack;
     wire [31:0] sv_rdata;
-    nds_vram dut (.clk, .rst, .vramcnt,
-        .c_req, .c_cpu(1'b0), .c_we, .c_addr, .c_be, .c_wdata, .c_ack, .c_rdata,
+`ifndef TB_PF
+`define TB_PF 0
+`endif
+    // TB_PF=1: VR_RDB, VR_CWF and VR_PF (the next-line prefetch for DMA reads; +cseq=1 makes the CPU's reads DMA runs)
+    reg c_dma = 0;
+    nds_vram #(.VR_RDB(`TB_PF), .VR_CWF(`TB_PF), .VR_PF(`TB_PF)) dut (.clk, .rst, .vramcnt,
+        .c_req, .c_cpu(1'b0), .c_dma, .c_we, .c_addr, .c_be, .c_wdata, .c_ack, .c_rdata,
         .g_req, .g_blk, .g_ack, .g_rvalid, .g_rdata,
         .cap_we(1'b0), .cap_addr(18'd0), .cap_data(16'd0), .cap_ready(),
         .sv_req, .sv_we(1'b0), .sv_addr(17'd5), .sv_be(4'hF), .sv_wdata(32'd0), .sv_ack, .sv_rdata,
@@ -72,6 +77,8 @@ module tb_vram;
         end
     end
 
+    integer n_pf = 0;          // VR_PF: prefetch blocks the port took
+    always @(posedge clk) if (`TB_PF != 0 && vm_req && vm_ack && dut.st == 4'd12) n_pf++;
     // ---- traffic and checks
     integer errors = 0, g_done = 0, c_done = 0, g_issued = 0;
     integer g_exp [$];                      // block index per accepted 2D request (-1: unmapped)
@@ -105,6 +112,11 @@ module tb_vram;
     end
     // CPU: reads and writes of bank A words through the LCDC view (0x06800000)
     integer c_w;
+    integer c_span = 32768;   // +cspan=N: CPU words from the first N only (read-line hits and writes into the line)
+    initial void'($value$plusargs("cspan=%d", c_span));
+    integer c_seq = 0;        // +cseq=1: reads in sequential runs (a DMA's: c_dma), writes now and then anywhere near
+    initial void'($value$plusargs("cseq=%d", c_seq));
+    integer c_next = 0;
     reg c_isw = 0;
     always @(posedge clk) if (!rst) begin
         if (c_ack) begin
@@ -114,8 +126,17 @@ module tb_vram;
             end
         end
         if (!c_req && $urandom % 8 == 0 && g_issued < n_blocks) begin
-            c_w = $urandom % 32768;
+            c_w = $urandom % c_span;
             c_isw = $urandom % 2;
+            if (c_seq != 0) begin
+                c_isw = $urandom % 12 == 0;
+                if (c_isw) c_w = (c_next + $urandom % 24) % c_span;          // into this line or the next ones
+                else begin
+                    if ($urandom % 200 == 0) c_next = $urandom % c_span;     // a new run
+                    c_w = c_next; c_next = (c_next + 1) % c_span;
+                end
+                c_dma <= !c_isw || $urandom % 2;
+            end
             c_req <= 1; c_we <= c_isw; c_addr <= 22'h20_0000 | c_w; c_be <= 4'hF;
             if (c_isw) begin c_wdata <= $urandom; end
         end
@@ -136,7 +157,7 @@ module tb_vram;
         rst = 0;
         wait (g_done == n_blocks || $time > 64'd200_000_000);
         repeat (50) @(posedge clk);
-        $display("blocks %0d, CPU accesses %0d, errors %0d", g_done, c_done, errors);
+        $display("blocks %0d, CPU accesses %0d, errors %0d, prefetches %0d", g_done, c_done, errors, n_pf);
         if (g_done != n_blocks) $display("stuck: st %0d bw_left %0d g_req %b c_req %b sv_req %b q %0d left %0d exp %0d", dut.st, dut.bw_left, g_req, c_req, sv_req, q_addr.size(), cur_left, g_exp.size());
         if (errors == 0 && g_done == n_blocks) $display("TEST PASSED"); else $display("TEST FAILED");
         $finish;

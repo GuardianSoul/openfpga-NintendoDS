@@ -32,7 +32,8 @@ module gpu2d_bg
     // read into one "next" set before the plan scan reaches it, so the job's
     // clock schedule is the same as without (docs/2d-engine.md)
     parameter bit WST_RF   = 0,
-    parameter bit MOSAIC   = 1    // 0: no BG or OBJ mosaic (a fit setting; behaves as mosaic size 0)
+    parameter bit MOSAIC   = 1,   // 0: no BG or OBJ mosaic (a fit setting; behaves as mosaic size 0)
+    parameter bit CAPTURE  = 1    // 0: no display capture (a temporary fit setting: nothing is written, DISPCAPCNT's handshake stays)
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -253,7 +254,7 @@ module gpu2d_bg
     logic        cap_hit;
     always_comb begin
         cap_sz  = capcnt[21:20];
-        cap_hit = !j_eng && cap_en && lcdc_map[capcnt[17:16]]
+        cap_hit = CAPTURE && !j_eng && cap_en && lcdc_map[capcnt[17:16]]
                   && (cap_sz == 2'd0 ? j_line < 8'd128 : {1'b0, j_line} < {cap_sz, 6'd0} + 9'd0);
     end
 
@@ -295,7 +296,8 @@ module gpu2d_bg
         logic [7:0]  x;
         logic [17:0] o2d;         // Output2D (pre display mode)
         logic [22:0] c3d;         // the 3D pixel for capture A (alpha, 5:5:5 of 6:6:6)
-        logic [15:0] vdisp, capb; // VRAM display pixel, capture source B
+        logic [15:0] vdisp, cbs;  // VRAM display pixel, capture source B (CAPCNT bit 25's: the FIFO or VRAM)
+        logic        cbn;         // source B is null (VRAM, its bank not LCDC)
         logic [15:0] fifo;
     } s5_t;
     typedef struct packed {
@@ -314,6 +316,7 @@ module gpu2d_bg
     // caches
     blk_t        m_ablk, t_ablk, e_ablk;
     logic [1:0]  m_aword, t_aword, e_aword;
+    logic [1:0]  m_ahalf, t_ahalf;     // the halfword of the word (HALF caches)
     logic [63:0] m_q, t_q, e_q;
     logic        m_hit, t_hit, e_hit;
     blk_t        m_cur, t_cur, e_cur;
@@ -329,23 +332,23 @@ module gpu2d_bg
     logic           c_scrub_v;
     gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub),
         .scrub_q(c_scrub_q), .scrub_v(c_scrub_v));
-    gpu2d_cache #(.IDXW(MAP_IDXW), .HASH(1)) u_mc (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[MAP_IDXW-1:0]),
-        .scrub_q(c_scrub_q[MAP_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(m_ablk), .a_word(m_aword),
+    // (the map and texel caches give the halfword addressed: HALF)
+    gpu2d_cache #(.IDXW(MAP_IDXW), .HASH(1), .HALF(1)) u_mc (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[MAP_IDXW-1:0]),
+        .scrub_q(c_scrub_q[MAP_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(m_ablk), .a_word(m_aword), .a_half(m_ahalf),
         .q(m_q), .hit(m_hit), .cur_blk(m_cur), .cur_word(m_curw),
         .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
-    gpu2d_cache #(.IDXW(TEX_IDXW), .HASH(1)) u_tc (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[TEX_IDXW-1:0]),
-        .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword),
+    gpu2d_cache #(.IDXW(TEX_IDXW), .HASH(1), .HALF(1)) u_tc (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[TEX_IDXW-1:0]),
+        .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword), .a_half(t_ahalf),
         .q(t_q), .hit(t_hit), .cur_blk(t_cur), .cur_word(t_curw),
         .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
     gpu2d_cache #(.IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .HASH(2), .VLO(10)) u_ec (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[ESW-1:0]),
-        .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword),
+        .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword), .a_half(2'd0),
         .q(e_q), .hit(e_hit), .cur_blk(e_cur), .cur_word(e_curw),
         .fill_we(fill_we[2]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
 
     // S1/S2/S3 track which cache read their pixel needs (latched with the address)
     logic s1_nm, s2_nt, s3_ne;
     logic s4_nm, s4_nt;        // composite: capture B / VRAM display needed (looked up at S3)
-    logic [1:0] s4_mw;         // capture B halfword
     assign fill_req[0] = ((s1.v && s1_nm) || (s4.v && s4_nm)) && !m_hit;
     assign fill_req[1] = ((s2.v && s2_nt) || (s4.v && s4_nt)) && !t_hit;
     assign fill_req[2] = s3.v && s3_ne && !e_hit;
@@ -420,7 +423,11 @@ module gpu2d_bg
     logic [16:0] t_xpos;
     logic [27:0] fx, fy;
     logic        s0_oob;
-    logic [18:0] s0_maddr, s0_taddr, s0_off, s0_sum;
+    logic [18:0] s0_off, s0_sum;
+    // s0_sum is both the map address and the bitmap texel address, ungated: a
+    // kind without a map read has s0_nm = 0, and s1.taddr is the texel address
+    // only for the bitmap kinds (the tiled ones form theirs at S1; K_3D has
+    // s1_nt = 0, K_COMP its own lookups)
     logic [6:0]  a_tx, a_ty;
     logic [9:0]  b_px, b_py;
     logic [3:0]  xw, yw, ys;
@@ -448,8 +455,6 @@ module gpu2d_bg
         b_px = 10'(fx[17:8] & ~(10'h3FF << xw));
         b_py = 10'(fy[17:8] & ~(10'h3FF << yw));
         s0_oob = 1'b0;
-        s0_maddr = '0;
-        s0_taddr = '0;
         s0_nm = 1'b0;
         // one adder: every kind's offset is a concatenation or an OR of fields
         // in disjoint bits (a_tx < 2^(4+size); b_px < 2^xw, and ys == xw)
@@ -473,11 +478,6 @@ module gpu2d_bg
             default: ;
         endcase
         s0_sum = c_map + s0_off;
-        case (c_kind)
-            K_TEXT, K_AFF, K_EXT16: s0_maddr = s0_sum;
-            K_BMP8, K_BMPD, K_LARGE: s0_taddr = s0_sum;
-            default: ;
-        endcase
         // the composite pass looks up capture source B for S3's pixel, checks
         // the miss in S4 and registers the halfword into S5, where the capture
         // uses it (DoCapture: srcB + (offset & 0xFFFF) + x); the other passes
@@ -487,9 +487,11 @@ module gpu2d_bg
         if (c_kind == K_COMP) begin
             m_ablk  = blk_of(SP_LCDC, j_eng, {st.dispcnt[19:18], c3_cb, 1'b0});
             m_aword = c3_cb[3:2];
+            m_ahalf = c3_cb[1:0];
         end else begin
-            m_ablk  = blk_of(SP_BG, j_eng, s0_maddr & (!j_eng ? 19'h7FFFF : 19'h1FFFF));
-            m_aword = s0_maddr[4:3];
+            m_ablk  = blk_of(SP_BG, j_eng, s0_sum & (!j_eng ? 19'h7FFFF : 19'h1FFFF));
+            m_aword = s0_sum[4:3];
+            m_ahalf = s0_sum[2:1];
         end
     end
 
@@ -500,8 +502,8 @@ module gpu2d_bg
     logic [18:0] s1_taddr, s1_off, s1_sum;
     logic        s1_nt;
     always_comb begin
-        s1_ent = hw_of(m_q, s1_maddr_q[2:1]);
-        if (c_kind == K_AFF) s1_ent = {8'd0, byte_of(m_q, s1_maddr_q[2:0])};
+        s1_ent = m_q[15:0];                                 // (the halfword s1_maddr_q[2:1])
+        if (c_kind == K_AFF) s1_ent = {8'd0, s1_maddr_q[0] ? m_q[15:8] : m_q[7:0]};
         s1_num = s1_ent[9:0];
         s1_row = (c_kind == K_TEXT) ? (s1_ent[11] ? ~c_yfine : c_yfine) : (s1_ent[11] && c_kind == K_EXT16 ? ~s1.yf : s1.yf);
         s1_col = (s1_ent[10] && c_kind != K_AFF) ? ~s1.xf : s1.xf;
@@ -528,19 +530,25 @@ module gpu2d_bg
         if (c_kind == K_COMP) begin
             t_ablk  = blk_of(SP_LCDC, j_eng, {st.dispcnt[19:18], j_line, s3.x, 1'b0});
             t_aword = s3.x[3:2];
+            t_ahalf = s3.x[1:0];
         end else begin
             t_ablk  = blk_of(SP_BG, j_eng, s1_taddr & (!j_eng ? 19'h7FFFF : 19'h1FFFF));
             t_aword = s1_taddr[4:3];
+            t_ahalf = s1_taddr[2:1];
         end
     end
 
     // ---------------------------------------------------------------- S2
     // window mask (GPU2D::CalculateWindowMask), per pixel in closed form
-    function automatic logic hwin(input logic s0, input logic [7:0] x1, input logic [7:0] x2, input logic [7:0] i);
-        if (x2 <= i && (x2 >= x1 || x1 > i)) return 1'b0;
+    // (ge: x2 >= x1, registered: st is loaded before the job's start and
+    // constant during it, so the register holds it long before S2's first pixel)
+    function automatic logic hwin(input logic s0, input logic [7:0] x1, input logic [7:0] x2, input logic ge, input logic [7:0] i);
+        if (x2 <= i && (ge || x1 > i)) return 1'b0;
         if (x1 <= i) return 1'b1;
         return s0;
     endfunction
+    logic [1:0]  w_ge;         // per window: x2 >= x1
+    always_ff @(posedge clk) w_ge <= {st.win1[1] >= st.win1[0], st.win0[1] >= st.win0[0]};
     logic [7:0]  s2_byte;
     logic [7:0]  s2_ci;        // colour index
     logic [15:0] s2_hw;
@@ -550,8 +558,8 @@ module gpu2d_bg
     logic [1:0]  s2_win;
     logic [5:0]  s2_wmask;
     always_comb begin
-        s2_byte = byte_of(t_q, s2.taddr[2:0]);
-        s2_hw   = hw_of(t_q, s2.taddr[2:1]);
+        s2_byte = s2.taddr[0] ? t_q[15:8] : t_q[7:0];        // (t_q: the halfword s2.taddr[2:1])
+        s2_hw   = t_q[15:0];
         s2_ci   = (c_kind == K_TEXT && !c_bpp8) ? {4'd0, s2.hi ? s2_byte[7:4] : s2_byte[3:0]} : s2_byte;
         s2_direct = c_kind == K_BMPD;
         s2_op   = !s2.oob && (s2_direct ? s2_hw[15] : s2_ci != 8'd0);
@@ -561,8 +569,8 @@ module gpu2d_bg
         e_ablk  = blk_of(SP_BGEXT, j_eng, {4'd0, s2_eaddr});
         // the window hits depend only on x and the job's window registers, so
         // they are taken a stage early (timing: win1 -> s4.kb, #466)
-        s2_win[0] = st.w0act[0] && hwin(st.w0act[1], st.win0[0], st.win0[1], s2.x);
-        s2_win[1] = st.w1act[0] && hwin(st.w1act[1], st.win1[0], st.win1[1], s2.x);
+        s2_win[0] = st.w0act[0] && hwin(st.w0act[1], st.win0[0], st.win0[1], w_ge[0], s2.x);
+        s2_win[1] = st.w1act[0] && hwin(st.w1act[1], st.win1[0], st.win1[1], w_ge[1], s2.x);
         e_aword = s2_eaddr[4:3];
         // window (st is constant during the job)
         if (st.dispcnt[15:13] == 3'd0) s2_wmask = 6'h3F;
@@ -674,7 +682,7 @@ module gpu2d_bg
     logic [17:0] disp, mb;
     logic        white;
     logic [4:0]  mbf;
-    logic [15:0] ca, cb, cw;
+    logic [15:0] ca, cb, cbs, cw;
     logic [4:0]  ceva, cevb;
     logic        cbnull;
     logic [2:0][10:0] msum, csum;
@@ -701,8 +709,11 @@ module gpu2d_bg
         // capture (DoCapture)
         if (capcnt[24]) ca = {s5.c3d[22:15] != 8'd0, s5.c3d[14:0]};
         else            ca = {1'b1, s5.o2d[17:13], s5.o2d[11:7], s5.o2d[5:1]};
-        cbnull = !capcnt[25] && !lcdc_map[st.dispcnt[19:18]];
-        cb = capcnt[25] ? s5.fifo : cbnull ? 16'd0 : s5.capb;
+        // (source B's null gates the B product, not its multiplier input; both chosen at S4 -> S5: CAPCNT, the LCDC map
+        // and DISPCNT change only between jobs)
+        cbnull = s5.cbn;
+        cbs = s5.cbs;
+        cb = cbnull ? 16'd0 : cbs;
         ceva = capcnt[4:0] > 5'd16 ? 5'd16 : capcnt[4:0];
         cevb = capcnt[12:8] > 5'd16 ? 5'd16 : capcnt[12:8];
         case (capcnt[30:29])
@@ -710,7 +721,7 @@ module gpu2d_bg
             2'd1: cw = cb;
             default: begin
                 for (int i = 0; i < 3; i++) begin
-                    csum[i] = 11'(ca[i*5 +: 5] * (ca[15] ? ceva : 5'd0)) + 11'(cb[i*5 +: 5] * (cb[15] ? cevb : 5'd0)) + 11'd8;
+                    csum[i] = 11'(ca[i*5 +: 5] * (ca[15] ? ceva : 5'd0)) + (cbnull ? 11'd0 : 11'(cbs[i*5 +: 5] * (cbs[15] ? cevb : 5'd0))) + 11'd8;
                     cw[i*5 +: 5] = csum[i][10:4] > 7'd31 ? 5'd31 : csum[i][8:4];
                 end
                 cw[15] = (ceva != 0 && ca[15]) || (cevb != 0 && cb[15]);
@@ -917,9 +928,9 @@ module gpu2d_bg
                 s1.oob <= s0_oob;
                 s1.xf <= c_kind == K_TEXT ? t_xpos[2:0] : fx[10:8];
                 s1.yf <= fy[10:8];
-                s1.taddr <= s0_taddr;
+                s1.taddr <= s0_sum;
                 s1_nm <= s0_nm;
-                s1_maddr_q <= s0_maddr;
+                s1_maddr_q <= s0_sum;
                 // a prefetch pass samples one pixel in 8 (x = 0..256): one adder
                 // per axis, the step scaled by 8 there
                 if (issue) begin
@@ -959,7 +970,6 @@ module gpu2d_bg
                 s4.x <= s3.x;
                 s4_nm <= c3_nm && s3.v && c_kind == K_COMP;
                 s4_nt <= c_vdisp && s3.v && c_kind == K_COMP;
-                s4_mw <= c3_cb[1:0];
                 s4.e <= s3_e;
                 s4.ka <= ka; s4.kb <= kb; s4.b63 <= b63;
                 s4.fifo <= fifo_rdata;
@@ -972,8 +982,9 @@ module gpu2d_bg
                 s5.x <= s4.x;
                 s5.o2d <= o2d;
                 s5.c3d <= {l3d_rdata[31:24], l3d_rdata[21:17], l3d_rdata[13:9], l3d_rdata[5:1]};
-                s5.vdisp <= hw_of(t_q, s4.x[1:0]);
-                s5.capb <= hw_of(m_q, s4_mw);
+                s5.vdisp <= t_q[15:0];      // (the halfword s4.x[1:0])
+                s5.cbs <= capcnt[25] ? s4.fifo : m_q[15:0];   // (m_q: the halfword of capture source B)
+                s5.cbn <= !capcnt[25] && !lcdc_map[st.dispcnt[19:18]];
                 s5.fifo <= s4.fifo;
                 // S5 -> S6
                 s6.v <= s5.v;
@@ -994,6 +1005,9 @@ module gpu2d_bg
     assign out_x     = s6.x;
     assign out_rgb   = s6.rgb;
     assign cap_we    = s6.v && s6.cw && !(|fill_req[2:0]) && !pf_bp;
-    assign cap_addr  = {capcnt[17:16], 16'({capcnt[19:18], 14'd0} + (c_capw[8] ? {j_line, 8'd0} : {1'b0, j_line, 7'd0}) + {8'd0, s6.x})};
+    // (DoCapture: offset + line * width + x) cap_we needs x < width (s6.cw), so
+    // line * width + x is a concatenation; only the offset's 2 bits add
+    assign cap_addr  = {capcnt[17:16], 2'(capcnt[19:18] + (c_capw[8] ? j_line[7:6] : {1'b0, j_line[7]})),
+                        c_capw[8] ? {j_line[5:0], s6.x} : {j_line[6:0], s6.x[6:0]}};
     assign cap_data  = s6.cdata;
 endmodule

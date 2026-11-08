@@ -21,6 +21,8 @@ nsmb-busy    nsmb.nds       nsmb-busy.mln    10     0      0
 mkds-opening mkds.nds       mkds-opening.mln 10     46890  0
 kh-first-level kh358.nds    kh-first-level.mln 10   19315  0
 gsdd-title   gsdd.nds       gsdd-title.mln   10     -      -      known
+# the maintainer 2026-11-06 (NDSPlay16/22): Continue from his save (build/gsdd-tester.sav), the Lookout Cabin: "black lines cover almost the entire screen" (state at census frame 2640)
+gsdd-continue gsdd.nds      gsdd-continue.mln 16    -      -
 mlpit-title  mlpit.nds      mlpit-title.mln  10     0      0
 mlpit-intro  mlpit.nds      mlpit-intro.mln  10     0      0
 kssu-title   kssu.nds       kssu-title.mln   10     0      0
@@ -62,7 +64,14 @@ tomodachi-island tomodachi.nds tomodachi-island.mln 64 -    -      known
 gtacw-menu  gtacw.nds      gtacw-menu.mln   10     -      -
 mph-hunt    mph.nds        mph-hunt.mln     10     -      -
 ff4-battle  ff4.nds        ff4-battle.mln   10     -      -
+# the maintainer 2026-11-06: "FF4 after new game, its 3D scene has many black lines" (the airship deck; census frame 1700 from boot, START/A through the title)
+ff4-newgame ff4.nds        ff4-newgame.mln  16     -      -
 eba-brief   eba.nds        eba-brief.mln    10     -      -
 # pkw2-load: pkw2-exit walked DOWN 114 frames (census --save-state-at), just before White 2 streams the next map
 # block from the card; sim/pocket_ds/w2load.sh compares main RAM and GX entries after the load with melonDS's
 pkw2-load   pkw2.nds       pkw2-load.mln    32     -      -      known  hold=DOWN
+# Burnout Legends (the maintainer's RC3 #2021 report: race barely visible, then only the skybox): Single Event > Race,
+# A held (accelerate). From burnout-race0.mln (the countdown): burnout-race 100 frames on (GET READY, the town;
+# 381 polygons / 1,363 vertices on line 96), burnout-forest 900 frames on (forest road, 118 mph)
+burnout-race   burnout.nds  burnout-race.mln   16  -  -  known  hold=A
+burnout-forest burnout.nds  burnout-forest.mln 16  -  -  known  hold=A

@@ -26,22 +26,26 @@
 //   write 2    the command: [2:0] blocks, [20:3] first block (fc_data); slots with write 8-12
 //   write 3    the command: [14:0] length (fc_data); bit 31: send it (and forget the last marker), bit 30: a background prefetch
 //   write 4    reference bit: [13:0] slot, [16] value, [17] write (the read of it follows)
-//   write 5    prefetch trigger: [17:0] block, [31] armed, [30] a prefetch is due when the client reaches it,
-//              [29] new-block mode: every table lookup that hits (the client moved to another cached block) sets
-//              'trigger seen'; read 2's last block is that block (or a later one)
+//   write 5    [29] new-block mode: every table lookup that hits (the client moved to another cached block) sets
+//              'trigger seen'; read 2's last block is that block (or a later one). (Until 2026-11-07 also a one-block
+//              prefetch trigger, [17:0] block, [31] armed, [30] due on reaching it; the stream firmware never armed it)
 //   write 6    [0] ready, [1] fail, [2] miss done, [3] forget the last block, [4] trigger seen done,
 //              [6] release the client, [7] a prefetch is due, [8] the prefetch has started, [9] the background
 //              prefetch is finished
 //   write 7    the miss is fetched into slot [13:0]: read it from there as the last block (nds_cart_cache's
 //              L_DONE: no table read, no reference bit); write 6 bit 2 instead looks the block up again
 //   write 8-12 the command's slot k-8: [13:0] (an MLAB the host reads without a clock, fc_slot at fc_sel; held as fc_data is)
-//   read 0     {miss, trigger seen, marker, marker error, fc_busy, ref bit, last valid, held, due, in flight, 4'd0, block}
+//   read 0     {miss, trigger seen, marker, marker error, fc_busy, ref bit, last valid, held, due, in flight, controls
+//              frame, the controls' 3 bits, block}
 // The client is held at its next idle clock (no read waiting) when a prefetch is due and none is in flight,
 // or when the one in flight has its marker: nds_cart_cache's FSM does that work there before the next read,
 // so the firmware, which takes longer, does it while the client waits, and both send the same commands.
 //   read 1     rom_size
 //   read 2     {SLOTS[13:0], the last block [17:0]}
-//   read 3     the same as read 0, acknowledged once miss, trigger seen or marker is set
+//   read 3     the same as read 0, acknowledged once miss, trigger seen or marker is set, or a controls frame waits
+// The controls (nds_controls FW = 1, docs/space-ctl.md; its header has the registers): writes 0-1 (ctl_we0/1,
+// the data on m_wdata), read 4 (ctl_r0; it takes the frame, ctl_take), read 0 bits 21:18 ({ctl_pend, ctl_st}),
+// read 2 bits 31:18 once ready (ctl_set); ctl_pend is an event of read 3
 `default_nettype none
 module nds_cart_scpu #(
     parameter [23:0] TABLE_W = 24'h30_0000,
@@ -82,7 +86,12 @@ module nds_cart_scpu #(
     output reg [31:0] st_blocks = 0,
     output reg [31:0] st_wait = 0,
     output wire dg_wait,
-    output wire dg_cmd
+    output wire dg_cmd,
+    output wire ctl_we0, ctl_we1, ctl_take,
+    input wire ctl_pend,
+    input wire [31:0] ctl_r0,
+    input wire [2:0] ctl_st,
+    input wire [13:0] ctl_set
 );
     localparam integer SB = $clog2(SLOTS);
     localparam [5:0] TB = TABLE_W[23:18];
@@ -107,7 +116,8 @@ module nds_cart_scpu #(
     wire io_go = io && !io_ack && !sv_hold && (db_we || db_adr[3:2] != 2'd3 || event_v);
     assign r_valid = m_rvalid && m_quad;    // (a quad is always the client's)
     assign r_data = m_rdata;
-    assign sv_rdt = !io_ack ? m_rdata : db_adr[3:2] == 2'd1 ? rom_size : db_adr[3:2] == 2'd2 ? {SLOTS[13:0], last_b} : status;
+    assign sv_rdt = !io_ack ? m_rdata : db_adr[4] ? ctl_r0 : db_adr[3:2] == 2'd1 ? rom_size :
+                    db_adr[3:2] == 2'd2 ? {ready ? ctl_set : SLOTS[13:0], last_b} : status;
     // the command: length, first block, blocks in flops, the slots in an MLAB
     reg [14:0] fc_len = 0;
     reg [17:0] fc_lb = 0;
@@ -116,6 +126,9 @@ module nds_cart_scpu #(
     (* ramstyle = "MLAB, no_rw_check" *) reg [13:0] fc_slots [0:7];
     always @(posedge clk) if (io_go && db_we && db_adr[5]) fc_slots[db_adr[4:2]] <= db_dat[13:0];
     assign fc_slot = fc_slots[fc_sel];
+    assign ctl_we0 = io_go && db_we && db_adr[5:2] == 4'd0;
+    assign ctl_we1 = io_go && db_we && db_adr[5:2] == 4'd1;
+    assign ctl_take = io_go && !db_we && db_adr[4:2] == 3'd4;
 
     // ---------------- reference bits ----------------
     reg refmem [0:SLOTS-1];
@@ -135,11 +148,11 @@ module nds_cart_scpu #(
     reg [SB-1:0] last_slot = 0;
     reg [17:0] last_b = 0;
     reg last_v = 0;
-    reg miss = 0, pf_seen = 0, mk_v = 0, mk_e = 0, pf_trig_v = 0, hold = 0, pf_due = 0, pf_fly = 0, pf_cont = 0, fast = 0, pf_any = 0;
-    reg [17:0] pf_trig = 0;
+    reg miss = 0, pf_seen = 0, mk_v = 0, mk_e = 0, hold = 0, pf_due = 0, pf_fly = 0, fast = 0, pf_any = 0;
     wire [17:0] cb = qaddr[29:12];
-    wire event_v = miss || pf_seen || hold;
-    wire [31:0] status = {miss, pf_seen, mk_v, mk_e, fc_busy, ref_q, last_v, hold, pf_due, pf_fly, 4'd0, cb};
+    wire c_pend = ctl_pend && ready;         // (no controls frame before the start-up is done)
+    wire event_v = miss || pf_seen || hold || c_pend;
+    wire [31:0] status = {miss, pf_seen, mk_v, mk_e, fc_busy, ref_q, last_v, hold, pf_due, pf_fly, c_pend, ctl_st, cb};
     function automatic [13:0] pad14(input [SB-1:0] x);
         pad14 = x;
     endfunction
@@ -180,7 +193,7 @@ module nds_cart_scpu #(
                 end
                 4'd4: begin ref_waddr <= db_dat[SB-1:0]; ref_wd <= db_dat[16]; ref_we <= db_dat[17]; end
                 4'd7: begin last_slot <= db_dat[SB-1:0]; last_b <= cb; last_v <= 1; fast <= 1; miss <= 0; end
-                4'd5: begin pf_trig <= db_dat[17:0]; pf_trig_v <= db_dat[31]; pf_cont <= db_dat[30]; pf_any <= db_dat[29]; end
+                4'd5: pf_any <= db_dat[29];
                 4'd6: begin
                     if (db_dat[0]) ready <= 1;
                     if (db_dat[1]) fail <= 1;
@@ -197,7 +210,7 @@ module nds_cart_scpu #(
 
         if (reset || !start) begin
             st <= H_IDLE; m_valid <= 0; mem_busy <= 0; mem_sv <= 0; sv_fly <= 0;
-            ready <= 0; fail <= 0; miss <= 0; last_v <= 0; pf_seen <= 0; pf_trig_v <= 0; mk_v <= 0; hold <= 0; pf_due <= 0; pf_fly <= 0; pf_any <= 0;
+            ready <= 0; fail <= 0; miss <= 0; last_v <= 0; pf_seen <= 0; mk_v <= 0; hold <= 0; pf_due <= 0; pf_fly <= 0; pf_any <= 0;
         end else if (!mem_busy) begin
             case (st)
                 H_IDLE: if (ready && c_valid && !hold) begin
@@ -205,8 +218,6 @@ module nds_cart_scpu #(
                 end else if (ready && !hold && ((pf_due && !pf_fly) || (pf_fly && mk_v))) hold <= 1;
                 H_LOOK: begin
                     st_lookups <= st_lookups + 1'b1;
-                    // the client reached a prefetched run: the firmware fetches the next one
-                    if (pf_trig_v && cb == pf_trig) begin pf_trig_v <= 0; pf_seen <= 1; if (pf_cont) pf_due <= 1; end
                     if (last_v && last_b == cb) st <= H_READ;
                     else begin
                         m_valid <= 1; m_write <= 0; m_quad <= 0; m_addr <= {TB, cb}; m_be <= 4'b0000;

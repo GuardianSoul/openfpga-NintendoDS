@@ -31,6 +31,7 @@ module gpu2d
     parameter int MAP_IDXW  = 6,
     parameter int TEX_IDXW  = 6,
     parameter bit MOSAIC    = 1,  // 0: no BG/OBJ mosaic (fit setting)
+    parameter bit CAPTURE   = 1,  // 0: no display capture (gpu2d_bg CAPTURE, a temporary fit setting)
     // 1: CPU OAM reads (oam_cre/oam_cra) take the OAM read port while the OBJ engine is idle (oam_cgnt; the
     // word in oam_cq the clock after), so nds_fabric keeps no OAM copy (nds_top OAM_SHARE)
     parameter bit OAM_CPU   = 0,
@@ -430,7 +431,7 @@ module gpu2d
     assign bg_busy = bg_ubusy || ld || ld_q || ld_go;
 
     gpu2d_bg #(.PERSIST(PERSIST), .MAP_IDXW(MAP_IDXW), .TEX_IDXW(TEX_IDXW), .EXT_IDXW(EXT_IDXW), .PREFETCH(PREFETCH),
-               .WST_RF(WST_RF), .MOSAIC(MOSAIC), .EXT_TAG_MLAB(TAG_MLAB)) u_bg (
+               .WST_RF(WST_RF), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .EXT_TAG_MLAB(TAG_MLAB)) u_bg (
         .clk, .rst, .start(ld_go), .eng(ld_eng), .line(ld_line), .objslot(ld_slot),
         .busy(bg_ubusy), .done(bg_done), .st(wst), .rf_raddr(b_rf_ra), .rf_rdata(rf_q), .rf_free(b_rf_free), .pre(b_pre), .capcnt, .cap_en, .lcdc_map, .vram_wr,
         .fill_req(b_req), .fill_blk(b_blk), .pf_ack(b_pf_ack), .fill_we(b_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_last(flast),

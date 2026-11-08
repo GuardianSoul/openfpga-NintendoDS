@@ -10,4 +10,5 @@ SECTIONS {
     .bss : { *(.bss*) *(.sbss*) *(COMMON) }
     . = ALIGN(4);
     __bss_end = .;
+    __global_pointer$ = __bss_start + 0x800;
 }

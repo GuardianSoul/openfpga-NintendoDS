@@ -66,6 +66,7 @@ module nds_dcfifo #(parameter integer W = 32, parameter integer A = 4) (
     output wire full,
     output wire wempty,             // (wclk) every word written has been popped (rd); a few clocks late
     output wire [A:0] wfill,        // (wclk) words written and not yet popped; a few clocks high
+    output wire [A:0] wpcnt,        // (wclk) words popped, mod 2^(A+1); a few clocks low
     output reg overflow = 0,        // sticky
     input wire rclk,
     input wire rd,                  // pop the head; only while valid
@@ -89,6 +90,7 @@ module nds_dcfifo #(parameter integer W = 32, parameter integer A = 4) (
         for (integer i = A - 1; i >= 0; i = i - 1) pbin_w[i] = pbin_w[i + 1] ^ pgray_w[i];
     end
     assign wfill = wbin - pbin_w;
+    assign wpcnt = pbin_w;
     wire [A:0] rgray_w, wgray_r;
     nds_sync #(.W(A+1)) s_r2w (.clk(wclk), .d(rgray), .q(rgray_w));
     nds_sync #(.W(A+1)) s_w2r (.clk(rclk), .d(wgray), .q(wgray_r));

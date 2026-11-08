@@ -16,6 +16,7 @@ melonDS's frames near it (the Pocket's frame k after the release shows melonDS's
 from the 4th frame after the release on. --update writes the measured values as the baseline.
 """
 import argparse
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re
@@ -148,13 +149,18 @@ PACE_MIN = 30                                                          # melonDS
 OPT = {'tag': '', 'core_param': [], 'plus': [], 'diag': False}         # --tag, --core-param (a variant's runs beside the baseline's)
 
 
+def not_run(s, detail):
+    # a scene that didn't run (its import or run.py failed) is an ERROR, never KNOWN: it measured nothing
+    return dict(s, known=False, error=True), False, detail, None
+
+
 def run_scene(s, update, no_run=False):
     d = ROOT / 'build/scenes' / s['name']
     d.mkdir(parents=True, exist_ok=True)
     try:
         prepare(s, d)
     except (RuntimeError, subprocess.CalledProcessError) as e:
-        return s, False, f'prepare: {e}', None
+        return not_run(s, f'prepare: {e}')
     sfx = '-' + OPT['tag'] if OPT['tag'] else ''
     shots, log_p = d / ('pocket' + sfx), d / f'run{sfx}.log'
     if no_run:
@@ -178,7 +184,7 @@ def run_scene(s, update, no_run=False):
     with open(log_p, 'w') as log:
         rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode
     if rc:
-        return s, False, f'run.py exit {rc} (see {log_p})', None
+        return not_run(s, f'run.py exit {rc} (see {log_p})')
     if OPT['diag']:
         r = subprocess.run([sys.executable, str(ROOT / 'sim/pocket_ds/diag_check.py'), str(log_p), str(ndg)],
                            capture_output=True, text=True)
@@ -189,6 +195,8 @@ def run_scene(s, update, no_run=False):
 
 
 def compare(s, d, shots, update, log_p):
+    if not log_p.exists():
+        return not_run(s, f'no run log ({log_p})')
     text = log_p.read_text(errors='replace')
     # the testbench's ERROR lines, and Verilator's for $error/$fatal and assertions (%Error, %Fatal: the ring's
     # "staging slot ... still holds line" check printed %Error and the scene still passed)
@@ -197,7 +205,7 @@ def compare(s, d, shots, update, log_p):
         return s, False, f'{len(errs)} error lines, first: {errs[0][:160]}', None
     m = re.search(r'import: released at \d+, video frame (\d+)', text)
     if not m:
-        return s, False, 'import never released', None
+        return not_run(s, 'import never released')
     rel = int(m.group(1))
     # 2D lines the display missed after the release (a stale line on screen): any fails the scene
     # (only the run's frames: the quit read-backs after the 'video:' summary load the SDRAM and are not play)
@@ -278,7 +286,19 @@ def compare(s, d, shots, update, log_p):
     return s, True, detail, worst
 
 
+def verdict(s, passed):
+    # a known-failing scene (scenes.txt 'known': an acceptance scene for a fix to come) is reported, not counted;
+    # a scene that didn't run is an ERROR and fails the sweep
+    return 'ERROR' if s.get('error') else 'PASS' if passed else 'KNOWN' if s['known'] else 'FAIL'
+
+
 def main():
+    # Disk guard: the shared Desktop disk filled up three times on 2026-11-06.
+    # Sim builds take 1-4 GB each; stop here rather than fill the disk.
+    free_gb = shutil.disk_usage(ROOT).free / 2**30
+    if free_gb < 30 and not os.environ.get('NDS_DISK_GUARD_OFF'):
+        sys.exit(f'only {free_gb:.0f} GB free on the disk (need 30): delete finished '
+                 'sim builds, or wait for the hourly nds-disk-prune timer')
     ap = argparse.ArgumentParser()
     ap.add_argument('--only', help='scene names, comma-separated')
     ap.add_argument('--jobs', type=int, default=3, help='scenes at once (AGENTS.md: at most 3 sims per session)')
@@ -314,9 +334,8 @@ def main():
         results = list(ex.map(lambda s: run_scene(s, a.update, a.no_run), todo))
     ok = True
     for s, passed, detail, worst in results:
-        # a known-failing scene (scenes.txt 'known': an acceptance scene for a fix to come) is reported, not counted
-        print(f'{s["name"]:12s} {"PASS" if passed else "KNOWN" if s["known"] else "FAIL"}  {detail}')
-        ok &= passed or s['known']
+        print(f'{s["name"]:12s} {verdict(s, passed)}  {detail}')
+        ok &= verdict(s, passed) in ('PASS', 'KNOWN')
         if a.update and worst is not None:
             s['top'], s['bottom'] = worst
     if a.update:

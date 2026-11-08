@@ -310,7 +310,7 @@ index f6034f2..4b552b9 100644
              if ((w0 == w1) && !(w0 & mask) && !(w1 & mask))
                  this->linear = true;
              else
-@@ -107,9 +112,15 @@ private:
+@@ -107,9 +112,21 @@ private:
              {
                  // along Y
  
@@ -318,6 +318,12 @@ index f6034f2..4b552b9 100644
 +                this->w0n = w0;
 +                this->w0d = w0;
 +                this->w1d = w1;
++                // DS (rules3d v19 persp_ybig): Z-buffer, max(w) >= 0x8000: w >> 8, linear when the shifted w are equal
++                if (!wbuffer && (w0 >= 0x8000 || w1 >= 0x8000))
++                {
++                    this->w0n = w0 >> 8; this->w0d = w0 >> 8; this->w1d = w1 >> 8;
++                    if ((w0 >> 8) == (w1 >> 8)) this->linear = true;
++                }
 +#else
                  this->w0n = w0 >> 1;
                  this->w0d = (w0 + ((w0 & ~w1) & 1)) >> 1;
@@ -326,7 +332,7 @@ index f6034f2..4b552b9 100644
  
                  this->shift = 9;
              }
-@@ -117,9 +128,21 @@ private:
+@@ -117,9 +134,21 @@ private:
              {
                  // along X
  
@@ -348,7 +354,20 @@ index f6034f2..4b552b9 100644
  
                  this->shift = 8;
              }
-@@ -141,7 +164,7 @@ private:
+@@ -131,7 +160,12 @@ private:
+             this->x = x;
+             if ((xdiff != 0) && ((!linear) || wbuffer))
+             {
++#if !defined(MELONDS_STOCK) && defined(DS_RULE_YPERSP)
++                // DS (rules3d v19 persp_ybig_wbuf): the full-w numerator doesn't wrap at 32 bits
++                u64 num = ((u64)x * w0n) << shift;
++#else
+                 u32 num = (x * w0n) << shift;
++#endif
+                 u32 den = (x * w0d) + ((xdiff-x) * w1d);
+ 
+                 // this seems to be a proper division on hardware :/
+@@ -141,7 +175,7 @@ private:
              }
          }
  
@@ -357,7 +376,7 @@ index f6034f2..4b552b9 100644
          {
              if (xdiff == 0 || y0 == y1) return y0;
  
-@@ -156,10 +179,29 @@ private:
+@@ -156,10 +190,29 @@ private:
              else
              {
                  // linear interpolation
@@ -387,7 +406,7 @@ index f6034f2..4b552b9 100644
              }
          }
  
-@@ -179,6 +221,17 @@ private:
+@@ -179,6 +232,17 @@ private:
              {
                  // Z-buffering: linear interpolation
                  // still doesn't quite match hardware...
@@ -405,7 +424,7 @@ index f6034f2..4b552b9 100644
                  s32 base = 0, disp = 0, factor = 0;
  
                  if (z0 < z1)
-@@ -368,7 +421,13 @@ private:
+@@ -368,7 +432,13 @@ private:
              if (Negative) startx = xlen - startx;
              if (side)     startx = startx - *length + 1;
  
@@ -419,7 +438,7 @@ index f6034f2..4b552b9 100644
              *coverage = (1<<31) | ((startcov & 0x3FF) << 12) | (xcov_incr & 0x3FF);
  
              if constexpr (swapped) *length = 1;
-@@ -391,7 +450,13 @@ private:
+@@ -391,7 +461,13 @@ private:
              else
              {
                  s32 cov = ((dx >> 9) + (Increment >> 10)) >> 4;

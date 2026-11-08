@@ -35,7 +35,10 @@ module sound_ram #(
         endcase
     endfunction
     logic [DW-1:0] mem [0:(1<<AW)-1] /*verilator public_flat_rw*/;
-    initial if (ADPCM) for (int i = 0; i < 89; i++) mem[128 + i] = DW'(adpcm_step(7'(i)));
+    // {step/4 + step/8, step}: the decode adds step/8 or the pair as one term
+    // (sound.sv vsum); indexes 89-127 are 0, so a step read there gives 0
+    initial if (ADPCM) for (int i = 0; i < 128; i++)
+        mem[128 + i] = DW'({15'(adpcm_step(7'(i)) >> 2) + 15'(adpcm_step(7'(i)) >> 3), adpcm_step(7'(i))});
     always_ff @(posedge clk) if (ce) begin
         if (we) mem[wa] <= wd;
         q <= mem[ra];

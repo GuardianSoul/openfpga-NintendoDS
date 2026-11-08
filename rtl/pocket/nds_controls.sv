@@ -47,8 +47,27 @@
 // it moved, the pen went down or touch mode was switched on in the last 180
 // DS frames (3 s), never in top only.
 // ds_keys is the pad as the game sees it, in APF bit order.
+// FW = 1 (core_top_ds SHELL_CPU = 1, docs/space-ctl.md): the per-frame work (the left stick's D-pad, the cursor,
+// its idle count, the gestures and their points) runs in SERV's firmware (sw/scpu/cache.c, ctl_step) after each
+// frame pulse; hardware keeps the pad, the layout and touch-mode toggles, the live masks (ds_keys, pen) and the
+// registers the firmware writes. At the frame pulse it latches what the frame's update reads (io_r0: the keys,
+// touch, the pen, and the touch-off and touch-on events since the last frame); the firmware's results follow
+// within a few thousand clocks. Registers (nds_cart_scpu; one read word, as a second costs twice the first):
+//   read 4  io_r0: at the frame [7:0] keys[7:0] (the D-pad, A, B, X, Y), [8] touch, [9] analog && !top only;
+//           the sticks now (value / 8, and for the left stick whether value % 8 != 0): [15:10] {LX / 8, LX % 8 != 0},
+//           [21:16] the same for LY, [26:22] RX / 8, [31:27] RY / 8 (the firmware keeps the last frame's sample for
+//           the cursor's rate); the read takes the frame (io_pend, read 0 bit 21)
+//   read 0  [20:18] io_st, at the frame: {pen, touch was off on a clock since the last frame, touch mode was
+//           switched on since then}
+//   read 2  [31:18] io_set once the cache is ready (SLOTS before): {speed, gest}
+//   write 0 {g_y, g_x, cur_y, cur_x}
+//   write 1 the left stick's D-pad (hysteresis, applied on every clock): [7:4] LY, [3:0] LX, each {this sample
+//           holds a press above, below, presses above, below}; [8] a gesture runs (its point in write 0), [9] the
+//           cursor is shown
 `default_nettype none
-module nds_controls (
+module nds_controls #(
+    parameter FW = 0
+) (
     input wire clk, reset,
     input wire [15:0] apf_keys,             // cont1_key[15:0], any clock (synchronised inside)
     input wire [3:0] apf_type,              // cont1_key[31:28], any clock
@@ -67,7 +86,15 @@ module nds_controls (
     output reg [7:0] cur_x = 8'd128,
     output reg [7:0] cur_y = 8'd96,
     output wire [7:0] pen_x, pen_y,         // where the pen touches: the cursor, or a gesture's point
-    output wire [15:0] ds_keys
+    output wire [15:0] ds_keys,
+    // FW = 1: SERV's registers (nds_cart_scpu, clk)
+    input wire io_we0, io_we1,              // writes 0 and 1 (io_wd)
+    input wire io_take,                     // read 4
+    input wire [31:0] io_wd,
+    output wire io_pend,                    // a frame waits for the firmware
+    output wire [31:0] io_r0,               // read 4
+    output wire [2:0] io_st,                // read 0's bits 20:18
+    output wire [13:0] io_set               // read 2's bits 31:18 once the cache is ready
 );
     localparam UP = 0, DOWN = 1, LEFT = 2, RIGHT = 3, R3 = 13;
     wire top_only = layout == 2'd1;
@@ -85,73 +112,31 @@ module nds_controls (
     // Only each axis's top five bits ({RY, RX, LY, LX}[7:3]) are kept, and for the left stick whether its low three
     // are nonzero: the D-pad thresholds (exact) and the cursor rate need no more (area, 2026-10-28)
     (* async_reg = "true" *) reg ana1 = 0, ana = 0;
-    reg [21:0] joy = {2'b00, {4{5'h10}}};
-    always @(posedge clk) begin
-        ana1 <= apf_type == 4'h3; ana <= ana1;
-        if (frame) joy <= {|apf_joy[10:8], |apf_joy[2:0], apf_joy[31:27], apf_joy[23:19], apf_joy[15:11], apf_joy[7:3]};
-    end
-    wire [4:0] lx = joy[4:0], ly = joy[9:5], rx = joy[14:10], ry = joy[19:15];   // value / 8
-    wire lx_f = joy[20], ly_f = joy[21];                                            // value % 8 != 0
+    always @(posedge clk) begin ana1 <= apf_type == 4'h3; ana <= ana1; end
     reg [3:0] sdir = 0;                     // the left stick as the D-pad (up, down, left, right)
-    // pressed below 0x40 / above 0xC0, released from 0x58 / at 0xA8 and below (v > 8k: v/8 > k, or v/8 = k
-    // with low bits)
-    always @(posedge clk)
-        if (reset || !ana) sdir <= 0;
-        else begin
-            sdir[UP]    <= sdir[UP]    ? ly < 5'd11 : ly < 5'd8;
-            sdir[DOWN]  <= sdir[DOWN]  ? ly > 5'd21 || ly == 5'd21 && ly_f : ly > 5'd24 || ly == 5'd24 && ly_f;
-            sdir[LEFT]  <= sdir[LEFT]  ? lx < 5'd11 : lx < 5'd8;
-            sdir[RIGHT] <= sdir[RIGHT] ? lx > 5'd21 || lx == 5'd21 && lx_f : lx > 5'd24 || lx == 5'd24 && lx_f;
-        end
     wire [15:0] keys = buttons | {12'd0, sdir};
-    // the right stick: pixels a frame beyond the dead zone of 32, (deflection - 32) / 8 in steps of 8
-    function automatic [3:0] rate(input [4:0] v);
-        reg [3:0] m;
-        m = v[4] ? v[3:0] : ~v[3:0];        // deflection / 8 (one's complement below the centre)
-        rate = m > 4'd4 ? m - 4'd4 : 4'd0;
-    endfunction
-    wire [3:0] rsx = rate(rx), rsy = rate(ry);
-    wire stick_move = ana && !top_only && (rsx != 0 || rsy != 0);
     wire pen_ana = ana && !top_only && buttons[R3];
     reg touch_on = 0;                       // touch mode as toggled (kept through top only)
     assign touch = touch_on && !top_only;
-    wire [7:0] step = speed == 2'd0 ? 8'd1 : speed == 2'd2 ? 8'd6 : 8'd3;
     reg [2:0] combo_d = 0;
     reg [1:0] layout_q = 0;                 // the menu's layout last applied
-    reg [7:0] idle = 8'd180;                // DS frames since the cursor was last used (180: hidden)
-    wire moving = touch && |keys[3:0];
-    // the cursor's step a frame and its direction: the D-pad's (touch mode) or the right stick's; one add and
-    // clamp per axis serves both (they never move it in the same frame), a zero step leaves it
-    wire [7:0] sy = touch ? (keys[UP] || keys[DOWN] ? step : 8'd0) : {4'd0, rsy};
-    wire [7:0] sx = touch ? (keys[LEFT] || keys[RIGHT] ? step : 8'd0) : {4'd0, rsx};
-    wire sy_neg = touch ? keys[UP] : !ry[4];
-    wire sx_neg = touch ? keys[LEFT] : !rx[4];
+    wire touch_up = c_touch && !combo_d[0] && !touch_on;    // touch mode switched on (the cursor's idle count resets)
     always @(posedge clk) begin
         combo_d <= {c_prev, c_next, c_touch};
         if (reset) begin
-            layout <= 0; layout_q <= 0; touch_on <= 0; cur_x <= 8'd128; cur_y <= 8'd96; idle <= 8'd180;
+            layout <= 0; layout_q <= 0; touch_on <= 0;
         end else begin
             if (set_new) layout_q <= layout_set;
             if (set_new && layout_set != layout_q) layout <= layout_set == 2'd3 ? 2'd0 : layout_set;
             else if (c_next && !combo_d[1]) layout <= layout == 2'd2 ? 2'd0 : layout + 1'b1;
             else if (c_prev && !combo_d[2]) layout <= layout == 2'd0 ? 2'd2 : layout - 1'b1;
             if (c_touch && !combo_d[0]) touch_on <= !touch_on;
-            if (c_touch && !combo_d[0] && !touch_on) idle <= 0;
-            else if (frame) idle <= moving || stick_move || pen ? 8'd0 : idle == 8'd180 ? idle : idle + 1'b1;
-            if (frame && (touch || stick_move)) begin
-                cur_y <= sy_neg ? (cur_y < sy ? 8'd0 : cur_y - sy) : (cur_y > 8'd191 - sy ? 8'd191 : cur_y + sy);
-                cur_x <= sx_neg ? (cur_x < sx ? 8'd0 : cur_x - sx) : (cur_x > 8'd255 - sx ? 8'd255 : cur_x + sx);
-            end
         end
     end
     // gestures: the face buttons as the frame before (a press is a new one), the gesture running, its kind and
     // button and its point (step)
     wire [3:0] fb = keys[7:4];              // A, B, X, Y
-    reg [3:0] fb_q = 0;
     reg g_act = 0;
-    reg [2:0] g_kind = 0;
-    reg [1:0] g_btn = 0;
-    reg [3:0] g_step = 0;
     wire [3:0] g_on, g_pen, g_gest;         // the button doesn't reach the game; is the pen; draws a gesture
     genvar gi;
     generate
@@ -161,23 +146,18 @@ module nds_controls (
             assign g_gest[gi] = gest[3 * gi + 1] || gest[3 * gi + 2];
         end
     endgenerate
-    wire [3:0] g_new = fb & ~fb_q & g_gest;
-    wire [1:0] g_sel = g_new[0] ? 2'd0 : g_new[1] ? 2'd1 : g_new[2] ? 2'd2 : 2'd3;
-    wire g_circle = !g_kind[2];
-    wire g_big = g_circle && g_kind[0];
-    wire g_end = g_step == (g_circle ? 4'd15 : 4'd12);   // the last point
-    always @(posedge clk)
-        if (reset || !touch) begin
-            g_act <= 0; fb_q <= 4'hF;       // (a button held as touch mode starts draws nothing)
-        end else if (frame) begin
-            fb_q <= fb;
-            if (g_act) begin
-                g_step <= g_end ? 4'd0 : g_step + 1'b1;    // (a circle's repeat starts at its first point)
-                if (g_end) g_act <= g_circle && fb[g_btn];
-            end else if (|g_new) begin
-                g_act <= 1; g_kind <= gest[3 * g_sel +: 3]; g_btn <= g_sel; g_step <= 0;
-            end
-        end
+    // the point through a register here: pen_x/pen_y reach the DS on clk_sys, so the adds stay off that
+    // crossing; the pen goes down with it, a clock after the gesture starts (g_vis)
+    reg [7:0] g_x = 0, g_y = 0;
+    reg g_vis = 0;
+    always @(posedge clk) g_vis <= g_act && touch;
+    wire shown;                             // the cursor was used in the last 180 DS frames
+    // the right stick: pixels a frame beyond the dead zone of 32, (deflection - 32) / 8 in steps of 8
+    function automatic [3:0] rate(input [4:0] v);
+        reg [3:0] m;
+        m = v[4] ? v[3:0] : ~v[3:0];        // deflection / 8 (one's complement below the centre)
+        rate = m > 4'd4 ? m - 4'd4 : 4'd0;
+    endfunction
     // the point's offset from the cursor, a sixteenth of a turn apart, for x at the step and for y (-cos) a
     // quarter turn further on: Circle 2 round(12 sin), Big Circle round(48 sin) (the maintainer: Circle the 24 px Big
     // Circle was, Big Circle twice that, a loop in 16 frames for both: 32 points was too slow; about 19 px a
@@ -198,6 +178,65 @@ module nds_controls (
         endcase
         sin48 = k[3] ? -m : m;
     endfunction
+    generate if (FW == 0) begin : g_hw
+    reg [21:0] joy = {2'b00, {4{5'h10}}};
+    always @(posedge clk)
+        if (frame) joy <= {|apf_joy[10:8], |apf_joy[2:0], apf_joy[31:27], apf_joy[23:19], apf_joy[15:11], apf_joy[7:3]};
+    wire [4:0] lx = joy[4:0], ly = joy[9:5], rx = joy[14:10], ry = joy[19:15];   // value / 8
+    wire lx_f = joy[20], ly_f = joy[21];                                            // value % 8 != 0
+    // pressed below 0x40 / above 0xC0, released from 0x58 / at 0xA8 and below (v > 8k: v/8 > k, or v/8 = k
+    // with low bits)
+    always @(posedge clk)
+        if (reset || !ana) sdir <= 0;
+        else begin
+            sdir[UP]    <= sdir[UP]    ? ly < 5'd11 : ly < 5'd8;
+            sdir[DOWN]  <= sdir[DOWN]  ? ly > 5'd21 || ly == 5'd21 && ly_f : ly > 5'd24 || ly == 5'd24 && ly_f;
+            sdir[LEFT]  <= sdir[LEFT]  ? lx < 5'd11 : lx < 5'd8;
+            sdir[RIGHT] <= sdir[RIGHT] ? lx > 5'd21 || lx == 5'd21 && lx_f : lx > 5'd24 || lx == 5'd24 && lx_f;
+        end
+    wire [3:0] rsx = rate(rx), rsy = rate(ry);
+    wire stick_move = ana && !top_only && (rsx != 0 || rsy != 0);
+    wire [7:0] step = speed == 2'd0 ? 8'd1 : speed == 2'd2 ? 8'd6 : 8'd3;
+    reg [7:0] idle = 8'd180;                // DS frames since the cursor was last used (180: hidden)
+    wire moving = touch && |keys[3:0];
+    // the cursor's step a frame and its direction: the D-pad's (touch mode) or the right stick's; one add and
+    // clamp per axis serves both (they never move it in the same frame), a zero step leaves it
+    wire [7:0] sy = touch ? (keys[UP] || keys[DOWN] ? step : 8'd0) : {4'd0, rsy};
+    wire [7:0] sx = touch ? (keys[LEFT] || keys[RIGHT] ? step : 8'd0) : {4'd0, rsx};
+    wire sy_neg = touch ? keys[UP] : !ry[4];
+    wire sx_neg = touch ? keys[LEFT] : !rx[4];
+    wire mv = !reset && frame && (touch || stick_move);    // the cursor moves (by q_x/q_y, below)
+    wire [7:0] q_x, q_y;
+    always @(posedge clk)
+        if (reset) begin
+            cur_x <= 8'd128; cur_y <= 8'd96; idle <= 8'd180;
+        end else begin
+            if (touch_up) idle <= 0;
+            else if (frame) idle <= moving || stick_move || pen ? 8'd0 : idle == 8'd180 ? idle : idle + 1'b1;
+            if (mv) begin cur_x <= q_x; cur_y <= q_y; end
+        end
+    assign shown = idle != 8'd180;
+    reg [3:0] fb_q = 0;
+    reg [2:0] g_kind = 0;
+    reg [1:0] g_btn = 0;
+    reg [3:0] g_step = 0;
+    wire [3:0] g_new = fb & ~fb_q & g_gest;
+    wire [1:0] g_sel = g_new[0] ? 2'd0 : g_new[1] ? 2'd1 : g_new[2] ? 2'd2 : 2'd3;
+    wire g_circle = !g_kind[2];
+    wire g_big = g_circle && g_kind[0];
+    wire g_end = g_step == (g_circle ? 4'd15 : 4'd12);   // the last point
+    always @(posedge clk)
+        if (reset || !touch) begin
+            g_act <= 0; fb_q <= 4'hF;       // (a button held as touch mode starts draws nothing)
+        end else if (frame) begin
+            fb_q <= fb;
+            if (g_act) begin
+                g_step <= g_end ? 4'd0 : g_step + 1'b1;    // (a circle's repeat starts at its first point)
+                if (g_end) g_act <= g_circle && fb[g_btn];
+            end else if (|g_new) begin
+                g_act <= 1; g_kind <= gest[3 * g_sel +: 3]; g_btn <= g_sel; g_step <= 0;
+            end
+        end
     wire signed [5:0] s_x = {sin12(g_step), 1'b0}, s_y = {sin12(g_step + 4'd4), 1'b0};
     wire signed [7:0] c_x = g_big ? sin48(g_step) : s_x;
     wire signed [7:0] c_y = g_big ? sin48(g_step + 4'd4) : s_y;
@@ -205,19 +244,54 @@ module nds_controls (
     wire signed [7:0] sw_s = g_kind[1] ? sw : -sw;           // Down/Right +, Up/Left -
     wire signed [7:0] dx = g_circle ? c_x : g_kind[0] ? sw_s : 8'sd0;
     wire signed [7:0] dy = g_circle ? -c_y : g_kind[0] ? 8'sd0 : sw_s;
-    wire signed [9:0] px = $signed({2'b00, cur_x}) + dx, py = $signed({2'b00, cur_y}) + dy;
-    // the point, clamped to the screen, through a register here: pen_x/pen_y reach the DS on clk_sys, so the
-    // adds stay off that crossing; the pen goes down with it, a clock after the gesture starts (g_vis)
-    reg [7:0] g_x = 0, g_y = 0;
-    reg g_vis = 0;
+    // one add and clamp to the screen per axis (area, 2026-11-06): the cursor's step on the frame it moves, the
+    // gesture's point on every other clock. g_x/g_y skip the frame clock, when they would load what they hold
+    // (the cursor and the step change only on frame clocks, and two never follow each other: frame is one
+    // pulse per DS frame)
+    wire signed [7:0] ox = mv ? (sx_neg ? -$signed(sx) : $signed(sx)) : dx;
+    wire signed [7:0] oy = mv ? (sy_neg ? -$signed(sy) : $signed(sy)) : dy;
+    wire signed [9:0] px = $signed({2'b00, cur_x}) + ox, py = $signed({2'b00, cur_y}) + oy;
+    assign q_x = px[9] ? 8'd0 : px[8] ? 8'd255 : px[7:0];
+    assign q_y = py[9] ? 8'd0 : py > 10'sd191 ? 8'd191 : py[7:0];
+    always @(posedge clk) if (!mv) begin g_x <= q_x; g_y <= q_y; end
+    assign io_pend = 1'b0;
+    assign io_r0 = 32'd0;
+    assign io_st = 3'd0;
+    assign io_set = 14'd0;
+    end else begin : g_fw
+    // the frame's inputs, latched at its pulse (the firmware reads them later), and the events since the last
+    // pulse: touch off on some clock (the gesture state resets), touch mode switched on (the idle count resets;
+    // one on the frame's own clock counts for the next frame: the cursor shows at once either way)
+    reg pend = 0, t_off = 0, t_up = 0, shown_q = 0;
+    reg [12:0] snap = 0;
+    reg [3:0] s_press = 0, s_hold = 0;
     always @(posedge clk) begin
-        g_x <= px[9] ? 8'd0 : px[8] ? 8'd255 : px[7:0];
-        g_y <= py[9] ? 8'd0 : py > 10'sd191 ? 8'd191 : py[7:0];
-        g_vis <= g_act && touch;
+        t_off <= !frame && (t_off || !touch);
+        t_up <= frame ? touch_up : t_up || touch_up;
+        if (frame) snap <= {pen, t_off, t_up, ana && !top_only, touch, keys[7:0]};
+        if (frame) pend <= 1; else if (io_take) pend <= 0;
+        // the firmware's results. The left stick's D-pad: for each direction whether this frame's sample presses
+        // it and whether it holds a press, applied on every clock as above. A gesture ends at once when touch
+        // mode goes off, and a write made after that (for the frame before it) doesn't start it again; touch mode
+        // switched on shows the cursor at once, and a write made after that doesn't hide it
+        if (io_we1) begin s_press <= {io_wd[1:0], io_wd[5:4]}; s_hold <= {io_wd[3:2], io_wd[7:6]}; end
+        sdir <= reset || !ana ? 4'd0 : sdir & s_hold | ~sdir & s_press;
+        if (reset || !touch) g_act <= 0; else if (io_we1) g_act <= io_wd[8] && !t_off;
+        if (touch_up) shown_q <= 1; else if (io_we1) shown_q <= io_wd[9] || t_up;
+        if (io_we0) {g_y, g_x, cur_y, cur_x} <= io_wd;
+        if (reset) begin
+            pend <= 0; shown_q <= 0; s_press <= 0; s_hold <= 0; cur_x <= 8'd128; cur_y <= 8'd96;
+        end
     end
+    assign shown = shown_q;
+    assign io_pend = pend;
+    assign io_r0 = {apf_joy[31:27], apf_joy[23:19], apf_joy[15:11], |apf_joy[10:8], apf_joy[7:3], |apf_joy[2:0], snap[9:0]};
+    assign io_st = snap[12:10];
+    assign io_set = {speed, gest};
+    end endgenerate
     assign pen_x = g_vis ? g_x : cur_x;
     assign pen_y = g_vis ? g_y : cur_y;
-    assign cursor = !top_only && (touch || ana) && idle != 8'd180;
+    assign cursor = !top_only && (touch || ana) && shown;
     assign pen = (touch && (|(fb & g_pen) || g_vis)) || pen_ana;
     assign ds_keys = touch ? keys & ~{8'd0, g_on, 4'hF} : keys;
 endmodule

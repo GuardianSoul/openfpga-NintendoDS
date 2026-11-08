@@ -159,7 +159,9 @@ int main(int argc, char** argv) {
         if (cyc == 10) t->start = 1;
         // the restart: when both clients have done half the list and are idle
         if (!restarted && sn.next >= reads / 2 && sr.next >= reads / 2 && !sn.cv && !sr.cv && sn.words < 0 && sr.words < 0
-            && sn.mark_at < 0 && sr.mark_at < 0 && sn.exec_at < 0 && sr.exec_at < 0 && (!strict || (sn.quiet > 256 && sr.quiet > 256))) { restarted = true; restart_at = (int)(cyc % 1000000); t->reset = 1; t->start = 0; tick(); tick(); t->reset = 0; for (int i = 0; i < 10; i++) tick(); t->start = 1; }
+            && sn.mark_at < 0 && sr.mark_at < 0 && sn.exec_at < 0 && sr.exec_at < 0 && (!strict || (sn.quiet > 256 && sr.quiet > 256))) { restarted = true; restart_at = (int)(cyc % 1000000);
+            for (Side* s : {&sn, &sr}) { s->left = 0; s->wait = -1; s->lat = 0; }   // the SDRAM port resets with the cache (rst_bus): a read in flight is dropped
+            t->reset = 1; t->start = 0; tick(); tick(); t->reset = 0; for (int i = 0; i < 10; i++) tick(); t->start = 1; }
         t->fc_busy_n = sn.busy > 0; t->fc_busy_r = sr.busy > 0;
         t->mk_valid_n = sn.mk; t->mk_err_n = sn.mkerr; t->mk_valid_r = sr.mk; t->mk_err_r = sr.mkerr; sn.mk = sr.mk = false;
         t->c_valid_n = sn.cv; t->c_addr_n = sn.ca; t->c_valid_r = sr.cv; t->c_addr_r = sr.ca;

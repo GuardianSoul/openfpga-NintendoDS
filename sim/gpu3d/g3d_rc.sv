@@ -19,6 +19,8 @@ module g3d_rc #(
     parameter int TC_WAYS = 1,
     parameter bit V2 = 0,         // nds_g3d_cache2 (texture)
     parameter bit PV2 = V2,       // ... palette
+    parameter int V2W = 1,        // ... texture ways (nds_g3d_cache2 WAYS)
+    parameter bit TSH = 1,        // ... one tag controller for the ways (nds_g3d_cache2 TSHARE)
     parameter bit PSCAN = 1,      // ... its scanner
     parameter bit NXB = 0,        // gpu3d_raster NXB
     parameter bit VREG = 0,
@@ -28,7 +30,15 @@ module g3d_rc #(
     parameter bit EDIV4 = 0,      // gpu3d_raster EDIV4
     parameter bit EDGE2 = 0,      // gpu3d_raster EDGE2
     parameter bit EP2 = 0,        // gpu3d_raster EP2
+    parameter bit FDB = 0,        // gpu3d_raster FDB
+    parameter bit SPO = 0,        // gpu3d_raster SPO
+    parameter int SPO_SL = 4,     // ... its slots
+    parameter bit SPOG = 0,       // gpu3d_raster SPOG
+    parameter int SPOG_N = 2,     // ... stages per group
     parameter int NF = 2,         // nds_gpu3d TC_NF
+    // the raster's features (nds_gpu3d FEAT_*: the card's G3D_AA, G3D_FOG, ...; 0 with --feat-off for the golden)
+    parameter bit FEAT_AA = 1, FEAT_EDGE = 1, FEAT_FOG = 1, FEAT_ATEST = 1, FEAT_TOON = 1, FEAT_SHADOW = 1, FEAT_LOWER = 1,
+    parameter bit TR3 = 0,        // nds_gpu3d TR3 (with FEAT_EDGE = 0)
     parameter bit PF = 0          // nds_g3d_cache2 PF (prefetch hints from the testbench: pf_v, pf_a)
 ) (
     input  logic         clk,
@@ -75,7 +85,9 @@ module g3d_rc #(
 );
     localparam logic [2:0] SP_TEX = 3'd5, SP_TPAL = 3'd6;   // gpu2d_pkg
     logic [15:0] tex_data, pal_data;
-    gpu3d_raster #(.AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2)) u_raster (
+    gpu3d_raster #(.AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N),
+                   .FEAT_AA(FEAT_AA), .FEAT_EDGE(FEAT_EDGE), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
+                   .FEAT_SHADOW(FEAT_SHADOW), .FEAT_LOWER(FEAT_LOWER), .TR3(TR3 && !FEAT_EDGE && !LB2)) u_raster (
         .clk, .rst, .dispcnt, .alpharef, .clear_attr1, .clear_depth, .fog_color, .fog_offset,
         .tbl_we, .tbl_sel, .tbl_addr, .tbl_data,
         .frame_start, .busy, .frame_done, .px_hold(1'b0), .fp_line(), .fp_act(), .r_go(),
@@ -89,7 +101,7 @@ module g3d_rc #(
     logic [13:0] tc_blk, pc_blk;
     localparam int CQL = TXD == 0 || 2 * (TXD + 3) <= 16 ? 4 : 5;
     generate if (V2) begin : g_v2
-        nds_g3d_cache2 #(.AW(19), .LW(TL), .QL(CQL), .NF(NF), .PF(PF)) u_tc (.clk, .clk2(1'b0), .rst, .flush(1'b0), .pf_v, .pf_a,
+        nds_g3d_cache2 #(.AW(19), .LW(TL), .QL(CQL), .NF(NF), .PF(PF), .WAYS(V2W), .TSHARE(TSH)) u_tc (.clk, .clk2(1'b0), .rst, .flush(1'b0), .pf_v, .pf_a,
             .req(tex_req), .addr(tex_addr), .valid(tex_valid), .data(tex_data),
             .b_req(tc_req), .b_blk(tc_blk), .b_ack(tc_ack), .b_rvalid(tc_rv), .b_rdata(t_rdata));
     end else begin : g_v1
@@ -136,7 +148,7 @@ module g3d_rc #(
             c_two += 64'(g_v2.u_tc.f_v == 2'b11);
             c_ack1 += 64'(tc_ack && g_v2.u_tc.f_v[0]); c_rv += 64'(g_v2.u_tc.r_v); c_rvf += 64'(g_v2.u_tc.r_v && g_v2.u_tc.f_v[0]); c_tn2 += 64'(t_n == 2'd2); c_tq += 64'(tc_req && !t_req);
             if (g_v2.u_tc.s_q) begin
-                if (g_v2.u_tc.s_v && g_v2.u_tc.s_tag == g_v2.u_tc.sa[18:13]) c_miss_hit++;
+                if (g_v2.u_tc.s_hit) c_miss_hit++;
                 else if (g_v2.u_tc.onway(g_v2.u_tc.sa[18:5])) c_miss_ow++;
                 else if (g_v2.u_tc.sa[12:5] == g_v2.u_tc.line) c_miss_ln++;
                 else if (g_v2.u_tc.lbusy(g_v2.u_tc.sa[12:5])) c_miss_lb++;
@@ -177,6 +189,49 @@ module g3d_rc #(
             else ex_n[22]++;
         end
     end
+    // EP2's stage 2 (u_edgeb): cycles by state
+    longint ex2_n [0:31];
+    generate if (EP2) begin : g_ex2
+        always_ff @(posedge clk) if (!rst) ex2_n[5'(u_raster.u_front.g_ep2.u_edgeb.xs)]++;
+        final begin
+            $write("edge stage 2 states:");
+            for (int i = 0; i < 32; i++) if (ex2_n[i] != 0) $write(" %0d:%0d", i, ex2_n[i]);
+            $display("");
+        end
+    end endgenerate
+    // stage 1's X_H (the perspective factor's division): cycles waiting for the
+    // divider (the span stage has it), for stage 2 (ho_ready), both (left; PP2: right)
+    longint xh_n [0:5];
+    initial for (int i = 0; i < 6; i++) xh_n[i] = 0;
+    always_ff @(posedge clk) if (!rst) begin
+        if (u_raster.u_front.u_edge.xs == 11 && u_raster.u_front.u_edge.mw) begin
+            if (!u_raster.u_front.e_dv_gnt && !u_raster.u_front.a_ho_rdy) xh_n[2]++;
+            else if (!u_raster.u_front.e_dv_gnt) xh_n[0]++;
+            else if (!u_raster.u_front.a_ho_rdy) xh_n[1]++;
+        end
+        if (EDGE2 && EP2 && u_raster.u_front.u_edge.xs == 11 && !u_raster.u_front.a_ho_rdy) begin
+            if (u_raster.u_front.lcn == 3) xh_n[3]++; else if (u_raster.u_front.eu_bb) xh_n[4]++; else xh_n[5]++;
+        end
+    end
+    final $display("X_H waits (left): divider %0d, stage 2 %0d, both %0d | not ready: queue full %0d, stage 2 busy %0d, other %0d",
+                   xh_n[0], xh_n[1], xh_n[2], xh_n[3], xh_n[4], xh_n[5]);
+    // PP2: cycles by {lcn, rcn} (the result queues), and the right pipeline's states
+    generate if (EDGE2 && EP2) begin : g_pq
+        longint q_n [0:15], r1_n [0:31], r2_n [0:31], ss_n [0:31];
+        initial for (int i = 0; i < 32; i++) begin r1_n[i] = 0; r2_n[i] = 0; ss_n[i] = 0; if (i < 16) q_n[i] = 0; end
+        always_ff @(posedge clk) if (!rst) begin
+            q_n[{u_raster.u_front.lcn, u_raster.u_front.rcn}]++;
+            ss_n[5'(u_raster.u_front.ss)]++;
+            r1_n[5'(u_raster.u_front.g_pp2.u_edge2a.xs)]++;
+            r2_n[5'(u_raster.u_front.g_pp2.u_edge2b.xs)]++;
+        end
+        final begin
+            $write("queues {lcn,rcn}:"); for (int i = 0; i < 16; i++) if (q_n[i] != 0) $write(" %0d%0d:%0d", i / 4, i % 4, q_n[i]); $display("");
+            $write("right stage 1:"); for (int i = 0; i < 32; i++) if (r1_n[i] != 0) $write(" %0d:%0d", i, r1_n[i]); $display("");
+            $write("span stage (ss):"); for (int i = 0; i < 32; i++) if (ss_n[i] != 0) $write(" %0d:%0d", i, ss_n[i]); $display("");
+            $write("right stage 2:"); for (int i = 0; i < 32; i++) if (r2_n[i] != 0) $write(" %0d:%0d", i, r2_n[i]); $display("");
+        end
+    end endgenerate
     // the walker each cycle: 0 a pixel in, 1 ghost in, 2 stalled (wait17/19), 3 stalled (other),
     // 4 span bubble (next span ready, P0-P13 busy), 5 starved (no span), 6 waiting with a span of nothing
     longint wk_n [0:7];

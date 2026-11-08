@@ -76,6 +76,12 @@ def import_images(d, out):
 
 
 def main():
+    # Disk guard: the shared Desktop disk filled up three times on 2026-11-06.
+    # Sim builds take 1-4 GB each; stop here rather than fill the disk.
+    free_gb = shutil.disk_usage(ROOT).free / 2**30
+    if free_gb < 30 and not os.environ.get('NDS_DISK_GUARD_OFF'):
+        sys.exit(f'only {free_gb:.0f} GB free on the disk (need 30): delete finished '
+                 'sim builds, or wait for the hourly nds-disk-prune timer')
     ap = argparse.ArgumentParser()
     ap.add_argument('--tools', default=str(Path.cwd() / 'build/tools/oss-cad-suite/bin'))
     ap.add_argument('--rom', default=str(ROOT / 'build/ds-tests/hello.nds'))

@@ -21,6 +21,11 @@ loop inside `generate ... endgenerate`. Also flags (nds-fit #350):
   also hides it.
 - genvar-controlled loops without explicit generate/endgenerate, or without
   a named begin/end body (nds-fit #1162/#1163). Procedural int loops are legal.
+- a member of a module-level struct variable read before the variable's
+  declaration, `eu.wfi` above `uop_t eu;` (nds-fit #1867, Error 10733 "wfi is
+  not declared under this prefix"): Verilator accepts it, Quartus does not.
+  Declare the variable above its first use. (Quartus does take plain forward
+  references to signals and localparams, so those are not flagged.)
 Exit 1 if anything is flagged.
 """
 import re
@@ -72,10 +77,144 @@ def generate_loop_errors(source):
                 yield line, 'genvar loop needs a named begin/end body (Quartus Standard rejects it)'
 
 
+DECL_TYPES = {'logic', 'wire', 'reg', 'bit', 'int', 'integer', 'byte', 'shortint', 'longint',
+              'genvar', 'localparam', 'parameter', 'real'}
+SCOPE_OPEN = {'begin', 'function', 'task', 'fork'}
+SCOPE_CLOSE = {'end', 'endfunction', 'endtask', 'join', 'join_any', 'join_none'}
+
+
+def use_before_decl_errors(source):
+    """Module-level names used before their declaration (Quartus Error 10733).
+
+    A token scan, not a parser: comments, strings and code Quartus skips
+    (`ifndef ALTERA_RESERVED_QIS, translate_off) are blanked; typedef bodies are
+    skipped; a declaration is a type keyword (or a typedef name) at the start of
+    a statement, its names those followed by , ; = or [ at bracket depth 0.
+    """
+    blank = lambda m: re.sub(r'[^\n]', ' ', m[0])
+    src = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"', blank, source, flags=re.S)
+    src = re.sub(r'synthesis\s+translate_off.*?synthesis\s+translate_on', blank, src, flags=re.S)
+    # `ifndef ALTERA_RESERVED_QIS ... matching `endif / `else
+    out, i = [], 0
+    for m in re.finditer(r'`ifndef\s+ALTERA_RESERVED_QIS\b', src):
+        if m.start() < i:
+            continue
+        depth, j = 1, m.end()
+        for t in re.finditer(r'`(ifdef|ifndef|else|endif)\b', src[m.end():]):
+            k = t.group(1)
+            if k in ('ifdef', 'ifndef'): depth += 1
+            elif k == 'endif': depth -= 1
+            elif k == 'else' and depth == 1: depth = 0
+            if depth == 0:
+                j = m.end() + t.start(); break
+        out.append(src[i:m.start()]); out.append(re.sub(r'[^\n]', ' ', src[m.start():j])); i = j
+    out.append(src[i:]); src = ''.join(out)
+    toks = [(t[0], t.start()) for t in re.finditer(r'[A-Za-z_][\w$]*|\S', src)]
+    types = set(DECL_TYPES)
+    for t in re.finditer(r'\btypedef\b.*?\}\s*([A-Za-z_]\w*)\s*;|\btypedef\b[^;{]*?\b([A-Za-z_]\w*)\s*;', src, flags=re.S):
+        types.add(t[1] or t[2])
+
+    def decls(start):
+        """names declared by the statement starting at toks[start] (a type), and the index after it"""
+        names, k, depth = [], start + 1, 0
+        while k < len(toks) and toks[k][0] != ';':
+            w = toks[k][0]
+            if w in '([{': depth += 1
+            elif w in ')]}': depth -= 1
+            elif depth == 0 and re.match(r'[A-Za-z_]', w) and k + 1 < len(toks) and toks[k + 1][0] in ',;=[' \
+                    and toks[k - 1][0] not in ('=',) and w not in types:
+                names.append((w, toks[k][1]))
+            if depth == 0 and w == '=':          # skip the initializer up to , or ;
+                d2 = 0
+                while k + 1 < len(toks) and not (d2 == 0 and toks[k + 1][0] in ',;'):
+                    k += 1
+                    d2 += toks[k][0] in '([{'
+                    d2 -= toks[k][0] in ')]}'
+            k += 1
+        return names, k
+
+    def skip_typedef(k):
+        d = 0
+        while k < len(toks) and not (toks[k][0] == ';' and d == 0):
+            d += toks[k][0] == '{'
+            d -= toks[k][0] == '}'
+            k += 1
+        return k + 1
+
+    # pass 1: module-scope declarations (position of the first; -1: the module header)
+    first = {}
+    scope = 0
+    stmt_start = True
+    k = 0
+    while k < len(toks):
+        w, pos = toks[k]
+        if w == 'module':
+            scope = 0
+        if w in SCOPE_OPEN: scope += 1
+        elif w in SCOPE_CLOSE: scope -= 1
+        if w == 'typedef':                  # skip to the typedef's ; (past its { } body)
+            k = skip_typedef(k); stmt_start = True; continue
+        if w == 'module':                   # ports and parameters of the header: declared first
+            k2, d = k + 1, 0
+            while k2 < len(toks) and not (toks[k2][0] == ';' and d == 0):
+                d += toks[k2][0] in '(['
+                d -= toks[k2][0] in ')]'
+                if re.match(r'[A-Za-z_]', toks[k2][0]) and k2 + 1 < len(toks) and toks[k2 + 1][0] in ',)=[':
+                    first.setdefault(toks[k2][0], -1)
+                k2 += 1
+            k = k2 + 1; stmt_start = True; continue
+        if stmt_start and scope == 0 and w in types:
+            names, k2 = decls(k)
+            for n, p in names:
+                first.setdefault(n, p)
+            k = k2; stmt_start = True; k += 1; continue
+        stmt_start = w in (';', 'begin', 'end', ')') or w in ('endfunction', 'endtask', 'endcase', 'generate', 'endgenerate') or (w == ':' and False)
+        k += 1
+    if not first:
+        return
+    # pass 2: uses of those names before their declaration, outside a scope that declares them locally
+    stack = [set()]
+    reported = set()
+    stmt_start = True
+    k = 0
+    while k < len(toks):
+        w, pos = toks[k]
+        if w == 'typedef':
+            k = skip_typedef(k); stmt_start = True; continue
+        if w in SCOPE_OPEN:
+            stack.append(set())
+            if w in ('function', 'task'):    # the header's names are local
+                k2 = k
+                while k2 < len(toks) and toks[k2][0] != ';':
+                    if re.match(r'[A-Za-z_]', toks[k2][0]): stack[-1].add(toks[k2][0])
+                    k2 += 1
+                k = k2 + 1; stmt_start = True; continue
+        elif w in SCOPE_CLOSE and len(stack) > 1:
+            stack.pop()
+        if stmt_start and w in types and (len(stack) > 1 or pos in {p for p in first.values()}):
+            names, k2 = decls(k)
+            if len(stack) > 1:
+                stack[-1].update(n for n, _ in names)
+                # initializers inside are uses too, but rare: skip the statement
+                k = k2 + 1; stmt_start = True; continue
+            k = k2 + 1; stmt_start = True; continue
+        if w == '(' and k + 1 < len(toks) and toks[k + 1][0] in types:   # for (int i = ...)
+            stack[-1].add(toks[k + 2][0] if k + 2 < len(toks) else '')
+        if w in first and pos < first[w] and w not in reported and not any(w in s for s in stack[1:]) \
+                and toks[k - 1][0] not in ('.', '`', '$', "'") and k + 1 < len(toks) and toks[k + 1][0] == '.':
+            reported.add(w)
+            yield src.count('\n', 0, pos) + 1, f'{w}.<member> before {w} is declared (line {src.count(chr(10), 0, first[w]) + 1}; Quartus Error 10733)'
+        stmt_start = w in (';', 'begin', 'end', ')', 'endfunction', 'endtask', 'endcase', 'generate', 'endgenerate')
+        k += 1
+
+
 bad = 0
 for f in files:
     source = f.read_text(errors='replace')
     for n, message in generate_loop_errors(source):
+        print(f'{f}:{n}: {message}')
+        bad += 1
+    for n, message in use_before_decl_errors(source):
         print(f'{f}:{n}: {message}')
         bad += 1
     gen = 0

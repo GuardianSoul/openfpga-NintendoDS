@@ -22,7 +22,7 @@
 // to bit 0, or with bit 31 set raises it N = bits 30:0 cycles later. An ARM7
 // that keeps retiring while halted (more than the instructions already in its
 // pipeline) fails the run.
-module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, parameter int A9_OPT = 0, parameter bit EVB = 1'b0, parameter bit EVBW = 1'b0, parameter int A9_XD = 0, parameter int A9_XI = 0, parameter bit SLOW = 1'b0, parameter bit A7_DS = 1'b0);   // (obj2: -GARM9_WAYS=2, the DS build's)
+module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, parameter int A9_OPT = 0, parameter bit EVB = 1'b0, parameter bit EVBW = 1'b0, parameter int A9_XD = 0, parameter int A9_XI = 0, parameter bit SLOW = 1'b0, parameter bit A7_DS = 1'b0, parameter bit EARLYD = 1'b0);   // (obj2: -GARM9_WAYS=2, the DS build's)
   logic clk = 1'b0;
   logic rst = 1'b1;
 
@@ -72,7 +72,7 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
   logic [5:0]  dbg_wa;
   logic [31:0] dbg_wd, dbg_pc, dbg_cpsr;
 
-  arm_cpu #(.ARM9_WAYS(ARM9_WAYS), .A9_SOLO(A9_SOLO), .A9_OPT(A9_OPT), .ARM9_EVB(EVB), .ARM9_EVBW(EVBW), .A9_XD(A9_XD), .A9_XI(A9_XI), .SLOW(SLOW), .A7_DS(A7_DS)) dut (
+  arm_cpu #(.ARM9_WAYS(ARM9_WAYS), .A9_SOLO(A9_SOLO), .A9_OPT(A9_OPT), .ARM9_EVB(EVB), .ARM9_EVBW(EVBW), .A9_XD(A9_XD), .A9_XI(A9_XI), .SLOW(SLOW), .A7_DS(A7_DS), .ARM9_EARLYD(EARLYD)) dut (
     .clk(clk), .rst(rst), .run(run), .reset_pc0(pc0), .reset_pc1(pc1),
     .hivecs7(1'b0), .irq(irq), .fiq(2'b00), .wake7(wake7),
     .b9_req(b9_req), .b9_we(b9_we), .b9_addr(b9_addr), .b9_wdata(b9_wdata), .b9_be(b9_be),

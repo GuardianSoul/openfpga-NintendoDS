@@ -132,7 +132,7 @@ stateload-update: $(BOOT_B)/stateload.bin
 build/scpu/cache.bin: sw/scpu/cache.c sw/scpu/start.s sw/scpu/link.ld
 	@mkdir -p build/scpu
 	$(CLANG) --target=riscv32 -march=rv32i -mabi=ilp32 -Os -ffreestanding -nostdlib -fno-builtin -Wall \
-	    -fuse-ld=lld -Wl,-T,sw/scpu/link.ld sw/scpu/start.s sw/scpu/cache.c -o build/scpu/cache.elf
+	    -fuse-ld=lld -Wl,--relax-gp -Wl,-T,sw/scpu/link.ld sw/scpu/start.s sw/scpu/cache.c -o build/scpu/cache.elf
 	$(OBJCOPY) -O binary build/scpu/cache.elf $@
 	@test $$(stat -c %s $@) -le 4096 || { echo "SERV firmware over 4 KiB"; exit 1; }
 .PHONY: scpu-check scpu-update

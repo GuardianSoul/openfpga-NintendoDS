@@ -96,7 +96,7 @@ synch_3 s02(phy_spiss, phy_spiss_s, clk, phy_spiss_r, phy_spiss_f);
 
     reg [1:0]   addr_cnt;
     reg [1:0]   data_cnt;
-    reg [6:0]   read_cnt;
+    reg [1:0]   read_cnt;   // (room, 2026-11-07: it counts to 3, then the state moves on; was 7 bits)
 
     // synchronize rd byte flag's rising edge into clk
     wire rx_byte_done_s, rx_byte_done_r;
@@ -197,7 +197,7 @@ always @(posedge clk) begin
 
         // delay a few cycles
         read_cnt <= read_cnt + 1'b1;
-        if(read_cnt == 4-1) begin
+        if(read_cnt == 2'd3) begin
             // load the buffer with the current data
             // and give the current buffer contents to bridge
             spis_word <= pmp_rd_data_e;

@@ -37,10 +37,25 @@ module gpu3d_edge #(
     // 2 the second part only (Z, the factor, the items, coverage: X_Z ..
     // X_FIN), taking the edge (hi_*). Two copies run two edges at once
     parameter int STAGE = 0,
+    // WL0 (STAGE 1, gpu3d_front FDB): the walk presents cur's vertex address in each clock, so its last
+    // clock is X_L0's read and X_L0 is skipped (the walk steps cur only in clocks that don't end it)
+    parameter bit WL0 = 0,
+    // PFE (STAGE 2, gpu3d_front FDB): the prefetch starts two item clocks before the last item that reads
+    // va/vb (through iab, latched a clock ahead), as its first write lands three clocks after the start
+    // (two without VREG), after that read; DS_LIN17's item order only
+    parameter bit PFE = 0,
     parameter int HW = 432,           // the handover's width (gpu3d_front: EW)
+    // BKW: bank bits of the vertex RAM (gpu3d_front PP2: 2, four banks)
+    parameter int BKW = 1,
     // TOONR (gpu3d_raster): on a toon polygon (toon), item 1 (red) is the red
     // without the vertex colours' 0xF fill, and there is no item 7 (rt)
-    parameter bit TOONR = 0
+    parameter bit TOONR = 0,
+    // YNW (gpu3d_raster DS_YPERSP): the Y perspective numerator (y * w0) << 9 in 33 bits, so it doesn't wrap at
+    // y * w0 >= 2^23 (edges of 128+ lines with top w >= 0xAAAB; docs/pixel-rules.md); 0: 32 bits, the wrap
+    parameter bit YNW = 0,
+    // YP16 (DS_YPERSP, rules3d v19 on the DS): along Y on a Z-buffered edge with max(w) >= 0x8000 the factor uses
+    // w >> 8 and the edge is linear when the shifted w are equal (DS_XPERSP16's rule along X)
+    parameter bit YP16 = 0
 ) (
     input  logic         clk,
     input  logic         rst,
@@ -50,12 +65,12 @@ module gpu3d_edge #(
     input  logic [37:0]  lr_qx,
     // vertex records of both polygon banks, written by the input stage
     input  logic         vm_we,
-    input  logic [4:0]   vm_waddr,
+    input  logic [BKW+3:0] vm_waddr,
     input  logic [115:0] vm_wdata,
     // polygon to set up (bank of the input stage)
     input  logic         start,
     input  logic         side,         // 0 left slope, 1 right slope
-    input  logic         bank,
+    input  logic [BKW-1:0] bank,
     input  logic [7:0]   y,
     input  logic         wbuf,
     input  logic         aa,           // coverage step needed (DISP3DCNT AA)
@@ -66,7 +81,7 @@ module gpu3d_edge #(
     // the divider, shared with the span stage (gpu3d_front owns it): ask
     // with dv_req, start once dv_gnt; dv_hold until the result is read
     output logic         dv_start,
-    output logic [31:0]  dv_num,
+    output logic [31+YNW:0] dv_num,
     output logic [24:0]  dv_den,
     output logic         dv_req, dv_hold,
     output logic         dv_mode,      // 1: a wide quotient (the linear factor)
@@ -76,6 +91,7 @@ module gpu3d_edge #(
     input  logic [7:0]   vys_q,        // read combinationally at vys_ra
     output logic [3:0]   vys_ra_n,     // vys_ra as the next clock has it (a registered read's address)
     output logic         busy,
+    output logic         fin,          // STAGE 2: the edge's last clock (idle and ready for hi_valid the next)
     // Slope state at y
     output logic [26:0]  inc,
     output logic         neg, xmaj,
@@ -98,13 +114,13 @@ module gpu3d_edge #(
     // done, which stage 2 reads from its own vertex RAM copy ahead (pfi_*)
     output logic [78:0]  ho_res,       // STAGE 1: {inc, neg, dx, xval, vbx} (gpu3d_front keeps them; stage 2 does not)
     output logic         pfo_v,
-    output logic [8:0]   pfo_idx,
+    output logic [BKW+7:0] pfo_idx,
     // the item written this clock (k 1-5: av[k-1] = it_v)
     output logic         it_we,
     output logic [3:0]   it_k,
     output logic [16:0]  it_v,
     input  logic         pfi_v,
-    input  logic [8:0]   pfi_idx
+    input  logic [BKW+7:0] pfi_idx
 );
     function automatic [8:0]  v_x(input [115:0] v); v_x = v[8:0];     endfunction
     function automatic [7:0]  v_y(input [115:0] v); v_y = v[16:9];    endfunction
@@ -130,11 +146,11 @@ module gpu3d_edge #(
     endfunction
 
     // vertex records (a copy per edge unit)
-    logic [4:0]   vm_raddr;
+    logic [BKW+3:0] vm_raddr;
     logic [115:0] vm_rdata;
     // M10K (nds-fit #441 had 8 free): an MLAB copy took 6 LABs
     logic [115:0] vm_ram, vm_q;
-    gpu3d_ram #(.W(116), .AW(5), .STYLE("M10K")) u_vtx (
+    gpu3d_ram #(.W(116), .AW(BKW + 4), .STYLE("M10K")) u_vtx (
         .clk, .we(vm_we), .waddr(vm_waddr), .wdata(vm_wdata),
         .raddr(vm_raddr), .rdata(vm_ram));
     always_ff @(posedge clk) vm_q <= vm_ram;
@@ -184,16 +200,22 @@ module gpu3d_edge #(
     // Z, the walk and slope) from the half that never runs it
 
     logic       sd;                 // side, latched at start
-    logic       sbank;              // STAGE 1: bank, latched at start
+    logic [BKW-1:0] sbank;          // STAGE 1: bank, latched at start
     // STAGE 2: the vertices it reads ({bank, cur, nxt}), ahead (pf_*) or at the start
-    logic [8:0] ld_idx, b_idx, pf_have;
+    logic [BKW+7:0] ld_idx, b_idx, pf_have;
     logic [2:0] pf_st;
     logic       pf_ok;
     // STAGE 2: the polygon's flags as handed over (the inputs move on)
     logic       l_wbuf, l_aa, l_toon;
-    wire        wbuf_e = STAGE == 2 ? l_wbuf : wbuf;
-    wire        aa_e   = STAGE == 2 ? l_aa : aa;
-    wire        toon_e = STAGE == 2 ? l_toon : toon;
+    // WL0 (FDB): stage 1 may start the next edge in the clock stage 2 reads this one's handover, when the
+    // front's polygon inputs are already the next polygon's: its wbuf, aa, toon are latched at the start
+    logic       s1_wbuf, s1_aa, s1_toon;
+    wire        wbuf_i = WL0 ? s1_wbuf : wbuf;
+    wire        aa_i   = WL0 ? s1_aa : aa;
+    wire        toon_i = WL0 ? s1_toon : toon;
+    wire        wbuf_e = STAGE == 2 ? l_wbuf : wbuf_i;
+    wire        aa_e   = STAGE == 2 ? l_aa : aa_i;
+    wire        toon_e = STAGE == 2 ? l_toon : toon_i;
     wire        plus = sd ? ~facing : facing;
     logic [3:0] cur, nxt;
     logic [115:0] va, vb;
@@ -206,7 +228,8 @@ module gpu3d_edge #(
     logic       need_lf, lf_pend;       // DS_LIN17: the linear factor still to divide / pending
     logic [17:0] lf;                    // DS_LIN17: floor((ix << 17) / ylen)
     logic [15:0] w0n, w0d, w1d;
-    logic [31:0] t_num, t_den1;
+    logic [31+YNW:0] t_num;
+    logic [31:0] t_den1;
     logic [9:0]  yf;
     logic [22:0] xrecip;
     logic [26:0] r26;
@@ -250,9 +273,9 @@ module gpu3d_edge #(
     // STAGE 1 -> 2 handover: {bank, cur, nxt (stage 2 reads the vertices),
     // ix, ylen, xlen, xmaj, lin, need_lf, yf_pend, yf, lf, xrecip, r26, inc,
     // neg, dx, xval, vbx, wbuf, aa, toon}
-    localparam int HU = 9 + 10 + 8 + 10 + 1 + 1 + 1 + 1 + 10 + 18 + 23 + 27 + 27 + 1 + 32 + 10 + 9 + 3;
+    localparam int HU = BKW + 8 + 10 + 8 + 10 + 1 + 1 + 1 + 1 + 10 + 18 + 23 + 27 + 27 + 1 + 32 + 10 + 9 + 3;
     assign ho = HW'({sbank, cur, nxt, ix, ylen, xlen, xmaj, lin, need_lf, yf_pend, yf, lf, xrecip, r26,
-                     inc, neg, dx, xval, vbx, wbuf, aa, toon});
+                     inc, neg, dx, xval, vbx, wbuf_i, aa_i, toon_i});
     assign ho_res  = {inc, neg, dx, xval, vbx};
     assign pfo_v   = STAGE == 1 && busy && xs != X_IDLE && xs != X_WALK;
     assign pfo_idx = {sbank, cur, nxt};
@@ -260,11 +283,14 @@ module gpu3d_edge #(
     initial if (STAGE != 0 && HW < HU) $error("gpu3d_edge: HW %0d < %0d", HW, HU);
 `endif
     always_comb begin
-        if (STAGE == 2) vm_raddr = {ld_idx[8], (pf_st == 3'd1 || xs == X_BL0) ? ld_idx[7:4] : ld_idx[3:0]};
-        else            vm_raddr = {bank, (xs == X_L0) ? cur : nxt};
+        if (STAGE == 2) vm_raddr = {ld_idx[BKW+7:8], (pf_st == 3'd1 || xs == X_BL0) ? ld_idx[7:4] : ld_idx[3:0]};
+        else            vm_raddr = {bank, (xs == X_L0 || (WL0 && xs == X_WALK)) ? cur : nxt};
         rom_addr = 9'(v_y(vm_rdata) - v_y(va) - 8'd1);
     end
     wire dv_idle = !dv_busy && !dv_start;
+    assign fin = STAGE == 2 && xs == X_FIN && (!cov_pend || dv_idle);
+    wire [HU-1:0]  hi_u   = HU'(hi);
+    wire [BKW+7:0] hi_bidx = hi_u[HU-1 -: BKW+8];   // the handed-over edge's vertices ({bank, cur, nxt}: b_idx)
     wire [31:0] h_den = t_den1 + m_pr[31:0];       // X_H's denominator
     assign dv_req  = (xs == X_H && mw && h_den != 0) || (xs == X_YF && ((aa_e && xmaj) || need_lf));
     assign dv_hold = yf_pend || cov_pend || dv_start;
@@ -343,7 +369,9 @@ module gpu3d_edge #(
                     {b_idx, ix, ylen, xlen, xmaj, lin, need_lf, yf_pend, yf, lf, xrecip, r26,
                      res_x, l_wbuf, l_aa, l_toon} <= HU'(hi);
                 end
-                xs <= X_BW;
+                // PFE: the prefetched edge arriving goes straight on (X_BW's test, a clock earlier)
+                if (PFE && pf_st == 3'd0 && pf_ok && pf_have == hi_bidx) begin pf_ok <= 1'b0; xs <= X_Z; end
+                else xs <= X_BW;
             end
         end else if (start) begin
             busy <= 1'b1;
@@ -351,6 +379,7 @@ module gpu3d_edge #(
             dv_mode <= 1'b0;
             sd <= side;
             sbank <= bank;
+            s1_wbuf <= wbuf; s1_aa <= aa; s1_toon <= toon;
             cur <= dummy ? dv : vtop;
             nxt <= dummy ? dv : vstep(vtop, side ? ~facing : facing, nv);
             xs <= X_WALK;
@@ -369,7 +398,7 @@ module gpu3d_edge #(
             if (!dummy && y >= vys_q && cur != vbot) begin
                 cur <= nxt;
                 nxt <= vstep(nxt, plus, nv);
-            end else xs <= X_L0;
+            end else xs <= !WL0 ? X_L0 : VREG ? X_LW : X_L1;
         end
         X_L0: if (STAGE != 2) xs <= VREG ? X_LW : X_L1;
         X_LW: if (STAGE != 2) xs <= X_L1;
@@ -452,7 +481,17 @@ module gpu3d_edge #(
                              y, ixc, ylen, v_x(va), v_y(va), v_x(vb), v_y(vb), sd, cur, nxt, nv, vtop, vbot, dummy);
 `endif
                 a0 = v_w(va); a1 = v_w(vb);
-                if (DS_YPERSP) begin
+                if (DS_YPERSP && YP16 && !wbuf_e && (a0[15] || a1[15])) begin
+                    // the DS (rules3d v19 persp_ybig): Z-buffer, max(w) >= 0x8000: w >> 8, linear when equal then
+`ifdef G3D_YP16_MUT
+                    ln = (a0 == a1) && ((a0 & 16'h3F) == 0);   // (mutant: the full-w linear test)
+`else
+                    ln = a0[15:8] == a1[15:8];
+`endif
+                    n0 = a0 >> 8;
+                    w0d <= a0 >> 8;
+                    w1d <= a1 >> 8;
+                end else if (DS_YPERSP) begin
                     // the DS: linear when w bits 0-5 are clear, the full w in the factor
                     ln = (a0 == a1) && ((a0 & 16'h3F) == 0);
                     n0 = a0;
@@ -479,7 +518,7 @@ module gpu3d_edge #(
         end
         // perspective factor: num = (x*w0n) << 9, den = x*w0d + (xdiff-x)*w1d
         X_F: if (STAGE != 2) begin
-            t_num <= m_p[31:0] << 9;
+            t_num <= {m_p[31:0], 9'b0};   // (truncated to 32 bits without YNW: the wrap)
             m_a <= 27'(ix); m_b <= 27'(w0d);
             xs <= X_G;
         end
@@ -656,6 +695,13 @@ module gpu3d_edge #(
             logic bfree;
             bfree = xs == X_IDLE || xs == X_FIN ||
                     (xs == X_IP && !(k <= 4'd5 || (k == 4'd6 && wbuf_e) || (k == 4'd7 && toon_e && !TOONR)));
+            // PFE: items 0-5, [6 W-buffer Z], [7 toon red]; the last one's operands are latched in the
+            // clock before it, so va/vb are free from two clocks before that
+            if (PFE && DS_LIN17 && xs == X_IP)
+                bfree = bfree || k >= ((toon_e && !TOONR) ? (wbuf_e ? 4'd5 : 4'd4) : (wbuf_e ? 4'd4 : 4'd3));
+`ifdef G3D_PFE_MUT
+            if (PFE) bfree = 1'b1;   // (mutant: the prefetch in any state, over the edge's va/vb)
+`endif
             if (rst) begin pf_st <= 3'd0; pf_ok <= 1'b0; end
             else case (pf_st)
                 3'd0: if (bfree && pfi_v && !(pf_ok && pf_have == pfi_idx)) begin

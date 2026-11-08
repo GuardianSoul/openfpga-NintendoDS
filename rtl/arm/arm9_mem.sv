@@ -95,6 +95,11 @@ module arm9_mem import arm_pkg::*; #(
   logic [19:0] rbase [0:7];                 // region base[31:12] as written (the compare masks it)
   logic [19:0] rmask [0:7];                 // region size mask[31:12]
   logic [7:0]  ren;
+  // The D side's region lookup, inside main RAM only (the one cacheable range here, 0x02000000-0x023FFFFF): per region,
+  // set at its c6 write, whether it reaches into main RAM (mr_v) and its base and mask in address bits 21:12. The match is
+  // registered from d_addr with the request (w_rm, as the fetch side's f_rm), so WB only picks the highest match's C/B
+  logic [7:0]  mr_v, w_rm;
+  logic [9:0]  mr_b [0:7], mr_m [0:7];
   logic [19:0] dtcm_base, dtcm_mask, itcm_mask;
   // Registers that are only read back (MRC) keep that value in an MLAB, in
   // {crn, crm, opc2} order: 0-7 c6 regions, 8/9 c9 DTCM/ITCM region, 10/11
@@ -103,6 +108,14 @@ module arm9_mem import arm_pkg::*; #(
   (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] cprb [0:15];
   logic [12:0] cprb_v = 13'h0;
   logic [3:0]  cprb_ra, cprb_wa;
+  // the read-back MLAB's address, taken from cp_op with w_cpop (RC3s #2046: w_cpop -> crn/crm compares -> cprb ->
+  // cp_rd -> d_rdata -> arm_core e3_c, -0.125 ns; #1850 -0.283): the same function of the same value, a clock's
+  // compares off the path
+  logic [3:0]  w_cprb_ra;
+  function automatic logic [3:0] cprb_ra_of(input logic [15:0] op);
+    return (op[10:7] == 4'd6) ? {1'b0, op[5:3]} :
+           (op[10:7] == 4'd9) ? {2'b10, op[6:3] != 4'd1, op[0]} : 4'd12;
+  endfunction
   logic [31:0] cprb_wd, cprb_q;
   logic        cprb_we;
 
@@ -287,11 +300,21 @@ module arm9_mem import arm_pkg::*; #(
   // OPT[22] (ERI) / OPT[23] (ERD): early restart. A demand fill writes the line's words 0..7 in order (k); a fetch
   // (ERI) or load (ERD) of that line takes word j from the cache RAM once j <= k - 2 (j was written at least a
   // clock before the RAM read: port B reads the word port A wrote, never the one it writes), or j <= 6 in the
-  // tag-write clock, instead of waiting for the tag write. OPT[26:24] (ERL): a refused load's fetch hold ends
-  // when k + ERL >= j + 2 (and words have begun), so its replay reaches WB about when word j is in
+  // tag-write clock, instead of waiting for the tag write. OPT[28:24] (ERL): a refused load's fetch hold ends once
+  // the fill's words have begun and word j is due within ERL beats (its beat + 2 <= k + ERL): the replayed load waits
+  // in D (A9_OPT bit 1) and reaches WB ~5 clk after the release. A clock count from the request (tried: ERT) cannot
+  // follow the PSRAM's first word, whose time varies with the other masters; too early costs another replay
   localparam bit ERI = (OPT & 4194304) != 0;
   localparam bit ERD = (OPT & 8388608) != 0;
-  localparam logic [3:0] ERL = 4'((OPT >> 24) & 7);
+  localparam logic [4:0] ERL = 5'((OPT >> 24) & 31);
+  // OPT[29] (HUM): hit under miss. While a D fill writes its line (S_FILL), a load that hits another set is answered
+  // as usual: the tag and data reads are port B's at the load's own set; port A writes only the filling set's line
+  localparam bit HUM = (OPT & 536870912) != 0;
+  // OPT[30] (CWF): critical word first. A demand fill asks for its line from the missed word (the bus and PSRAM
+  // wrap the burst at the line's end: nds_psram CWF, BCR wrap 8), so beat k carries word fs + k (fsd / fsi: the
+  // missed word of the D / I fill; 0 without CWF and for a prefetch fill); k still counts the beats
+  localparam bit CWF = (OPT & 1073741824) != 0;
+  wire  [2:0] fsd, fsi;
   // MEM1 (OPT[19], SLOW only): accesses may follow each other every cycle. A store writes the RAMs in its own WB cycle
   // while the next access reads them (port B, same address: undefined, the model inverts it), so that access gets the
   // written bytes merged in (pw); the dirty bits live in flops, since a tag row write would be a read-during-write
@@ -375,8 +398,11 @@ module arm9_mem import arm_pkg::*; #(
     logic       found, ok, cach, bufr;
     logic [7:0] r_ok;
     for (int n = 0; n < 8; n++) r_ok[n] = ap_ok(dap[n*4 +: 4], w_priv, w_we);
-    // pocket-now: no D-side MPU lookup; cacheable/bufferable only in the 4 MiB of main RAM at 0x02000000 (known difference)
-    found = w_addr[31:22] == 10'h008; ok = 1'b1; cach = |dcb; bufr = found && |wbb;
+    // cacheable/bufferable only in the 4 MiB of main RAM at 0x02000000 (known difference), as the highest matching
+    // region's C and B bits say there (no match: uncached, unbuffered); no permission checks (known difference)
+    found = w_addr[31:22] == 10'h008; ok = 1'b1; cach = 1'b0; bufr = 1'b0;
+    for (int n = 0; n < 8; n++)
+      if (w_rm[n]) begin cach = dcb[n]; bufr = found && wbb[n]; end
     wd_abort = 1'b0;   // pocket-now: no MPU data aborts (known difference)
     wd_itcm  = itcm_en && ((w_addr[31:12] & itcm_mask) == 20'h0) && (w_we || !itcm_ld);
     wd_dtcm  = !wd_itcm && dtcm_en && ((w_addr[31:12] & dtcm_mask) == dtcm_base) && (w_we || !dtcm_ld);
@@ -392,8 +418,7 @@ module arm9_mem import arm_pkg::*; #(
 
   // read-back MLAB: written by MCR (the values as MRC returns them), read in WB
   always_comb begin
-    cprb_ra = (w_crn == 4'd6) ? {1'b0, w_crm[2:0]} :
-              (w_crn == 4'd9) ? {2'b10, w_crm != 4'd1, w_opc2[0]} : 4'd12;
+    cprb_ra = w_cprb_ra;
     cprb_wa = cprb_ra;
     cprb_we = cp_write && (w_crn == 4'd6 || w_crn == 4'd9 || w_crn == 4'd13);
     cprb_wd = w_wdata;
@@ -402,6 +427,11 @@ module arm9_mem import arm_pkg::*; #(
                           : {w_wdata[31:12], 6'h0, w_wdata[5:1], 1'b0};
   end
   assign cprb_q = cprb_v[cprb_ra] ? cprb[cprb_ra] : 32'h0;
+`ifndef SYNTHESIS
+  always_ff @(posedge clk)
+    if (!rst && w_cprb_ra !== ((w_crn == 4'd6) ? {1'b0, w_crm[2:0]} : (w_crn == 4'd9) ? {2'b10, w_crm != 4'd1, w_opc2[0]} : 4'd12))
+      $error("arm9_mem: registered cprb address %h, w_cpop's %h", w_cprb_ra, w_cpop);
+`endif
   always_ff @(posedge clk) begin
     if (cprb_we) cprb[cprb_wa] <= cprb_wd;
     if (rst)          cprb_v[9:8] <= 2'b00;
@@ -441,6 +471,7 @@ module arm9_mem import arm_pkg::*; #(
     cp_write = wcp_e && w_cpwe && !cp_isop;
   end
 
+  wire [19:0] c6_msk = rmask_of(w_wdata[5:1]);   // a c6 write's region mask
   always_ff @(posedge clk) begin
     logic       w6, w9i;
     logic [19:0] tm;
@@ -454,6 +485,14 @@ module arm9_mem import arm_pkg::*; #(
         f_rm[n] <= ren[n] && ((i_addr[31:12] ^ rbase[n]) & rmask[n]) == 20'h0;
     tm = rst ? 20'hFFFFF : w9i ? tmask_of(w_wdata[5:1]) : itcm_mask;
     f_tm <= (i_addr[31:12] & tm) == 20'h0;
+    // the data request's region matches inside main RAM (a c6 write in WB this cycle is forwarded)
+    for (int n = 0; n < 8; n++)
+      if (rst)                       w_rm[n] <= 1'b0;
+      else if (w6 && w_crm[2:0] == n[2:0])
+        w_rm[n] <= w_wdata[0] && ((w_wdata[31:22] ^ 10'h008) & c6_msk[19:10]) == 10'h0 &&
+                   ((d_addr[21:12] ^ w_wdata[21:12]) & c6_msk[9:0]) == 10'h0;
+      else
+        w_rm[n] <= mr_v[n] && (d_addr[21:12] & mr_m[n]) == mr_b[n];
   end
 `ifndef SYNTHESIS
   // simulation: the registered matches are the ones F2 would compute from f_addr
@@ -516,6 +555,10 @@ module arm9_mem import arm_pkg::*; #(
         wd_tcmw = w_we;
       end else if (der) begin
                                             // ERD: the word is in the line being filled
+      end else if (HUM && st == S_FILL && dp_kind == DK_FILL && !w_we && wd_cach && wd_hit &&
+                   w_addr[DSB+4:5] != dp_a[DSB+4:5]) begin
+                                            // HUM: a hit in another set while the fill runs (col_d is not asked:
+                                            // the states before S_FILL write no tag row, S_TAGW comes after)
       end else if (busy_d || dp_v || col_d) begin
         d_ok = 1'b0;                        // the machine is busy with the D side
       end else if (!w_we) begin
@@ -572,8 +615,13 @@ module arm9_mem import arm_pkg::*; #(
   // EARLYD: the fetch hold of a refused access ends while the fill's last word is on its way, so the replay's
   // refetch reaches the memory stage about when the line is there (the DS stalls in place and continues at once;
   // the core refuses, flushes and refetches after the fill: ~12 clk exposed per fill). Too early only costs another replay.
+  // EARLYD, an uncached read's S_RD1: the replayed load waits in D (A9_OPT bit 1) and reaches WB ~5 clk after the
+  // release. Outside main RAM (I/O, palette, OAM, VRAM: the fabric answers in ~3 clk) the hold ends as the request goes
+  // out; for main RAM with the answer, a clock before dp_v clears. Too early only costs another replay.
   assign d_wait = (dp_v || busy_d) && !(EARLYD && st == S_FILL && k == 3'd7 && dp_kind == DK_FILL) &&
-                  !(ERD && st == S_FILL && dp_kind == DK_FILL && (k != 3'd0 || b_ack) && {1'b0, k} + ERL >= {1'b0, dp_a[4:2]} + 4'd2);
+                  !(ERD && st == S_FILL && dp_kind == DK_FILL && (k != 3'd0 || b_ack) &&
+                    {2'b0, 3'(dp_a[4:2] - fsd)} + 5'd2 <= {2'b0, k} + ERL) &&
+                  !(EARLYD && st == S_RD1 && (dp_a[27:24] != 4'h2 || b_ack));
 
   // Port A address and write muxes
   always_comb begin
@@ -587,9 +635,11 @@ module arm9_mem import arm_pkg::*; #(
   logic [WB-1:0] vway;                      // victim way
   // (main RAM, 0x02000000-0x023FFFFF, is the only cacheable range: address bits 21:5 name the line)
   assign ier = ERI && f_req && mpu_en && ic_en && f_addr[31:24] == 8'h02 && !pf_run && !iline && f_addr[21:5] == ip_a[21:5] &&
-               ((st == S_IFILL && {1'b0, f_addr[4:2]} + 4'd2 <= {1'b0, k}) || (st == S_ITAGW && f_addr[4:2] != 3'd7));
+               ((st == S_IFILL && {1'b0, 3'(f_addr[4:2] - fsi)} + 4'd2 <= {1'b0, k}) || (st == S_ITAGW && f_addr[4:2] != 3'(fsi - 3'd1)));
   assign der = ERD && wq_e && !w_we && dp_v && dp_kind == DK_FILL && w_addr[31:22] == 10'h008 && w_addr[21:5] == dp_a[21:5] &&
-               ((st == S_FILL && {1'b0, w_addr[4:2]} + 4'd2 <= {1'b0, k}) || (st == S_TAGW && w_addr[4:2] != 3'd7));
+               ((st == S_FILL && {1'b0, 3'(w_addr[4:2] - fsd)} + 4'd2 <= {1'b0, k}) || (st == S_TAGW && w_addr[4:2] != 3'(fsd - 3'd1)));
+  assign fsd = CWF && dp_kind == DK_FILL ? dp_a[4:2] : 3'd0;
+  assign fsi = CWF && !pf_run ? ip_a[4:2] : 3'd0;
   logic [DLW-1:0] tlane;                    // the chosen way's lane (ev_lane)
   logic [WB-1:0] tlru, ilru;                // the set's round-robin counter
   // the chosen way's lane, registered in S_TAG from the lane S_TAG selects (lw) instead of the whole
@@ -685,7 +735,7 @@ module arm9_mem import arm_pkg::*; #(
     case (st)
       S_TAG, S_EVRD, S_EVRD2, S_EVWR, S_FILL, S_TAGW: begin
         busy_d = 1'b1;
-        dc_aa = {dset, k};
+        dc_aa = {dset, st == S_FILL ? 3'(k + fsd) : k};
         dt_aa = dset;
         for (int w = 0; w < WAYS; w++) dc_we[w] = 4'h0;
         dt_we = '0;
@@ -711,7 +761,7 @@ module arm9_mem import arm_pkg::*; #(
       S_ITAG, S_IFILL, S_ITAGW: begin
         busy_i = !(pf_run && st != S_ITAGW);
         if (iline) busy_d = 1'b1;
-        ic_aa = {ia[ISB+4:5], k};
+        ic_aa = {ia[ISB+4:5], 3'(k + fsi)};
         it_aa = !iline ? ia[ISB+4:5] : (cmo_op[2:0] == 3'd2) ? sw_iset(dp_val, swa_i) : dp_val[ISB+4:5];
         if (st == S_IFILL && b_ack) ic_we[vway] = 1'b1;
         if (st == S_ITAGW) begin
@@ -755,8 +805,8 @@ module arm9_mem import arm_pkg::*; #(
       S_IRD1:   begin b_req = 1'b1; b_addr = {ip_a[31:2], 2'b00}; end
       S_EVWR:   begin b_req = 1'b1; b_we = 1'b1; b_wdata = dc_aq[vway];
                       b_addr = {ev_lane[DTW-1:0], dset, k, 2'b00}; end
-      S_FILL:   begin b_req = 1'b1; b_addr = {dp_a[31:5], k, 2'b00}; end
-      S_IFILL:  begin b_req = 1'b1; b_addr = {ia[31:5], k, 2'b00}; end
+      S_FILL:   begin b_req = 1'b1; b_addr = {dp_a[31:5], 3'(k + fsd), 2'b00}; end
+      S_IFILL:  begin b_req = 1'b1; b_addr = {ia[31:5], 3'(k + fsi), 2'b00}; end
       default: ;
     endcase
   end
@@ -775,12 +825,14 @@ module arm9_mem import arm_pkg::*; #(
     w_cp    <= cp_req;
     w_cpwe  <= cp_we;
     w_cpop  <= cp_op;
+    w_cprb_ra <= cprb_ra_of(cp_op);
 
     if (rst) begin
       ctrl <= RESET_CTRL;
       dcb <= 8'h0; wbb <= 8'h0;
       
       ren <= 8'h0;
+      mr_v <= 8'h0;
       dtcm_base <= 20'h0; dtcm_mask <= 20'hFFFFF; itcm_mask <= 20'hFFFFF;
       st <= S_IDLE;
       wb_n <= 4'd0; wb_rp <= 3'd0; wb_wp <= 3'd0; rbuf_v <= 1'b0; ibuf_v <= 1'b0; ev_v <= 1'b0;
@@ -807,6 +859,9 @@ module arm9_mem import arm_pkg::*; #(
             rbase[w_crm[2:0]] <= w_wdata[31:12];
             rmask[w_crm[2:0]] <= rmask_of(w_wdata[5:1]);
             ren[w_crm[2:0]] <= w_wdata[0];
+            mr_v[w_crm[2:0]] <= w_wdata[0] && ((w_wdata[31:22] ^ 10'h008) & c6_msk[19:10]) == 10'h0;
+            mr_b[w_crm[2:0]] <= w_wdata[21:12] & c6_msk[9:0];
+            mr_m[w_crm[2:0]] <= c6_msk[9:0];
           end
           4'd9: begin
             if (w_crm == 4'd1) begin

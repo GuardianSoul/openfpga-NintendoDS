@@ -14,7 +14,8 @@ the way openfpga-PlayStation's scripts/package_release.py does for the PlayStati
 
 It refuses a build whose result.txt doesn't say timing PASS, a diagnostics
 core, a missing save or boot ROM slot, or any workspace name left in the
-package. Workspace test builds keep their own names (tools/ds/package.py).
+package, binaries included. Before uploading, run tools/ds/check_release_assets.py
+on the zip and the source tarball: it also reads the archives' metadata. Workspace test builds keep their own names (tools/ds/package.py).
 
   python3 tools/ds/package_release.py build/ds/package --result build/ds/result.txt --version 0.5.0-rc1
 """
@@ -120,9 +121,9 @@ def main():
         'and firmware.bin (262,144 bytes on a DS or DS Lite). Put your .nds games here too.\n'
         'No BIOS, firmware or game is included.\n')
 
-    for path in sorted(sd.rglob('*')):
-        if path.is_file() and path.suffix not in {'.rbf_r', '.bin'}:
-            if PRIVATE.search(path.read_text(errors='replace')) or PRIVATE.search(str(path.relative_to(sd))):
+    for path in sorted(sd.rglob('*')):     # binaries too: the bitstream and boot ROM carry strings
+        if path.is_file():
+            if PRIVATE.search(path.read_bytes().decode('latin-1')) or PRIVATE.search(str(path.relative_to(sd))):
                 raise SystemExit(f'workspace name left in {path.relative_to(sd)}')
     archive_path = out/f'{CORE}_{args.version}_{args.date}.zip'
     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:

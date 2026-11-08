@@ -42,7 +42,7 @@ MUTANTS = [
     ('rtl/pocket/nds_controls.sv', "wire g_end = g_step == (g_circle ? 4'd15", "wire g_end = g_step == (g_circle ? (g_big ? 4'd7 : 4'd15)"),
     ('rtl/pocket/nds_controls.sv', "wire signed [7:0] c_x = g_big ? sin48(g_step)", "wire signed [7:0] c_x = g_big ? sin48(g_step) >>> 1"),
     ('rtl/pocket/nds_controls.sv', "3'd3: m = 5'd11;", "3'd3: m = 5'd10;"),
-    ('rtl/pocket/nds_controls.sv', "g_y <= py[9] ? 8'd0", "g_y <= py[9] ? py[7:0]"),
+    ('rtl/pocket/nds_controls.sv', "q_y = py[9] ? 8'd0", "q_y = py[9] ? py[7:0]"),
     ('rtl/pocket/nds_controls.sv', "wire [3:0] g_new = fb & ~fb_q & g_gest;", "wire [3:0] g_new = fb & g_gest;"),
     ('rtl/pocket/nds_controls.sv', "assign pen_x = g_vis ? g_x : cur_x;", "assign pen_x = cur_x;"),
     ('rtl/pocket/nds_controls.sv', "speed == 2'd2 ? 8'd6 : 8'd3", "speed == 2'd2 ? 8'd3 : 8'd3"),
@@ -64,7 +64,7 @@ MUTANTS = [
     ('rtl/pocket/nds_controls.sv', "rate = m > 4'd4 ? m - 4'd4 : 4'd0;", "rate = m;"),
     ('rtl/pocket/nds_controls.sv', "wire pen_ana = ana && !top_only && buttons[R3];", "wire pen_ana = ana && buttons[R3];"),
     # the cursor never hides
-    ('rtl/pocket/nds_controls.sv', "assign cursor = !top_only && (touch || ana) && idle != 8'd180;",
+    ('rtl/pocket/nds_controls.sv', "assign cursor = !top_only && (touch || ana) && shown;",
      "assign cursor = !top_only && (touch || ana);"),
 ]
 

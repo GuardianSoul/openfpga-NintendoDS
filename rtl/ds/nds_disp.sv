@@ -20,18 +20,26 @@
 // an earlier one still waits is not drawn (its register updates still run).
 //
 // AR_RAM keeps DISPCNT, BGnCNT, WINCNT, BLDCNT/BLDALPHA/BLDY and
-// MASTER_BRIGHT in an M10K (u_ar, a second copy u_rb for CPU reads) instead
-// of flip-flops. They are read only by the state copy (Q_LOAD, one word a
+// MASTER_BRIGHT in an M10K (u_ar: words of u_pr; a second copy u_rb for
+// CPU reads) instead of flip-flops. They are read only by the state copy (Q_LOAD, one word a
 // clock, as u_pr) and the CPU, both a clock after the address, so nothing
 // moves in time; the bits the line sequencer tests (DISPCNT[14:7], BG2CNT
 // and BG3CNT bit 6) are kept as flip-flop shadows.
+// WH_RAM (with AR_RAM): WIN0H/WIN1H as written are u_ar's word 6 too; the
+// state words 13/14 take their X bytes from it. The line end's X1 > X2 per
+// window is a flag set by the write, from the write's bytes and u_rb's
+// word (read the clock before: the fabric holds io_addr from S_GO's first
+// clock, a clock before io_req), so it changes at the same edge the bytes
+// did. After reset both copies of word 6 are cleared (pr_cl 36..33).
 module nds_disp
     import gpu2d_pkg::*;
 #(
     parameter bit AR_RAM = 1,
+    parameter bit WH_RAM = 1,         // with AR_RAM: WIN0H/WIN1H in u_ar (above)
     parameter bit WST_RF = 1,         // gpu2d: per-pass state words read from its register file
     parameter int TEX_IDXW = 6,       // gpu2d: log2 blocks in the BG texel cache
     parameter bit MOSAIC   = 1,       // 0: no BG/OBJ mosaic (fit setting): MOSAIC reads as size 0
+    parameter bit CAPTURE  = 1,       // 0: no display capture (gpu2d CAPTURE, a temporary fit setting): DISPCAPCNT bit 31 still clears at the frame's end
     parameter bit OAM_CPU  = 0,       // gpu2d OAM_CPU: CPU OAM reads through the 2D engine's OAM
     parameter bit TAG_MLAB = 0,       // gpu2d: ext-palette cache tags in the data words (no tag RAM)
     // HURRY_AT: the BG job is near its line's deadline once it has run this
@@ -125,12 +133,14 @@ module nds_disp
     // ---------------------------------------------------------------- registers (per engine)
     logic [31:0] dispcnt  [2];
     logic [15:0] bgcnt    [2][4];
-    // BGxRef (stepped by PostDraw): nds_disp_refs (MLABs), below
+    // BGxRef (stepped by PostDraw) and BGxRefInternal: nds_disp_refs (MLABs), below
     logic [31:0] ref_cq, ref_sq, ref_cw, ref_pw;
     logic        ref_cwe, ref_pwe;
-    // (BGxRefReload and BGxRefInternal are in u_pr)
+    // (BGxRefReload is in u_pr)
     logic [7:0]  win0     [2][4];   // Win0Coords: x1, x2, y1, y2
     logic [7:0]  win1     [2][4];
+    localparam bit WH = AR_RAM && WH_RAM;
+    logic        w0x [2], w1x [2];  // (WH) X1 > X2 of WIN0H / WIN1H
     logic [7:0]  wincnt   [2][4];
     logic [3:0]  bgmos    [2][2];   // BGMosaicSize
     logic [3:0]  objmos   [2][2];
@@ -204,46 +214,69 @@ module nds_disp
     wire hw_lo = io_be[1:0] == 2'b11;
     wire hw_hi = io_be[3:2] == 2'b11;
 
-    // Scroll offsets, affine parameters (write-only for the CPU) and the
-    // affine reference copies in a RAM:
-    //   {e, 00, i}      {BGiVOFS, BGiHOFS}
-    //   {e, 010, i}     {PC, PA} of BG 2+i (read by the line's state copy)
-    //   {e, 011, i}     {PD, PB} of BG 2+i (stepped into the reference point)
-    //   {e, 10, i, y}   BGxRefInternal (X, Y) of BG 2+i, copied at line start
-    //   {e, 11, i, y}   BGxRefReload, written with the reference point
+    // Scroll offsets, affine parameters (write-only for the CPU), the
+    // affine reference reload copies and (AR_RAM) u_ar's registers in one
+    // RAM, u_pr, written only from the CPU's side:
+    //   {0, e, 00, i}     {BGiVOFS, BGiHOFS}
+    //   {0, e, 010, i}    {PC, PA} of BG 2+i (read by the line's state copy)
+    //   {0, e, 011, i}    {PD, PB} of BG 2+i (stepped into the reference point)
+    //   {0, e, 10, i, y}  unused, 0 (Q_PRE reads word 8 as the 0 its copy adds)
+    //   {0, e, 11, i, y}  BGxRefReload, written with the reference point
+    //   {1, e, k}         u_ar's word k (below)
     // An affine parameter word (PA/PB or PC/PD) writes both of its BG's
     // words: the second half one cycle later (pw_*). Cleared after reset.
+    // BGxRefInternal, copied from BGxRef at line start (Q_PRE), is in u_refs
+    // (entries 8-15), whose write port is free then: the copy never meets a
+    // CPU write here, so a u_ar write in a copy step goes in at once, as it
+    // did into its own RAM, and no step takes longer. A step still waits a
+    // clock for a write of the parameters (busy), as before. CPU writes are
+    // at least two clocks apart, so pw_v (the clock after one) never meets a
+    // u_ar write; nor does the clear (the CPUs are in reset then).
     logic [3:0]  pr_we, pw_be;
-    logic [4:0]  pr_wa, pr_ra, pw_a, sq_wa;
-    logic [31:0] pr_wd, pr_q, pw_d, sq_wd;
+    logic [5:0]  pr_wa, pr_ra;
+    logic [4:0]  pw_a;
+    logic [31:0] pr_wd, pr_q;
+    logic [15:0] pw_d;                  // the second half (both byte lanes get it; pw_be picks one)
     logic        pw_v, sq_we, sq_ok;
     logic [5:0]  pr_cl;
-    nds_sdp_ram #(.AW(5)) u_pr (.clk, .we(pr_we), .waddr(pr_wa), .wdata(pr_wd), .raddr(pr_ra), .rdata(pr_q));
+    logic [3:0]  ar_we;
+    logic [4:0]  ar_wa;
+    logic [31:0] ar_wd;
+    nds_sdp_ram #(.AW(6)) u_pr (.clk, .we(pr_we), .waddr(pr_wa), .wdata(pr_wd), .raddr(pr_ra), .rdata(pr_q));
     wire pr_io = wr && !io_cpu && eng_en(e);
     always_comb begin
-        pr_we = 4'd0; pr_wa = {e, 2'b00, w[1:0]}; pr_wd = io_wdata; sq_ok = 1'b0;
-        if (pr_cl != 6'd0) begin pr_we = 4'hF; pr_wa = 5'(pr_cl - 6'd1); pr_wd = 32'd0; end
-        else if (pw_v) begin pr_we = pw_be; pr_wa = pw_a; pr_wd = pw_d; end
+        logic busy;                     // a write of u_pr's parameter words now: the Q_PRE step waits
+        pr_we = 4'd0; pr_wa = {1'b0, e, 2'b00, w[1:0]}; pr_wd = io_wdata; busy = 1'b1;
+        if (pr_cl != 6'd0) begin pr_we = 4'hF; pr_wa = pr_cl > 6'd32 ? {1'b1, pr_cl[1], 3'b011, pr_cl[0]} : 6'(pr_cl - 6'd1); pr_wd = 32'd0; end
+        else if (pw_v) begin pr_we = pw_be; pr_wa = {1'b0, pw_a}; pr_wd = {pw_d, pw_d}; end
         else if (pr_io && w >= 5'h04 && w <= 5'h07) pr_we = io_be;
         else if (pr_io && (w == 5'h08 || w == 5'h0C)) begin          // PA (PB follows)
-            pr_we = {2'b00, hw_lo, hw_lo}; pr_wa = {e, 3'b010, w[2]}; pr_wd = {16'd0, io_wdata[15:0]};
+            pr_we = {2'b00, hw_lo, hw_lo}; pr_wa = {1'b0, e, 3'b010, w[2]}; pr_wd = {2{io_wdata[15:0]}};
         end else if (pr_io && (w == 5'h09 || w == 5'h0D)) begin     // PC (PD follows)
-            pr_we = {hw_lo, hw_lo, 2'b00}; pr_wa = {e, 3'b010, w[2]}; pr_wd = {io_wdata[15:0], 16'd0};
+            pr_we = {hw_lo, hw_lo, 2'b00}; pr_wa = {1'b0, e, 3'b010, w[2]}; pr_wd = {2{io_wdata[15:0]}};
         end else if (pr_io && (w == 5'h0A || w == 5'h0B || w == 5'h0E || w == 5'h0F) && (hw_lo || hw_hi)) begin
             // the reload copy: the reference point as this write leaves it
-            pr_we = 4'hF; pr_wa = {e, 2'b11, w[2], w[0]};
+            pr_we = 4'hF; pr_wa = {1'b0, e, 2'b11, w[2], w[0]};
             pr_wd = ref_cw;
-        end else if (sq_we) begin pr_we = 4'hF; pr_wa = sq_wa; pr_wd = sq_wd; sq_ok = 1'b1; end
+        end else begin
+            busy = 1'b0;
+            if (ar_we != 4'd0) begin pr_we = ar_we; pr_wa = {1'b1, ar_wa}; pr_wd = ar_wd; end
+        end
+        sq_ok = !busy;
     end
+`ifndef ALTERA_RESERVED_QIS
+    always_ff @(posedge clk)
+        if (!rst && ar_we != 4'd0 && (pr_cl != 6'd0 || pw_v)) $display("nds_disp: a u_ar write met the clear or pw_v (lost)");
+`endif
     always_ff @(posedge clk) begin
-        if (rst) begin pr_cl <= 6'd32; pw_v <= 1'b0; end
+        if (rst) begin pr_cl <= WH ? 6'd36 : 6'd32; pw_v <= 1'b0; end
         else begin
             if (pr_cl != 6'd0) pr_cl <= pr_cl - 6'd1;
             pw_v <= 1'b0;
             if (pr_io && (w == 5'h08 || w == 5'h0C || w == 5'h09 || w == 5'h0D)) begin
                 pw_v <= hw_hi; pw_a <= {e, 3'b011, w[2]};
                 pw_be <= w[0] ? {2'b11, 2'b00} : {2'b00, 2'b11};
-                pw_d <= w[0] ? {io_wdata[31:16], 16'd0} : {16'd0, io_wdata[31:16]};
+                pw_d <= io_wdata[31:16];
             end
         end
     end
@@ -251,9 +284,8 @@ module nds_disp
     // (AR_RAM) u_ar: per engine {e, k}: 0 DISPCNT, 1 BG1CNT:BG0CNT,
     // 2 BG3CNT:BG2CNT, 3 WINCNT, 4 BLDALPHA:BLDCNT (as read back), 5
     // {MASTER_BRIGHT, BLDY as written}; u_rb is the same for CPU reads
-    logic [3:0]  ar_we;
-    logic [4:0]  ar_wa, ar_ra, rb_ra;
-    logic [31:0] ar_wd, ar_q, rb_q;
+    logic [4:0]  ar_ra, rb_ra;
+    logic [31:0] rb_q;
     logic        rb_sel, rb_hi;
     always_comb begin
         ar_we = 4'd0; ar_wa = {e, 4'd0}; ar_wd = io_wdata;
@@ -265,6 +297,7 @@ module nds_disp
             end else if (eng_en(e)) case (w)
                 5'h02: begin ar_we = io_be; ar_wa = {e, 4'd1}; end
                 5'h03: begin ar_we = io_be; ar_wa = {e, 4'd2}; end
+                5'h10: if (WH) begin ar_we = io_be; ar_wa = {e, 4'd6}; end
                 5'h12: begin ar_we = io_be; ar_wa = {e, 4'd3}; end
                 5'h14: begin ar_we = io_be; ar_wa = {e, 4'd4}; ar_wd = io_wdata & 32'h1F1F3FFF; end
                 5'h15: begin ar_we = {3'd0, io_be[0]}; ar_wa = {e, 4'd5}; ar_wd = {27'd0, io_wdata[4:0]}; end
@@ -278,19 +311,30 @@ module nds_disp
             5'h12:   rb_ra = {e, 4'd3};
             5'h14:   rb_ra = {e, 4'd4};
             5'h1B:   rb_ra = {e, 4'd5};
+            5'h10:   rb_ra = {e, 4'd6};        // (WH: the X1 > X2 flags; WIN0H/WIN1H read as 0)
             default: rb_ra = {e, 4'd0};
         endcase
     end
     // M10K: a read of the address written at the same edge gives the old
     // data (as the flip-flops did: a CPU write in the cycle Q_LOAD reads that
-    // word)
+    // word). u_ar's words are u_pr's {1, e, k}
     generate if (AR_RAM) begin : g_ar
-        nds_sdp_ram #(.AW(5)) u_ar (.clk, .we(ar_we), .waddr(ar_wa), .wdata(ar_wd), .raddr(ar_ra), .rdata(ar_q));
-        nds_sdp_ram #(.AW(5)) u_rb (.clk, .we(ar_we), .waddr(ar_wa), .wdata(ar_wd), .raddr(rb_ra), .rdata(rb_q));
+        // (WH: cleared with u_pr's word 6)
+        wire rb_cl = WH && pr_cl > 6'd32;
+        nds_sdp_ram #(.AW(5)) u_rb (.clk, .we(rb_cl ? 4'hF : ar_we), .waddr(rb_cl ? {pr_cl[1], 3'b011, pr_cl[0]} : ar_wa),
+                                    .wdata(rb_cl ? 32'd0 : ar_wd), .raddr(rb_ra), .rdata(rb_q));
     end else begin : g_noar
-        assign ar_q = 32'd0;
         assign rb_q = 32'd0;
     end endgenerate
+`ifndef ALTERA_RESERVED_QIS
+    // WH: a WIN0H/WIN1H write reads u_rb's word 6 the clock before (the fabric's io_addr then)
+    logic [4:0] rb_ra_q;
+    always_ff @(posedge clk) begin
+        rb_ra_q <= rb_ra;
+        if (WH && !rst && wr && !io_cpu && eng_en(e) && w == 5'h10 && rb_ra_q != {e, 4'd6})
+            $error("nds_disp: a WIN0H/WIN1H write without its address the clock before");
+    end
+`endif
 
     logic [31:0] io_r;
     assign io_rdata = rb_sel ? (rb_hi ? {16'd0, rb_q[31:16]} : rb_q) : io_r;
@@ -355,23 +399,32 @@ module nds_disp
     assign ref_cwe = !rst && pr_io && (w == 5'h0A || w == 5'h0B || w == 5'h0E || w == 5'h0F) && (hw_lo || hw_hi);
     assign ref_cw  = refw(ref_cq, io_wdata, io_be);
     // Q_POST step {x, i, y} (pk_b): the reload word at a frame's start, else
-    // += PB / PD as u_pr gives it
-    assign ref_pwe = !rst && q == Q_POST && pk != 4'd0 && !pk_ph && eng_en(pk_b[2]) && layer_en[pk_b[2]][2+pk_b[1]];
-    assign ref_pw  = q_reset ? pr_q : ref_sq + (pk_b[0] ? {{16{pr_q[31]}}, pr_q[31:16]} : {{16{pr_q[15]}}, pr_q[15:0]});
+    // += PB / PD as u_pr gives it. Q_PRE step {x, i, y} (pc - 1): entry
+    // {1, x, i, y} (BGxRefInternal) <- BGxRef, through the same adder (u_pr
+    // gives word 8, 0, then), in the clocks the copy went into u_pr before
+    logic [3:0] ref_pa;
+    assign ref_pwe = !rst && (q == Q_POST ? pk != 4'd0 && !pk_ph && eng_en(pk_b[2]) && layer_en[pk_b[2]][2+pk_b[1]]
+                                          : sq_we && sq_ok);
+    assign ref_pa  = q == Q_POST ? {1'b0, pk_b} : {1'b1, 3'(pc - 4'd1)};
+    assign ref_pw  = q_reset && q == Q_POST ? pr_q : ref_sq + (pk_b[0] ? {{16{pr_q[31]}}, pr_q[31:16]} : {{16{pr_q[15]}}, pr_q[15:0]});
     // Q_POST writes every other clock, so a CPU write (always >= 2 clocks
     // apart) waits at most one clock: one queue entry is enough
     nds_disp_refs #(.QD(1)) u_refs (.clk, .rst,
         .c_a({e, w[2], w[0]}), .c_q(ref_cq), .c_we(ref_cwe), .c_wd(ref_cw),
-        .s_a(q == Q_POST ? pk_b : 3'(pc - 4'd1)), .s_q(ref_sq),
-        .p_we(ref_pwe), .p_a(pk_b), .p_wd(ref_pw));
+        // the sequencer's reads: the Q_POST step, Q_LOAD's BGxRefInternal (words 7-10), the Q_PRE step
+        .s_a(q == Q_POST ? {1'b0, pk_b} : q == Q_LOAD ? {1'b1, q_eng, 2'(q_word + 5'd1)} : {1'b0, 3'(pc - 4'd1)}),
+        .s_q(ref_sq), .p_we(ref_pwe), .p_a(ref_pa), .p_wd(ref_pw),
+        .z_we(pr_cl != 6'd0), .z_a(pr_cl[3:0]));   // cleared with u_pr after reset
 
-    // u_pr's read address: the state copy (Q_LOAD) or Q_POST's {PD, PB}
+    // u_pr's read address: the state copy (Q_LOAD), Q_POST's {PD, PB}, else
+    // word 8 (0: what Q_PRE's copy adds)
     always_comb begin
         // Q_POST step {x, i, y}: the reload word at a frame's start, else {PD, PB}
-        if (q == Q_POST) pr_ra = q_reset ? {pk[2], 2'b11, pk[1], pk[0]} : {pk[2], 3'b011, pk[1]};
-        else if (q_word == 5'd11 || q_word == 5'd12) pr_ra = {q_eng, 3'b010, q_word == 5'd12};
-        else if (q_word >= 5'd7 && q_word <= 5'd10) pr_ra = {q_eng, 2'b10, 2'(q_word - 5'd7)};
-        else pr_ra = {q_eng, 2'b00, 2'(q_word - 5'd3)};
+        if (q == Q_POST) pr_ra = q_reset ? {1'b0, pk[2], 2'b11, pk[1], pk[0]} : {1'b0, pk[2], 3'b011, pk[1]};
+        else if (q != Q_LOAD) pr_ra = 6'd8;
+        else if (ar_word(q_word) || wh_word(q_word)) pr_ra = {1'b1, ar_ra};
+        else if (q_word == 5'd11 || q_word == 5'd12) pr_ra = {1'b0, q_eng, 3'b010, q_word == 5'd12};
+        else pr_ra = {1'b0, q_eng, 2'b00, 2'(q_word - 5'd3)};   // (words 7-10: u_refs)
     end
     always_comb
         case (q_word)
@@ -380,20 +433,22 @@ module nds_disp
             5'd15:   ar_ra = {q_eng, 4'd3};
             5'd18:   ar_ra = {q_eng, 4'd4};
             5'd19:   ar_ra = {q_eng, 4'd5};
+            5'd13, 5'd14: ar_ra = {q_eng, 4'd6};
             default: ar_ra = {q_eng, 4'd0};
         endcase
-    // Q_PRE step {x, i, y}: BGxRefInternal <- BGxRef
+    // Q_PRE step {x, i, y}: BGxRefInternal <- BGxRef (u_refs: ref_pwe)
     always_comb begin
         logic [2:0] st;
         st = 3'(pc - 4'd1);
         sq_we = q == Q_PRE && pc != 4'd0 && pc_m[st[2:1]];
-        sq_wa = {st[2], 2'b10, st[1], st[0]};
-        sq_wd = ref_sq;
     end
 
     // state words for engine x
     function automatic logic ar_word(input logic [4:0] a);
         return AR_RAM && (a <= 5'd2 || a == 5'd15 || a == 5'd18 || a == 5'd19);
+    endfunction
+    function automatic logic wh_word(input logic [4:0] a);    // X bytes from u_ar word 6
+        return WH && (a == 5'd13 || a == 5'd14);
     endfunction
     function automatic logic [31:0] sword(input logic x, input logic [4:0] a);
         if (ar_word(a)) return 32'd0;     // from u_ar
@@ -401,9 +456,10 @@ module nds_disp
             5'd0:  return dispcnt[x];
             5'd1:  return {bgcnt[x][1], bgcnt[x][0]};
             5'd2:  return {bgcnt[x][3], bgcnt[x][2]};
-            5'd3, 5'd4, 5'd5, 5'd6, 5'd7, 5'd8, 5'd9, 5'd10, 5'd11, 5'd12: return 32'd0;   // from u_pr
-            5'd13: return {win0[x][3], win0[x][2], win0[x][1], win0[x][0]};
-            5'd14: return {win1[x][3], win1[x][2], win1[x][1], win1[x][0]};
+            5'd3, 5'd4, 5'd5, 5'd6, 5'd11, 5'd12: return 32'd0;   // from u_pr
+            5'd7, 5'd8, 5'd9, 5'd10: return 32'd0;                 // from u_refs (into ld_d in Q_LOAD)
+            5'd13: return {win0[x][3], win0[x][2], WH ? 16'd0 : {win0[x][1], win0[x][0]}};
+            5'd14: return {win1[x][3], win1[x][2], WH ? 16'd0 : {win1[x][1], win1[x][0]}};
             5'd15: return {wincnt[x][3], wincnt[x][2], wincnt[x][1], wincnt[x][0]};
             5'd16: return {12'd0, objmos[x][0], bgmos[x][0], w1act[x], w0act[x], layer_en[x], obj_en[x], fblank[x], eng_en(x)};
             5'd17: return MOSAIC ? {8'd0, objmosline[x][7:0], 7'd0, bgmosline[x]} : 32'd0;
@@ -413,8 +469,10 @@ module nds_disp
             default: return {27'd0, cap_enable, lcdc_ab};
         endcase
     endfunction
-    assign st_data = (ld_word >= 5'd3 && ld_word <= 5'd12) ? pr_q    // words 3-12: u_pr
-                   : ar_word(ld_word) ? ar_q : ld_d;
+    assign st_data = ((ld_word >= 5'd3 && ld_word <= 5'd6) || ld_word == 5'd11 || ld_word == 5'd12 || ar_word(ld_word))
+                   ? pr_q    // words 3-6, 11, 12 and u_ar's: u_pr
+                   : wh_word(ld_word) ? {ld_d[31:16], ld_word[0] ? {pr_q[7:0], pr_q[15:8]} : {pr_q[23:16], pr_q[31:24]}}
+                   : ld_d;
 
     // ---------------------------------------------------------------- main
     always_ff @(posedge clk) begin
@@ -437,6 +495,7 @@ module nds_disp
                     bgcnt[x][i] <= 16'd0;
                     win0[x][i] <= 8'd0; win1[x][i] <= 8'd0; wincnt[x][i] <= 8'd0;
                 end
+                w0x[x] <= 1'b0; w1x[x] <= 1'b0;
                 for (int i = 0; i < 2; i++) begin
                     // (the reference points: u_refs clears them)
                     bgmos[x][i] <= 4'd0; objmos[x][i] <= 4'd0;
@@ -542,7 +601,13 @@ module nds_disp
                         end
                         // 0x04-0x07, 0x08/0x09/0x0C/0x0D: u_pr
                         // 0x0A/0x0B/0x0E/0x0F: the reference points (u_refs; reload copy: u_pr)
-                        5'h10: begin
+                        5'h10: if (WH) begin
+                            logic [31:0] m;         // the word as this write leaves it
+                            m = rb_q;
+                            for (int b = 0; b < 4; b++) if (io_be[b]) m[b*8 +: 8] = io_wdata[b*8 +: 8];
+                            w0x[e] <= m[15:8] > m[7:0];
+                            w1x[e] <= m[31:24] > m[23:16];
+                        end else begin
                             if (io_be[0]) win0[e][1] <= io_wdata[7:0];
                             if (io_be[1]) win0[e][0] <= io_wdata[15:8];
                             if (io_be[2]) win1[e][1] <= io_wdata[23:16];
@@ -645,7 +710,9 @@ module nds_disp
                 end
                 Q_LOAD: begin
                     // u_pr answers next cycle: the word is written then (ld_*)
-                    ld_v <= 1'b1; ld_eng <= q_eng; ld_word <= q_word; ld_d <= sword(q_eng, q_word);
+                    ld_v <= 1'b1; ld_eng <= q_eng; ld_word <= q_word;
+                    // words 7-10, BGxRefInternal: u_refs, read now (as u_pr's word was)
+                    ld_d <= (q_word >= 5'd7 && q_word <= 5'd10) ? ref_sq : sword(q_eng, q_word);
                     if (q_word == 5'd21 || (q_word == 5'd19 && q_eng == 1'b0)) begin
                         if (q_eng) q <= Q_RUN;
                         else begin q_eng <= 1'b1; q_word <= 5'd0; end
@@ -694,8 +761,8 @@ module nds_disp
                         end
                         // the horizontal window state the drawn line leaves behind
                         if (q_draw && q_line < 9'd192 && !fblank[x]) begin
-                            if (dc_bit(x[0], 13)) w0act[x][1] <= win0[x][0] > win0[x][1];
-                            if (dc_bit(x[0], 14)) w1act[x][1] <= win1[x][0] > win1[x][1];
+                            if (dc_bit(x[0], 13)) w0act[x][1] <= WH ? w0x[x] : win0[x][0] > win0[x][1];
+                            if (dc_bit(x[0], 14)) w1act[x][1] <= WH ? w1x[x] : win1[x][0] > win1[x][1];
                         end
                     end
                 end
@@ -720,7 +787,7 @@ module nds_disp
     logic [7:0]  fifo_raddr;
     // PERSIST: the 2D engine keeps its VRAM block caches across lines until
     // VRAM or VRAMCNT is written (a 4-bit tile block serves eight lines)
-    gpu2d #(.PERSIST(1), .OAM_CPU(OAM_CPU), .WST_RF(WST_RF), .TEX_IDXW(TEX_IDXW), .MOSAIC(MOSAIC), .TAG_MLAB(TAG_MLAB)) u_gpu2d (
+    gpu2d #(.PERSIST(1), .OAM_CPU(OAM_CPU), .WST_RF(WST_RF), .TEX_IDXW(TEX_IDXW), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .TAG_MLAB(TAG_MLAB)) u_gpu2d (
         .clk, .rst, .vram_wr,
         .st_we, .st_eng, .st_addr, .st_data,
         .pal_we, .pal_waddr(po_waddr), .pal_wdata(po_wdata), .pal_be(po_be), .pal_cq,

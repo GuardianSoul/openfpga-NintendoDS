@@ -24,7 +24,10 @@ module sys_ipc (
     logic       irqen [2];
     logic       en [2], rirq [2], sirq [2], err [2];
     logic [3:0] rp [2], wp [2];
-    logic [4:0] n  [2];             // FIFO f is written by CPU f
+    logic       fl [2];             // FIFO f (written by CPU f) holds 16: its count is {fl, wp - rp}
+    wire  [3:0] d0 = wp[0] - rp[0], d1 = wp[1] - rp[1];
+    logic [4:0] n [2];
+    always_comb begin n[0] = {fl[0], d0}; n[1] = {fl[1], d1}; end
 
     wire o = !cpu;
     wire c = cpu;
@@ -61,14 +64,14 @@ module sys_ipc (
         if (rst) begin
             for (int i = 0; i < 2; i++) begin
                 out[i] <= '0; irqen[i] <= 1'b0; en[i] <= 1'b0; rirq[i] <= 1'b0;
-                sirq[i] <= 1'b0; err[i] <= 1'b0; rp[i] <= '0; wp[i] <= '0; n[i] <= '0;
+                sirq[i] <= 1'b0; err[i] <= 1'b0; rp[i] <= '0; wp[i] <= '0; fl[i] <= 1'b0;
             end
         end else begin
             if (sync_we && be[1]) begin out[c] <= wdata[11:8]; irqen[c] <= wdata[14]; end
             if (cnt_we) begin
                 if (be[0]) begin
                     sirq[c] <= wdata[2];
-                    if (wdata[3]) begin rp[c] <= '0; wp[c] <= '0; n[c] <= '0; end
+                    if (wdata[3]) begin rp[c] <= '0; wp[c] <= '0; fl[c] <= 1'b0; end
                 end
                 if (be[1]) begin
                     rirq[c] <= wdata[10]; en[c] <= wdata[15];
@@ -77,11 +80,11 @@ module sys_ipc (
             end
             if (send_we && en[c]) begin
                 if (s_full) err[c] <= 1'b1;
-                else begin wp[c] <= wp[c] + 4'd1; n[c] <= n[c] + 5'd1; end
+                else begin wp[c] <= wp[c] + 4'd1; fl[c] <= n[c] == 5'd15; end
             end
             if (recv_re && en[c]) begin
                 if (r_empty) err[c] <= 1'b1;
-                else begin rp[o] <= rp[o] + 4'd1; n[o] <= n[o] - 5'd1; end
+                else begin rp[o] <= rp[o] + 4'd1; fl[o] <= 1'b0; end
             end
         end
     end

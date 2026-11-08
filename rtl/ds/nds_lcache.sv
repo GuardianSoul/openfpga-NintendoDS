@@ -325,3 +325,166 @@ module nds_lcache #(
     end
 `endif
 endmodule
+
+// nds_lcache_n: WAYS tag stores of LB lines each with one controller (nds_g3d_cache2 WAYS > 1; budget-3d "Span
+// overlap's area"): the generation (cur, dirty, snap, pend), the scrubber, the lookup and check masks and the
+// pump's phase are shared, since every way is looked up, checked and scrubbed at the same line; each way keeps its
+// RAM (and check copy), its write enable and word, and its last write's forwarding. One write address a clock: a
+// fill end writes its way (f_way); a scrub rewrites every way of line sc_a holding an older generation. The
+// configuration nds_g3d_cache2 uses only: G > 0, CHECK 1, M10K, no WLATE, no single-line invalidations (inv) and
+// no fill-busy masking (f_busy), which nds_lcache's other clients need. Against WAYS nds_lcache instances: the same
+// lookups and checks; a scrub that meets a fill end is retried for every way, not only the filled one.
+module nds_lcache_n #(
+    parameter int LB    = 6,
+    parameter int TW    = 8,
+    parameter int G     = 3,
+    parameter int WAYS  = 4,
+    parameter int PUMP  = 0,
+    // PACK (four ways of 10 bits or fewer, no PUMP): each copy's ways in one M10K, a 40-bit word with a byte
+    // enable a way (gpu3d_ram_be4), instead of an M10K a way and copy (128 x 10 bits each: 8 M10K -> 2)
+    parameter bit PACK  = 1
+) (
+    input  logic                 clk,
+    input  logic                 clk2,
+    input  logic                 rst,
+    input  logic                 l_en,
+    input  logic [LB-1:0]        l_idx,
+    output logic [WAYS-1:0]      l_vn,
+    output logic [TW-1:0]        l_tag [0:WAYS-1],
+    input  logic [LB-1:0]        c_idx,
+    output logic [WAYS-1:0]      c_v,
+    output logic [TW-1:0]        c_tag [0:WAYS-1],
+    input  logic [LB-1:0]        f_idx,
+    input  logic                 f_end,
+    input  logic [$clog2(WAYS)-1:0] f_way,
+    input  logic                 f_ok,
+    input  logic [TW-1:0]        f_tag,
+    input  logic                 inv_all,
+    output logic                 busy
+);
+    localparam int VW = G;
+    localparam int N  = 1 << LB;
+    localparam int EW = VW + TW;
+    // ---- the write: one address, a word and an enable a way
+    logic [WAYS-1:0] we;
+    logic [LB-1:0]   wa;
+    logic [EW-1:0]   wd [0:WAYS-1];
+    logic [LB-1:0]   ra;
+    logic [EW-1:0]   rq [0:WAYS-1];       // the lookup's word a way
+    logic [EW-1:0]   rq2 [0:WAYS-1];      // the check's word a way
+    genvar gw;
+    generate if (PUMP) begin : g_pump
+        logic          tg = 1'b0, tq = 1'b0, ph = 1'b0;
+        logic [WAYS-1:0] bw = '0;
+        logic [LB-1:0] bwa;
+        always_ff @(posedge clk) tg <= !tg;
+        always_ff @(posedge clk2) begin
+            tq <= tg;
+            ph <= tg == tq;
+            if (!ph) begin bw <= we; bwa <= wa; end
+        end
+        for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_w
+            logic [EW-1:0] bwd, qb, hb;
+            always_ff @(posedge clk2) begin
+                if (!ph) bwd <= wd[gw];
+                if (ph) hb <= qb;
+            end
+            gpu3d_tdp2c #(.W(EW), .AW(LB)) u_m (.clk_a(clk), .a_addr(ra), .a_q(rq[gw]),
+                .clk_b(clk2), .b_addr(ph ? bwa : c_idx), .b_we(ph && bw[gw]), .b_d(bwd), .b_q(qb));
+            assign rq2[gw] = hb;
+        end
+    end else if (PACK && WAYS == 4 && EW <= 10) begin : g_pack
+        logic [3:0][EW-1:0] pwd, pq, pq2;
+        logic [3:0]         pwe;
+        always_comb
+            for (int w = 0; w < 4; w++) begin
+`ifdef G3D_TPACK_MUT
+                pwe[w] = we[(w + 1) % 4]; pwd[w] = wd[(w + 1) % 4];   // (mutant: each way's word into the next lane)
+`else
+                pwe[w] = we[w]; pwd[w] = wd[w];
+`endif
+                rq[w] = pq[w]; rq2[w] = pq2[w];
+            end
+        gpu3d_ram_be4 #(.W(EW), .AW(LB)) u_l (.clk, .we(pwe), .waddr(wa), .wdata(pwd), .raddr(ra), .rdata(pq));
+        gpu3d_ram_be4 #(.W(EW), .AW(LB)) u_c (.clk, .we(pwe), .waddr(wa), .wdata(pwd), .raddr(c_idx), .rdata(pq2));
+    end else begin : g_plain
+        for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_w
+            (* ramstyle = "M10K" *) logic [EW-1:0] mem  [0:N-1];
+            (* ramstyle = "M10K" *) logic [EW-1:0] mem2 [0:N-1];
+            initial for (int i = 0; i < N; i++) begin mem[i] = '0; mem2[i] = '0; end
+            always_ff @(posedge clk) begin
+                if (we[gw]) begin mem[wa] <= wd[gw]; mem2[wa] <= wd[gw]; end
+                rq[gw] <= mem[ra];
+                rq2[gw] <= mem2[c_idx];
+            end
+        end
+    end endgenerate
+
+    // ---- state, shared
+    logic [VW-1:0] cur = VW'(1);
+    logic [LB-1:0] sp = '0;
+    logic          pend = 1'b0, any_fill = 1'b0;
+    logic [(1<<VW)-1:0] dirty = (1 << VW)'(2);
+    logic          sc_q = 1'b0, sc_hold = 1'b0;
+    logic [LB-1:0] sc_a;
+    logic [(1<<VW)-1:0] snap = '0;
+    wire  [VW-1:0] nxt = cur == VW'((1 << VW) - 1) ? VW'(1) : cur + VW'(1);
+    // the last edge's write: the address shared, the word a way
+    logic [WAYS-1:0] lw_v;
+    logic [LB-1:0]   lw_a;
+    logic [VW-1:0]   lw_d [0:WAYS-1];
+    logic [WAYS-1:0] scrub_w;
+    always_comb
+        for (int w = 0; w < WAYS; w++)
+            scrub_w[w] = sc_q && !sc_hold && rq[w][EW-1:TW] != '0 && rq[w][EW-1:TW] != cur && !(lw_v[w] && lw_a == sc_a);
+    always_comb begin
+        we = '0; wa = f_idx;
+        for (int w = 0; w < WAYS; w++) wd[w] = {VW'(0), rq[w][TW-1:0]};
+        if (f_end) begin
+`ifdef G3D_TSH_MUT
+            we[0] = 1'b1; wd[0] = {f_ok ? cur : VW'(0), f_tag};          // (mutant: every fill's tag into way 0)
+`else
+            we[f_way] = 1'b1; wd[f_way] = {f_ok ? cur : VW'(0), f_tag};
+`endif
+        end else if (|scrub_w) begin
+            we = scrub_w; wa = sc_a;
+        end
+    end
+    assign ra = l_en ? l_idx : sp;
+
+    // ---- lookup and check: the last edge's write forwarded
+    logic [LB-1:0] la_q, cq_a;
+    always_ff @(posedge clk) begin la_q <= ra; cq_a <= c_idx; end
+    always_comb
+        for (int w = 0; w < WAYS; w++) begin
+            l_vn[w]  = ((lw_v[w] && lw_a == la_q) ? lw_d[w] : rq[w][EW-1:TW]) == cur && !pend;
+            l_tag[w] = rq[w][TW-1:0];
+            c_v[w]   = ((lw_v[w] && lw_a == cq_a) ? lw_d[w] : rq2[w][EW-1:TW]) == cur && !pend;
+            c_tag[w] = rq2[w][TW-1:0];
+        end
+    assign busy = pend;
+
+    always_ff @(posedge clk) begin : st
+        logic retry, ex_done;
+        lw_v <= we; lw_a <= wa;
+        for (int w = 0; w < WAYS; w++) lw_d[w] <= wd[w][EW-1:TW];
+        sc_q <= !l_en; sc_a <= sp; sc_hold <= 1'b0;
+        if (f_end && f_ok) any_fill <= 1'b1;
+        retry   = sc_q && !sc_hold && |scrub_w && f_end;
+        ex_done = sc_q && !sc_hold && !retry;
+        if (retry) begin sp <= sc_a; sc_hold <= 1'b1; end
+        else if (!l_en) sp <= sp + 1'b1;
+        if (ex_done && sc_a == LB'(N - 1)) begin
+            dirty <= dirty & ~snap;
+            snap  <= dirty & ~snap & ~((1 << VW)'(1) << cur);
+        end
+        if ((rst || inv_all) && (any_fill || (f_end && f_ok))) pend <= 1'b1;
+        if ((pend || ((rst || inv_all) && (any_fill || (f_end && f_ok)))) && !dirty[nxt]) begin
+            cur <= nxt; dirty[nxt] <= 1'b1; pend <= 1'b0; any_fill <= 1'b0;
+        end
+    end
+`ifndef ALTERA_RESERVED_QIS
+    always_ff @(posedge clk) if (f_end && f_ok && !dirty[cur]) $display("nds_lcache_n: internal: cur not marked dirty");
+    initial if (G == 0 || WAYS < 2) $error("nds_lcache_n: G > 0 and WAYS > 1 only");
+`endif
+endmodule

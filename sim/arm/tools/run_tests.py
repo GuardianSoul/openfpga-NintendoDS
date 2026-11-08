@@ -47,6 +47,8 @@ def tests(b, assets):
          "ARM9: 10 KB of distinct words through the write-back cache, every dirty eviction checked via the alias"),
         ("evict9_slowbus", [f"+img0={b}/evict.hex", "+pc0=02000000", "+run=1", "+blat=9"],
          "evict9 with a 10-cycle bus"),
+        ("hum9", [f"+img0={b}/hum.hex", "+pc0=02000000", "+run=1", "+blat=9"],
+         "ARM9: loads right behind a D fill, to the set's evicted line (must wait) and to the filling line's words"),
         ("cache9_slowbus", [f"+img0={b}/cache.hex", "+pc0=02000000", "+run=1", "+blat=9"],
          "cache9 with a 10-cycle bus"),
         ("lzcopy9", [f"+img0={b}/lzcopy.hex", "+pc0=02000000", "+run=1"],

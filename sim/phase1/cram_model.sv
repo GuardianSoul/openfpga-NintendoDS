@@ -99,10 +99,15 @@ module cram_model #(parameter integer LAT = 4, parameter integer ROW_WAIT = 2,
                     stall--;
                     dout_v <= #(T_CK) 0; wait_r <= #(T_CK) 1;
                 end else begin
-                    dout <= #(T_CK) peek({bdie, baddr + k[21:0]});
+                    // BCR bit 3 = 0 with length 8 (bits 2:0 = 010): the burst wraps within its 8-word block
+                    // (nds_psram CWF); otherwise continuous, with the row-boundary wait
+                    if (!bcr[bdie][3] && bcr[bdie][2:0] == 3'b010)
+                        dout <= #(T_CK) peek({bdie, baddr[21:3], 3'(baddr[2:0] + k[2:0])});
+                    else
+                        dout <= #(T_CK) peek({bdie, baddr + k[21:0]});
                     dout_v <= #(T_CK) 1; wait_r <= #(T_CK) 0;
                     k++;
-                    if (((baddr + k) & 22'h7F) == 0) stall = ROW_WAIT;
+                    if ((bcr[bdie][3] || bcr[bdie][2:0] != 3'b010) && ((baddr + k) & 22'h7F) == 0) stall = ROW_WAIT;
                 end
             end
         end

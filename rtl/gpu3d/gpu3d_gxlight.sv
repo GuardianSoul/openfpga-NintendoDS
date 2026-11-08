@@ -36,7 +36,11 @@ module gpu3d_gxlight #(
     parameter logic [10:0] A_LIGHT  = 11'h100,
     parameter logic [10:0] A_SHIN   = 11'h180,
     parameter int LDIR = 0, LRECIP = 3, LDL = 7, LSL = 10, LAL = 13,
-    parameter bit LT_M10K = 1          // the light table, VEC and the shininess table in M10K (registered reads, as in MLAB): ~5 MLAB LABs for 3 M10K
+    parameter bit LT_M10K = 1,         // the light table, VEC and the shininess table in M10K (registered reads, as in MLAB): ~5 MLAB LABs for 3 M10K
+    // LT_ONE (with LT_M10K): the three tables in one 256 x 23 M10K (1 block for 3): the schedule reads at most one of
+    // them a cycle (S_NT: VEC; S_LT: the light table, but SHIN at t11), each consumed the next cycle (s2), so one
+    // read port serves all three: SHIN at 0..127, the light table at 128..191, VEC at 192..207
+    parameter bit LT_ONE = 1
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -58,29 +62,43 @@ module gpu3d_gxlight #(
     // word in the register file) in MLABs; MatEmission in flops
     logic [5:0]  mra;
     logic [19:0] mrd;
-    gpu3d_ram #(.W(20), .AW(6), .STYLE(LT_M10K ? "M10K" : "MLAB")) u_lt (.clk, .we(we && wa[10:6] == A_LIGHT[10:6]), .waddr(wa[5:0]),
-                                                    .wdata(wd[19:0]), .raddr(mra), .rdata(mrd));
     logic [6:0]  sra;
     logic [7:0]  srd, srd_c;
+    logic [3:0]  vra;
+    logic [22:0] vrd;
+    logic [1:0]  lt_rsel;                  // LT_ONE: the s1 read, 0: the light table (mra), 1: SHIN (sra), 2: VEC (vra)
+    wire         lt_hit = wa[10:6] == A_LIGHT[10:6], sh_hit = wa[10:7] == A_SHIN[10:7], vec_hit = wa[10:4] == A_VEC[10:4];
+    generate if (LT_M10K && LT_ONE) begin : g_one
+        // one table: the read address the s1 operation needs (lt_rsel below), the write address by region
+        logic [22:0] lq;
+        wire  [7:0]  lwa = sh_hit ? {1'b0, wa[6:0]} : lt_hit ? {2'b10, wa[5:0]} : {4'b1100, wa[3:0]};
+        wire  [7:0]  lra = lt_rsel == 2'd1 ? {1'b0, sra} : lt_rsel == 2'd2 ? {4'b1100, vra} : {2'b10, mra};
+        gpu3d_ram #(.W(23), .AW(8), .STYLE("M10K")) u_ltv (.clk, .we(we && (lt_hit || sh_hit || vec_hit)), .waddr(lwa),
+                                                         .wdata(wd[22:0]), .raddr(lra), .rdata(lq));
+        assign mrd = lq[19:0]; assign vrd = lq; assign srd = lq[7:0]; assign srd_c = '0;
+    end else begin : g_three
+    // the light blocks (4 x 16 words, the fields' low 20 bits) and the shininess table (one entry a
+    // word in the register file) in MLABs; MatEmission in flops
+    gpu3d_ram #(.W(20), .AW(6), .STYLE(LT_M10K ? "M10K" : "MLAB")) u_lt (.clk, .we(we && lt_hit), .waddr(wa[5:0]),
+                                                    .wdata(wd[19:0]), .raddr(mra), .rdata(mrd));
     // read combinationally and registered here: a 128-deep registered-read MLAB is not inferred
     // ("unsupported read-during-write behavior", #615)
     // the shininess table read straight into srd: with LT_M10K a registered-read M10K (the same value a clock on)
-    generate if (LT_M10K) begin : g_shm
-        gpu3d_ram #(.W(8), .AW(7), .STYLE("M10K")) u_sh (.clk, .we(we && wa[10:7] == A_SHIN[10:7]), .waddr(wa[6:0]),
+    if (LT_M10K) begin : g_shm
+        gpu3d_ram #(.W(8), .AW(7), .STYLE("M10K")) u_sh (.clk, .we(we && sh_hit), .waddr(wa[6:0]),
                                                       .wdata(wd[7:0]), .raddr(sra), .rdata(srd));
         assign srd_c = '0;
     end else begin : g_shl
-        gpu3d_lram #(.W(8), .AW(7)) u_sh (.clk, .we(we && wa[10:7] == A_SHIN[10:7]), .waddr(wa[6:0]),
+        gpu3d_lram #(.W(8), .AW(7)) u_sh (.clk, .we(we && sh_hit), .waddr(wa[6:0]),
                                           .wdata(wd[7:0]), .raddr(sra), .rdata(srd_c));
         always_ff @(posedge clk) srd <= srd_c;
+    end
+    gpu3d_ram #(.W(23), .AW(4), .STYLE(LT_M10K ? "M10K" : "MLAB")) u_vec (.clk, .we(we && vec_hit), .waddr(wa[3:0]),
+                                                     .wdata(wd[22:0]), .raddr(vra), .rdata(vrd));
     end endgenerate
     logic [4:0]  memi [3];
     always_ff @(posedge clk)
         for (int c = 0; c < 3; c++) if (we && wa == A_MEMI + 11'(c)) memi[c] <= wd[4:0];
-    logic [3:0]  vra;
-    logic [22:0] vrd;
-    gpu3d_ram #(.W(23), .AW(4), .STYLE(LT_M10K ? "M10K" : "MLAB")) u_vec (.clk, .we(we && wa[10:4] == A_VEC[10:4]), .waddr(wa[3:0]),
-                                                     .wdata(wd[22:0]), .raddr(vra), .rdata(vrd));
     logic [3:0]  lmask;
     always_ff @(posedge clk) begin
         if (we && wa == A_CATTR) lmask <= wd[3:0];
@@ -112,12 +130,13 @@ module gpu3d_gxlight #(
     wire  [1:0]  lnext = lnext_oh[1] ? 2'd1 : lnext_oh[2] ? 2'd2 : lnext_oh[3] ? 2'd3 : 2'd0;
     wire  [5:0]  lb = {li, 4'd0};
     logic [8:0]  shine0, shine;
+    logic [1:0]  nc, nk;                   // S_NT: cnt / 3 and cnt % 3, counted (no divider)
     always_comb begin
         k1 = K_NONE; c1 = 2'd0; kn1 = 2'd0; m1 = 1'b0; mra = 6'd0; vra = 4'd0; sra = shine0[8:2];
         if (st == S_NT) begin
             k1 = K_NT;
-            c1 = 2'(cnt / 4'd3);
-            kn1 = 2'(cnt % 4'd3);
+            c1 = nc;
+            kn1 = nk;
             vra = {kn1, c1};                               // VEC[4k + c]
             m1 = cnt < 4'd3;
         end else if (st == S_LT) begin
@@ -135,6 +154,8 @@ module gpu3d_gxlight #(
         end
     end
 
+    assign lt_rsel = st == S_NT ? 2'd2 : st == S_LT && cnt == 4'd11 ? 2'd1 : 2'd0;
+
     // ---- sequencer
     logic [2:0] wn;                        // S_FIN: CURCOL words written
     logic       pos;                       // dot > 0
@@ -146,9 +167,14 @@ module gpu3d_gxlight #(
         end else case (st)
             S_IDLE: if (start) begin st <= S_DLY; cnt <= 4'd0; nr <= nrm; rm <= 4'd0; end
             // three cycles for the register-file writes before the NORMAL to land in the copies
-            S_DLY:  begin cnt <= cnt + 4'd1; if (cnt == 4'd2) begin st <= S_NT; cnt <= 4'd0; rm <= lmask; end end
+            S_DLY:  begin
+                        cnt <= cnt + 4'd1; nc <= 2'd0; nk <= 2'd0;
+                        if (cnt == 4'd2) begin st <= S_NT; cnt <= 4'd0; rm <= lmask; end
+                    end
             S_NT:   begin
                         cnt <= cnt + 4'd1;
+                        nk <= nk == 2'd2 ? 2'd0 : nk + 2'd1;
+                        if (nk == 2'd2) nc <= nc + 2'd1;
                         if (cnt == 4'd8) begin
                             cnt <= 4'd0;
                             if (rm != 4'd0) begin st <= S_LT; li <= lnext; rm <= rm & ~lnext_oh; end
@@ -214,6 +240,13 @@ module gpu3d_gxlight #(
     logic [23:0] vb [3];
     wire  signed [35:0] sh8 = (p >>> 8) - 36'sd512;
     wire  signed [13:0] s14 = sh8[13:0];
+    logic [2:0]  vb_ld, vb_al, vb_pr;      // VB[c] = MEMI << 14, += AL, += the DIFF/SPEC product
+    always_comb
+        for (int c = 0; c < 3; c++) begin
+            vb_ld[c] = k2 == K_NT && m2 && kn2 == 2'(c);
+            vb_al[c] = k2 == K_LAL && c2 == 2'(c);
+            vb_pr[c] = ((k3 == K_DIFF && pos) || k3 == K_SPEC) && c3 == 2'(c);
+        end
     always_ff @(posedge clk) begin
         // the normal transform: three products a channel, mod 2^23; NT = bits 22..12, signed
         if (k3 == K_NT) begin
@@ -225,13 +258,22 @@ module gpu3d_gxlight #(
         if (k3 == K_RECIP)
             shine0 <= !pos || sh8 < 0 || s14 < 0 ? 9'd0 : s14 > 14'sd511 ? 9'd511 : s14[8:0];
         if (k2 == K_SHIN) shine <= ut ? {srd, 1'b0} : shine0;
-        for (int c = 0; c < 3; c++) begin
-            if (k2 == K_NT && m2 && kn2 == 2'(c)) vb[c] <= {5'd0, memi[c], 14'd0};
-            if (k2 == K_LAL && c2 == 2'(c)) vb[c] <= vb[c] + {5'd0, mrd[18:0]};
-            if (k3 == K_DIFF && c3 == 2'(c) && pos) vb[c] <= vb[c] + {4'd0, p[19:0]};
-            if (k3 == K_SPEC && c3 == 2'(c)) vb[c] <= vb[c] + {4'd0, p[19:0]};
-        end
+        // one adder a channel: VB = MEMI << 14 (as 0 + it), VB += AL, VB += the DIFF/SPEC product; the schedule never
+        // has two of them on one channel in a cycle (LAL at t3/t9/t10 in s2, DIFF t5..t7 and SPEC t12..t14 in s3,
+        // the MEMI load in S_NT; checked below; docs/space-cg.md)
+        for (int c = 0; c < 3; c++)
+            if (vb_ld[c] || vb_al[c] || vb_pr[c])
+                vb[c] <= (vb_ld[c] ? {5'd0, memi[c], 14'd0} : vb[c]) +
+                         (vb_ld[c] ? 24'd0 : vb_al[c] ? {5'd0, mrd[18:0]} : {4'd0, p[19:0]});
     end
+`ifndef SYNTHESIS
+    // synthesis translate_off
+    always_ff @(posedge clk)
+        for (int c = 0; c < 3; c++)
+            if (!rst && 2'(vb_ld[c]) + 2'(vb_al[c]) + 2'(vb_pr[c]) > 2'd1)
+                $error("gpu3d_gxlight: two VB updates of channel %0d in one cycle (ld %b al %b pr %b)", c, vb_ld[c], vb_al[c], vb_pr[c]);
+    // synthesis translate_on
+`endif
 
     // ---- CURCOL writes
     wire  [9:0]  vt = vb[wn[1:0]][23:14];

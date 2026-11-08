@@ -26,6 +26,7 @@ module gpu3d_raster #(
     // test-gpu3d-area checks it). nds-fit #187: no area gain for +75K
     // cycles on KH, so it is off.
     parameter bit AREA = 0,
+    parameter bit VYS_M10K = 1,       // gpu3d_front VYS_M10K
     // 1: linear spans step their five attributes on one stepper, one per
     // cycle (five cycles per linear pixel, see g_lser)
     parameter bit LINSER = 0,
@@ -65,6 +66,11 @@ module gpu3d_raster #(
     // the perspective factor uses the full w (hwref run 6: persp_y_w,
     // persp_eqw to 0 px; small open regressions in cap3d persp_30, depth_w)
     parameter bit DS_YPERSP = 1,
+    // DS_YPERSP as the DS draws it (rules3d v19 persp_ybig, docs/hw-reference.md "DS rules3d v19"): the full-w
+    // numerator (y * w0) << 9 in 33 bits, without the 32-bit wrap (W-buffer, gpu3d_edge YNW), and on Z-buffered
+    // edges with max(w) >= 0x8000 w >> 8, linear when the shifted w are equal (gpu3d_edge YP16)
+    parameter bit YNW = DS_YPERSP && !AREA && (DS_LINZ || !DS_LIN17),   // (the separate 10-bit edge divider)
+    parameter bit YP16 = DS_YPERSP,
     // DS_XPERSP16: the X perspective factor uses w0 >> 8 and w1 >> 8 when
     // max(w0, w1) >= 0x8000, Z-buffered polygons only (hwref run 7: persp_xbig
     // 3,274 -> 0 px; run 20: with the W-buffer the DS keeps the full w,
@@ -157,6 +163,7 @@ module gpu3d_raster #(
     parameter bit EDIV4 = 0,      // gpu3d_front EDIV4: the edge's perspective divider four bits a clock
     parameter bit EDGE2 = 0,      // gpu3d_front EDGE2: a second edge unit (a polygon's two edges at once)
     parameter bit EP2 = 0,        // gpu3d_front EP2: the edge unit as two stages (two edges at once)
+    parameter bit FDB = 0,        // gpu3d_front FDB (EP2): the input stage one polygon ahead of stage 1
     // LB2: the line buffers mostly in 512-deep RAMs of two slots ({0,1},
     // {2,3}) instead of four 256-deep ones: the same M10K, 2:1 read muxes
     // instead of 4:1 for 40 of the top layer's 71 bits and all of the lower
@@ -183,7 +190,30 @@ module gpu3d_raster #(
     // y-2), so line y reuses line y-3's slot, which the pass cleared behind
     // its reads. The pass's read of the line above meets the pipeline's
     // line there (its data is unused); nds_g3d_ring's LLR uses TR3 too
-    parameter bit TR3 = 0
+    parameter bit TR3 = 0,
+    // SPO (span overlap; not AREA, DS_LIN17): the walker loads the next span
+    // without waiting for P0-P13 to empty. Four descriptor slots (sd_sl),
+    // the walker's taken at its load (wk_sl, in turn); each pixel carries its
+    // slot (tsl, beside the tags, and through the TXD / PXD stages) and every
+    // stage reads its own pixel's descriptor. A slot is taken again once its
+    // pixels are out of P22 (sl_n). MLOAD is off (P12's operands come with
+    // each pixel from its descriptor)
+    parameter bit SPO = 0,
+    parameter int SPO_SL = 4,     // SPO: descriptor slots (2-4; each ~300 flops)
+    // SPOG (needs SPO): no slots and no slot muxes. A span's descriptor
+    // follows its first pixel through one register per pair of stages
+    // (gd: P0-P1, P2-P3, ... with the TXD / PXD stages counted, P22 alone),
+    // each loaded from the pair before as that pixel enters the pair; every
+    // stage reads its pair's register. Spans are two or more stages apart
+    // (a span's first pixel waits while P0 still holds the last one's
+    // pixel), so a pair never holds two spans, and nothing limits the spans
+    // in flight. Synthesis keeps in each pair only the fields read there
+    // or later.
+    parameter bit SPOG = 0,
+    // SPOG: stages per group (2: the pairs above; N: spans N or more stages
+    // apart, N - 2 more idle clocks between spans, about 1/N of the
+    // registers per stage)
+    parameter int SPOG_N = 2
 ) (
     input  logic         clk,
     input  logic         rst,
@@ -468,9 +498,9 @@ module gpu3d_raster #(
     assign tex_req = pp_tex_req; assign tex_addr = pp_tex_addr;
     assign pal_req = pp_pal_req; assign pal_addr = pp_pal_addr;
 
-    gpu3d_front #(.AREA(AREA || DSHARE), .RECIP(RECIP), .DS_TOON(DS_TOON), .DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ),
+    gpu3d_front #(.AREA(AREA || DSHARE), .RECIP(RECIP), .DS_TOON(DS_TOON), .DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ), .VYS_M10K(VYS_M10K),
                   .DS_YPERSP(DS_YPERSP), .DS_XPERSP16(DS_XPERSP16), .DS_AACOV(DS_AACOV), .DS_AAYCOV(DS_AAYCOV), .DS_TEXRND(DS_TEXRND),
-                  .FEAT_TOON(FEAT_TOON), .FEAT_SHADOW(FEAT_SHADOW), .VREG(VREG), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .TOONR(TR)) u_front (
+                  .FEAT_TOON(FEAT_TOON), .FEAT_SHADOW(FEAT_SHADOW), .VREG(VREG), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .TOONR(TR), .YNW(YNW), .YP16(YP16)) u_front (
         .clk, .rst, .dispcnt(dcnt), .fill_all(dispcnt[4] || dispcnt[5]), .alpharef(aref), .frame_start,
         .ps_line_req, .ps_line_y, .ps_valid, .ps_ready, .ps_type, .ps_data,
         .fe_desc, .fe_wr, .nx_full(nx_hold), .pipe_idle, .pipe_lp,
@@ -531,6 +561,26 @@ module gpu3d_raster #(
     always_comb
         for (int b = 0; b < 2; b++)
             pipe_lp[b] = lp_n[b] != '0 || (wk_act && sd_cur.lp == 1'(b)) || (!NXB && nx_full && sd_nx.lp == 1'(b));
+    // SPO: the descriptor slots, the walker's, each stage's pixel's slot, and
+    // the pixels of each slot between P0 and P22 (counted in at P0, out at P22)
+    localparam int NSL = SPO_SL;
+    span_t       sd_sl [0:NSL-1];
+    logic [1:0]  wk_sl;
+    logic [1:0]  tsl [0:22];
+    logic [37:0] p10_aq;             // P10's d10.aqs (the 38 bits the factor uses), registered at P9 -> P10
+    logic [LPW-1:0] sl_n [0:NSL-1];
+    wire  [1:0]  sl_nx = wk_sl == 2'(NSL - 1) ? 2'd0 : wk_sl + 2'd1;   // the slot the next span takes
+    wire         sl_free = sl_n[sl_nx] == '0;      // (the walker is on wk_sl, not on it)
+    always_ff @(posedge clk)
+        for (int k = 0; k < NSL; k++)
+            if (rst || !SPO || SPOG) sl_n[k] <= '0;
+            else sl_n[k] <= sl_n[k] + LPW'(wk_emit && wk_sl == 2'(k)) - LPW'(T22.v && tsl[22] == 2'(k));
+`ifndef SYNTHESIS
+    initial if (SPO && (AREA || !DS_LIN17)) $error("gpu3d_raster: SPO needs AREA 0 and DS_LIN17");
+    always_ff @(posedge clk)
+        for (int k = 0; k < NSL; k++)
+            if (!rst && SPO && 32'(sl_n[k]) > 23 + TXD + PXD) $error("gpu3d_raster: SPO slot %0d's count above the pipeline's stages", k);
+`endif
 
     function automatic [31:0] s_polyattr(input span_t d);
         s_polyattr = (d.attr & 32'h3F008000) | {27'b0, ~d.facing, 4'b0};
@@ -639,6 +689,18 @@ module gpu3d_raster #(
         seg_ne = d.en[k - 2'd1] && d.sb[k - 2'd1] < d.se[k - 2'd1];
     endfunction
     logic        wk_emit, wk_ghost, wk_last;
+    // SPOG: a span's first pixel waits while P0 holds the last span's (no
+    // advance since it left the walker): spans two or more stages apart
+    logic        wk_near;             // P0 - P(SPOG_N - 2) hold a pixel
+    always_comb begin
+        wk_near = 1'b0;
+        for (int i = 0; i <= SPOG_N - 2; i++) wk_near |= tg[i][TV];
+    end
+`ifdef G3D_SPOG_MUT2
+    wire         wk_go = wk_act;      // (mutation: no wait, a span can follow the last one's pixel at once)
+`else
+    wire         wk_go = wk_act && !(SPOG && wk_first && wk_near);
+`endif
     logic [3:2]  wk_ne;               // seg_ne(sd_cur, 2 / 3), taken with sd_cur from nx_k's compares
     logic [1:0]  wk_nk;               // next nonempty segment after wk_k (0: none)
     always_comb begin
@@ -651,13 +713,13 @@ module gpu3d_raster #(
         wk_nk = 2'd0;
         if (wk_k == 2'd1 && wk_ne[2]) wk_nk = 2'd2;
         else if (wk_k != 2'd3 && wk_ne[3]) wk_nk = 2'd3;
-        wk_emit = wk_act && adv;
+        wk_emit = wk_go && adv;
         wk_last = !wk_ghost && wk_x + 12'sd1 >= sek && wk_nk == 2'd0;
     end
     assign dbg_pixel = wk_emit && !wk_ghost;
     always_comb begin
         wk_tag = '0;
-        wk_tag.v = wk_act;
+        wk_tag.v = wk_go;
         wk_tag.lp = wd.lp;
         wk_tag.ghost = wk_ghost;
         wk_tag.first = wk_first;
@@ -682,14 +744,45 @@ module gpu3d_raster #(
     // fe_wr; its first nonempty segment (0: nothing to draw)
     span_t      nx_d;
     assign nx_d = NXB ? fe_desc : sd_nx;
-    wire  [1:0] nx_k = seg_ne(nx_d, 2'd1) ? 2'd1 : seg_ne(nx_d, 2'd2) ? 2'd2 : seg_ne(nx_d, 2'd3) ? 2'd3 : 2'd0;
-    assign nx_hold = NXB ? !(!wk_act && (nx_k == 2'd0 || !early_busy)) : nx_full;
+    // (not NXB: the segment compares, the first segment and the walk's start are taken with sd_nx, from the
+    // front's registers, so sd_nx -> wk_x has no compare and no select; nx_kq, nx_neq, nx_x0q are sd_nx's)
+    function automatic [1:0] first_k(input span_t d);
+        first_k = seg_ne(d, 2'd1) ? 2'd1 : seg_ne(d, 2'd2) ? 2'd2 : seg_ne(d, 2'd3) ? 2'd3 : 2'd0;
+    endfunction
+    function automatic logic signed [11:0] start_x(input span_t d, input [1:0] k);
+        start_x = (d.lin && !DS_LIN17) ? d.xs : d.sb[k - 2'd1];
+    endfunction
+    logic [1:0] nx_kq = 2'd0;
+    logic [3:2] nx_neq;
+    logic signed [11:0] nx_x0q;
+    wire  [1:0] fe_k = first_k(fe_desc);
+    always_ff @(posedge clk)
+        if (!rst && fe_wr && !NXB) begin
+            nx_kq <= fe_k; nx_neq <= {seg_ne(fe_desc, 2'd3), seg_ne(fe_desc, 2'd2)}; nx_x0q <= start_x(fe_desc, fe_k);
+        end
+    wire  [1:0] nx_k = NXB ? first_k(nx_d) : nx_kq;
+`ifndef SYNTHESIS
+    // synthesis translate_off
+    always_ff @(posedge clk)
+        if (!rst && !NXB && nx_full && (nx_kq != first_k(sd_nx) || nx_neq != {seg_ne(sd_nx, 2'd3), seg_ne(sd_nx, 2'd2)} ||
+                                        (nx_kq != 2'd0 && nx_x0q != start_x(sd_nx, nx_kq))))
+            $error("gpu3d_raster NXQ: sd_nx's registered first segment / start differ from its compares");
+    // synthesis translate_on
+`endif
+    // a span loads once P0-P13 are empty (SPO: once its slot is free; SPOG: at once)
+`ifdef SPO_CHECK
+    // (the equivalence check: SPO with the old load gate as well, below)
+    wire        ld_ok = SPO ? (SPOG || sl_free) && !early_busy : !early_busy;
+`else
+    wire        ld_ok = SPO ? SPOG || sl_free : !early_busy;
+`endif
+    assign nx_hold = NXB ? !(!wk_act && (nx_k == 2'd0 || ld_ok)) : nx_full;
     // The span's attribute bases and linear steps (abase, aqs: 160 bits, read
     // from P10 on) are not in sd_cur but in g_dram's word, written at the load
     // with sd_cur; a load waits for P0-P13 to empty, so P10 first reads them
     // 11 clocks after it (AREA lets P7-P10 run on: sd_cur's)
     logic        sd_load;
-    assign sd_load = !rst && !wk_act && (NXB ? fe_wr : nx_full) && nx_k != 2'd0 && !early_busy;
+    assign sd_load = !rst && !wk_act && (NXB ? fe_wr : nx_full) && nx_k != 2'd0 && ld_ok;
     // MLOAD (DS_LIN17, not AREA): the P12 lanes' span operands p12_ma (ad) and
     // p12_mc (abase << 17 and the rounding) are loaded with the span instead
     // of copied from it at every advance: the load waits for P0-P13 to empty,
@@ -697,7 +790,7 @@ module gpu3d_raster #(
     // reach P12 twelve or more advances later. sd_cur.ad and the word's
     // abase are then not needed (with DS_LIN17 the lanes are their only
     // readers).
-    localparam bit MLOAD = !AREA && DS_LIN17;
+    localparam bit MLOAD = !AREA && DS_LIN17 && !SPO;
     localparam int DW = MLOAD ? 80 : 160;
     logic [4:0][15:0] sd_abase, sd_aqs;
     logic [DW-1:0]    sd_dq;
@@ -710,20 +803,27 @@ module gpu3d_raster #(
     end endgenerate
     always_ff @(posedge clk) begin
         if (rst) begin
-            wk_act <= 1'b0; nx_full <= 1'b0;
+            wk_act <= 1'b0; nx_full <= 1'b0; wk_sl <= '0;
         end else begin
             if (fe_wr && !NXB) begin sd_nx <= fe_desc; nx_full <= 1'b1; end
             if (!wk_act && (NXB ? fe_wr : nx_full)) begin
                 // load: first nonempty segment; a linear span walks from xs so
                 // its steppers start at ix = 0
                 if (nx_k == 2'd0) nx_full <= 1'b0;       // nothing to draw
-                else if (!early_busy) begin
+`ifdef G3D_ABL_NOBUB
+                // (simulation ablation, the bench only: a span enters behind the last one at once, as if P0-P13 kept
+                // their own copies of the descriptor; the trailing pixels then read the new one, so pixels differ)
+                else begin
+`else
+                else if (ld_ok) begin
+`endif
                     nx_full <= 1'b0;
                     sd_cur <= nx_d;
-                    wk_ne <= {seg_ne(nx_d, 2'd3), seg_ne(nx_d, 2'd2)};
+                    if (SPO && !SPOG) begin sd_sl[sl_nx] <= nx_d; wk_sl <= sl_nx; end
+                    wk_ne <= NXB ? {seg_ne(nx_d, 2'd3), seg_ne(nx_d, 2'd2)} : nx_neq;
                     wk_act <= 1'b1;
                     wk_k <= nx_k;
-                    wk_x <= (nx_d.lin && !DS_LIN17) ? nx_d.xs : nx_d.sb[nx_k - 2'd1];
+                    wk_x <= NXB ? start_x(nx_d, nx_k) : nx_x0q;
                     wk_first <= 1'b1;
                 end
             end else if (wk_emit) begin
@@ -741,6 +841,7 @@ module gpu3d_raster #(
     end
 
 `ifndef SYNTHESIS
+`ifndef G3D_ABL_NOBUB
     // build_ds.sh times sd_cur -> p12_ma / p12_mc as a two-cycle path: a P11
     // pixel's operands are taken from an sd_cur unchanged for two cycles
     span_t      sdc_q;
@@ -748,7 +849,7 @@ module gpu3d_raster #(
     always_ff @(posedge clk) begin
         sdc_q <= sd_cur;
         sdc_age <= (sd_cur != sdc_q) ? 2'd0 : (sdc_age == 2'd3 ? 2'd3 : sdc_age + 2'd1);
-        if (!rst && adv && T11.v && (sd_cur != sdc_q || sdc_age < 2'd1))
+        if (!rst && !SPO && adv && T11.v && (sd_cur != sdc_q || sdc_age < 2'd1))
             $error("gpu3d_raster: the span descriptor changed under a P11 pixel (the sd_cur -> P12 multicycle)");
     end
     // the same for g_dram's word (abase/aqs), which changes with sd_cur
@@ -757,9 +858,10 @@ module gpu3d_raster #(
     always_ff @(posedge clk) begin
         sdd_q <= {sd_abase, sd_aqs};
         sdd_age <= ({sd_abase, sd_aqs} != sdd_q) ? 2'd0 : (sdd_age == 2'd3 ? 2'd3 : sdd_age + 2'd1);
-        if (!rst && adv && T11.v && ({sd_abase, sd_aqs} != sdd_q || sdd_age < 2'd1))
+        if (!rst && !SPO && adv && T11.v && ({sd_abase, sd_aqs} != sdd_q || sdd_age < 2'd1))
             $error("gpu3d_raster: abase/aqs changed under a P11 pixel (the g_dram -> P12 multicycle)");
     end
+`endif
 `endif
     // ---------------- per-stage data ----------------
     logic [25:0] p1_m1;
@@ -977,6 +1079,15 @@ module gpu3d_raster #(
         assign txd_tag = '0;
     end endgenerate
     assign tg16x = {1'b0, txd_tag[3*XN-1], 1'b0, txd_tag[3*XN-2], txd_tag[3*XN-3], 22'd0};
+    // SPO: the P16 pixel's slot through the TXD stages (the last on top)
+    logic [2*XN-1:0] txd_sl;
+    generate if (SPO && !SPOG && TXD > 1) begin : g_txd_sl
+        always_ff @(posedge clk) if (adv) txd_sl <= {txd_sl[2*XN-3:0], tsl[16]};
+    end else if (SPO && !SPOG && TXD == 1) begin : g_txd_sl1
+        always_ff @(posedge clk) if (adv) txd_sl <= tsl[16];
+    end else begin : g_txd_sl0
+        assign txd_sl = '0;
+    end endgenerate
     logic [1:0]  p18_npal, p19_npal;          // palette reads
     logic [16:0] p18_pa0, p18_pa1;
     logic [1:0]  p18_mix, p19_mix;            // 1: (c0+c1)/2, 2: 5:3, 3: 3:5
@@ -1008,6 +1119,14 @@ module gpu3d_raster #(
         assign pxd_tag = '0;
     end endgenerate
     wire  [TGW-1:0] tg18x = {1'b0, pxd_tag[3*PN-1], 1'b0, pxd_tag[3*PN-2], pxd_tag[3*PN-3], 22'd0};
+    logic [2*PN-1:0] pxd_sl;          // SPO: the P18 pixel's slot through the PXD stages
+    generate if (SPO && !SPOG && PXD > 1) begin : g_pxd_sl
+        always_ff @(posedge clk) if (adv) pxd_sl <= {pxd_sl[2*PN-3:0], tsl[18]};
+    end else if (SPO && !SPOG && PXD == 1) begin : g_pxd_sl1
+        always_ff @(posedge clk) if (adv) pxd_sl <= tsl[18];
+    end else begin : g_pxd_sl0
+        assign pxd_sl = '0;
+    end endgenerate
     logic [4:0]  p20_tal;
     logic [17:0] p20_hl, p20_tt;              // toon colour and texel, 6 bits per channel
     logic [31:0] p20_slx, p20_slf;            // shading lane operands, 4 x 8 bits
@@ -1020,20 +1139,102 @@ module gpu3d_raster #(
     logic [10:0] xcov;                // bit 10: past 32 x 32 (the coverage saturated; xcov only grows)
 
     // descriptor of the pixel in stage N
-    span_t d0, d10, d11, d12, d13, d15, d17, d20, d21, d22;
-    assign d0  = sd_cur;
-    assign d10 = sd_cur;
-    assign d11 = sd_cur;
-    assign d12 = sd_cur;
-    assign d13 = sd_cur;
+    // (SPO: each stage's pixel's slot; d1 is P1's, d14 P14's, d19 P19's)
+    span_t d0, d1, d10, d11, d12, d13, d14, d15, d17, d19, d20, d21, d22;
+    // SPOG: the groups' registers. Positions in pipeline order: P0-P16 (0-16),
+    // the TXD stages, P17, P18, the PXD stages, P19-P22; group j is positions
+    // N j to N j + N - 1 (N = SPOG_N). pv / pf: the position holds a pixel / a
+    // span's first pixel
+    localparam int GN = SPOG_N;
+    localparam int NPOS = 23 + TXD + PXD;
+    localparam int NG = (NPOS + GN - 1) / GN;
+    localparam int Q17 = 17 + TXD, Q19 = 19 + TXD + PXD;   // P17's and P19's positions
+    localparam int TF = 22;                                // ptag_t bit first
+    span_t gd [0:NG-1];
+    logic [NPOS-1:0] pv, pf;
+    always_comb begin
+        pv = '0;
+        for (int k = 0; k <= 16; k++) pv[k] = tg[k][TV];
+        for (int i = 0; i < TXD; i++) pv[17 + i] = txd_tag[3*i+2];
+        pv[Q17] = tg[17][TV]; pv[Q17 + 1] = tg[18][TV];
+        for (int i = 0; i < PXD; i++) pv[Q17 + 2 + i] = pxd_tag[3*i+2];
+        for (int k = 19; k <= 22; k++) pv[Q19 + k - 19] = tg[k][TV];
+        pf = '0;
+        for (int k = 0; k <= 16; k++) pf[k] = tg[k][TV] && tg[k][TF];
+        for (int i = 0; i < TXD; i++) pf[17 + i] = txd_tag[3*i+2] && txd_tag[3*i];
+        pf[Q17] = tg[17][TV] && tg[17][TF]; pf[Q17 + 1] = tg[18][TV] && tg[18][TF];
+        for (int i = 0; i < PXD; i++) pf[Q17 + 2 + i] = pxd_tag[3*i+2] && pxd_tag[3*i];
+        for (int k = 19; k <= 22; k++) pf[Q19 + k - 19] = tg[k][TV] && tg[k][TF];
+    end
+    // a pixel moves from position q to q + 1 on adv (P21 -> P22: every clock)
+    always_ff @(posedge clk) if (SPOG) begin
+        if (wk_emit && wk_first) gd[0] <= wd;
+        for (int j = 1; j < NG; j++)
+`ifdef G3D_SPOG_MUT
+            if (pf[GN*j] && (GN*j == Q19 + 2 || adv)) gd[j] <= gd[j-1];   // (mutation: a group loads a stage late)
+`else
+            if (pf[GN*j-1] && (GN*j-1 == Q19 + 2 || adv)) gd[j] <= gd[j-1];
+`endif
+    end
+`ifndef SYNTHESIS
+    // SPOG check: each pixel's span (a number taken at the walker's load)
+    // against its pair's; a pair holding two spans fails it
+    int unsigned wk_id = 0, gid [0:NG-1], pid [0:NPOS-1];
+    always_ff @(posedge clk) if (SPOG) begin
+        if (sd_load) wk_id <= wk_id + 1;
+        if (wk_emit && wk_first) gid[0] <= wk_id;
+        for (int j = 1; j < NG; j++)
+            if (pf[GN*j-1] && (GN*j-1 == Q19 + 2 || adv)) gid[j] <= gid[j-1];
+        if (adv) begin
+            pid[0] <= wk_id;
+            for (int q = 1; q <= Q19 + 2; q++) pid[q] <= pid[q-1];
+        end
+        pid[Q19 + 3] <= pid[Q19 + 2];
+        if (!rst)
+            for (int q = 0; q < NPOS; q++)
+                if (pv[q] && pid[q] != gid[q / GN])
+                    $error("gpu3d_raster SPOG: the pixel at position %0d is span %0d, its group holds %0d", q, pid[q], gid[q / GN]);
+    end
+    initial if (SPOG && !SPO) $error("gpu3d_raster: SPOG needs SPO");
+    initial if (SPOG && (SPOG_N < 2 || SPOG_N > 8)) $error("gpu3d_raster: SPOG_N 2-8");
+`endif
+    assign d0  = SPOG ? gd[0] : SPO ? sd_sl[tsl[0]]  : sd_cur;
+    assign d1  = SPOG ? gd[1 / GN] : SPO ? sd_sl[tsl[1]]  : sd_cur;
+    assign d10 = SPOG ? gd[10 / GN] : SPO ? sd_sl[tsl[10]] : sd_cur;
+    assign d11 = SPOG ? gd[11 / GN] : SPO ? sd_sl[tsl[11]] : sd_cur;
+    assign d12 = SPOG ? gd[12 / GN] : SPO ? sd_sl[tsl[12]] : sd_cur;
+    assign d13 = SPOG ? gd[13 / GN] : SPO ? sd_sl[tsl[13]] : sd_cur;
+    assign d14 = SPOG ? gd[14 / GN] : SPO ? sd_sl[tsl[14]] : d15;
     // TXD: P17-P22 read sd_late2, which the span's first pixel brings from
     // sd_late into P17 (sd_late is still that span's: the next one reaches
     // P14 at least 14 stages after it)
-    assign d15 = sd_late;
-    assign d17 = TXD > 0 ? sd_late2 : sd_late;
-    assign d20 = TXD > 0 ? sd_late2 : sd_late;
-    assign d21 = TXD > 0 ? sd_late2 : sd_late;
-    assign d22 = TXD > 0 ? sd_late2 : sd_late;
+    assign d15 = SPOG ? gd[15 / GN] : SPO ? sd_sl[tsl[15]] : sd_late;
+    assign d17 = SPOG ? gd[Q17 / GN] : SPO ? sd_sl[tsl[17]] : TXD > 0 ? sd_late2 : sd_late;
+    assign d19 = SPOG ? gd[Q19 / GN] : SPO ? sd_sl[tsl[19]] : d20;
+    assign d20 = SPOG ? gd[(Q19 + 1) / GN] : SPO ? sd_sl[tsl[20]] : TXD > 0 ? sd_late2 : sd_late;
+    assign d21 = SPOG ? gd[(Q19 + 2) / GN] : SPO ? sd_sl[tsl[21]] : TXD > 0 ? sd_late2 : sd_late;
+    assign d22 = SPOG ? gd[(Q19 + 3) / GN] : SPO ? sd_sl[tsl[22]] : TXD > 0 ? sd_late2 : sd_late;
+`ifdef SPO_CHECK
+    // SPO with the old load gate (ld_ok also waiting for P0-P13 to empty):
+    // every stage's slot holds the old registers' span (the equivalence check)
+    span_t dlate;
+    assign dlate = TXD > 0 ? sd_late2 : sd_late;
+    always_ff @(posedge clk) if (!rst && SPO) begin
+        if (tg[0][TV] && d0 != sd_cur) $error("gpu3d_raster SPO_CHECK: d0 differs");
+        if (tg[1][TV] && d1 != sd_cur) $error("gpu3d_raster SPO_CHECK: d1 differs");
+        if (tg[10][TV] && d10 != sd_cur) $error("gpu3d_raster SPO_CHECK: d10 differs");
+        if (tg[11][TV] && d11 != sd_cur) $error("gpu3d_raster SPO_CHECK: d11 differs");
+        if (tg[12][TV] && d12 != sd_cur) $error("gpu3d_raster SPO_CHECK: d12 differs");
+        if (tg[13][TV] && d13 != sd_cur) $error("gpu3d_raster SPO_CHECK: d13 differs");
+        if (tg[14][TV] && d14 != sd_late) $error("gpu3d_raster SPO_CHECK: d14 differs");
+        if (tg[15][TV] && d15 != sd_late) $error("gpu3d_raster SPO_CHECK: d15 differs");
+        if (tg[17][TV] && d17 != dlate) $error("gpu3d_raster SPO_CHECK: d17 differs");
+        if (tg[19][TV] && d19 != dlate) $error("gpu3d_raster SPO_CHECK: d19 differs");
+        if (tg[20][TV] && d20 != dlate) $error("gpu3d_raster SPO_CHECK: d20 differs");
+        if (tg[21][TV] && d21 != dlate) $error("gpu3d_raster SPO_CHECK: d21 differs");
+        if (tg[22][TV] && d22 != dlate) $error("gpu3d_raster SPO_CHECK: d22 differs");
+    end
+`endif
 
     // Linear spans: y0 + d*ix/xdiff, stepped (quotient and remainder of
     // d*ix/xdiff per attribute). LINSER = 0: all five attributes at once in
@@ -1194,7 +1395,7 @@ module gpu3d_raster #(
         logic [18:0] base, sc;
         logic        f5;
         logic [31:0] tp;
-        tp = d15.texparam;                // the late descriptor is the P14 pixel's
+        tp = d14.texparam;                // the late descriptor is the P14 pixel's
         szs = tp[22:20];
         base = {tp[15:0], 3'b0};
         // one row and one base adder for every format: 4x4 adds
@@ -1289,9 +1490,13 @@ module gpu3d_raster #(
             end
         endcase
         // (pbase's low three bits are clear: bits 1-0 are off's alone.) 4x4's
-        // info + k[1] wraps at 14 bits: then bit 16 is flipped back.
+        // pb + 4k carries out of the info field into the address as melonDS's
+        // texpal + paloffset + 4/6 does (11b32f48 wrapped it at 14 bits, which
+        // read 64 KiB lower for info 0x3FFF; docs/pixel-rules.md)
         tx_pa0 = {15'(pbase[16:2] + off[16:2] + 15'(tp[28:26] == 3'd5 && k[1])), off[1:0]};
-        tx_pa0[16] = tx_pa0[16] ^ (tp[28:26] == 3'd5 && k[1] && &info[13:0]);
+`ifdef G3D_TEX4X4_MUT
+        tx_pa0[16] = tx_pa0[16] ^ (tp[28:26] == 3'd5 && k[1] && &info[13:0]);   // (mutant: 11b32f48's 14-bit wrap back)
+`endif
         tx_pa1 = {tx_pa0[16:2], 2'b10};           // pb + 2 (two-colour 4x4 modes, k = 0)
     end
 
@@ -1656,6 +1861,7 @@ module gpu3d_raster #(
         end else begin
             // P21, P22 always drain
             tg[22] <= tg[21];
+            tsl[22] <= tsl[21]; tsl[21] <= tsl[20];
             tg[21] <= adv ? tg20f : '0;
             p21_sh <= rp_col; p21_z <= p20_z;
             p22_sh <= p21_sh; p22_z <= p21_z;
@@ -1692,6 +1898,12 @@ module gpu3d_raster #(
                 if (AREA) tg[11] <= tg[6];    // (P7-P10 removed: the divider is P3-P6)
                 // P0: walker
                 tg[0] <= wk_tag;
+                if (SPO && !SPOG) begin
+                    for (int i = 20; i > 0; i--) tsl[i] <= tsl[i - 1];
+                    if (TXD > 0) tsl[17] <= txd_sl[2*XN-1 -: 2];
+                    if (PXD > 0) tsl[19] <= pxd_sl[2*PN-1 -: 2];
+                    tsl[0] <= wk_sl;
+                end
                 dly_wp <= dly_wp + 5'd1;
                 if (wk_act) begin
 `ifndef SYNTHESIS
@@ -1705,13 +1917,13 @@ module gpu3d_raster #(
                 p1_z2 <= 10'(d0.xdiff - T0.ix) == 10'd0 || d0.wr == 16'd0;
                 // P2: num = (x * w0) << 8 (u32, wraps as in melonDS), den
                 p2_num <= {p1_m1[23:0], 8'b0};
-                p2_den <= 25'(26'(p1_ix * d0.wl) + 26'(p1_xr * d0.wr));
+                p2_den <= 25'(26'(p1_ix * d1.wl) + 26'(p1_xr * d1.wr));
                 p2_den0 <= p1_z1 && p1_z2;     // (the sum stays below 2^25: no wrap to 0)
                 // 256*a/(a+b) is exactly 256 when b = 0 (a = x*w0 < 2^24 for x
                 // <= 255, so a << 8 never wraps); otherwise it is below 256
                 p2_256 <= p1_z2 && !p1_z1;
 `ifndef SYNTHESIS
-                if (tg[1][TV] && (p1_m1 >= 26'h1000000 || 27'(p1_m1) + 27'(p1_xr * d0.wr) >= 27'h2000000))
+                if (tg[1][TV] && (p1_m1 >= 26'h1000000 || 27'(p1_m1) + 27'(p1_xr * d1.wr) >= 27'h2000000))
                     $error("gpu3d_raster: perspective numerator wraps or denominator >= 2^25");
 `endif
 `ifndef SYNTHESIS
@@ -1719,12 +1931,15 @@ module gpu3d_raster #(
                     $error("gpu3d_raster: perspective factor >= 256");
 `endif
                 pd_q[11] <= pd_q[DVL]; pd_z[11] <= pd_z[DVL]; pd_256[11] <= pd_256[DVL];
+                // P10: SPO: the factor's step from the P9 pixel's slot (its slot mux off the P11 multiply; a slot stays
+                // until its pixels leave P22)
+                if (SPO) p10_aq <= 38'(SPOG ? gd[9 / GN].aqs : sd_sl[tsl[9]].aqs);
                 // P11: Z-buffer path, (disp >> 9) * factor
                 p11_zp <= 25'((d10.dz >> 9) * (d10.zlt ? T10.ix : d10.xdiff - T10.ix));
                 p11_ix <= T10.ix; p12_ix <= p11_ix;
                 begin   // DS_LIN17: the factor and its mirror, registered for the P12 lanes
                     logic [16:0] f;
-                    f = 17'((48'(T10.ix) * 48'(38'(sd_aqs))) >> 20);   // < 2^17 (ix < xdiff)
+                    f = 17'((48'(T10.ix) * 48'(SPO ? p10_aq : 38'(sd_aqs))) >> 20);   // < 2^17 (ix < xdiff)
                     p11_lf <= f; p11_lfn <= 17'(18'h20000 - 18'(f)); p11_lf0 <= f == 17'd0;
                 end
                 // P12: products / linear steppers
@@ -1743,7 +1958,7 @@ module gpu3d_raster #(
                         if (!MLOAD) p12_ma[k] <= d11.ad[k];
                         p12_mf[k] <= d11.lin ? (d11.alt[k] ? {1'b0, p11_lf} : {p11_lf0, p11_lfn})
                                              : {(d11.alt[k] ? yf : 9'd256 - yf), 9'd0};
-                        if (!MLOAD) p12_mc[k] <= {sd_abase[k], 17'((DS_TEXRND && d11.lin && k >= 3) ? 17'h1000 : 17'h0)};
+                        if (!MLOAD) p12_mc[k] <= {SPO ? d11.abase[k] : sd_abase[k], 17'((DS_TEXRND && d11.lin && k >= 3) ? 17'h1000 : 17'h0)};
                     end
                     begin   // DS_TOON
                         logic [16:0] ft;
@@ -1815,7 +2030,7 @@ module gpu3d_raster #(
                     logic [31:0] lx, lf;
                     logic [31:0] at;
                     logic [4:0]  pa;
-                    at = d20.attr;              // struct fields into plain locals first
+                    at = d19.attr;              // struct fields into plain locals first
                     pa = at[20:16];
                     vr = p19_sv[5:0]; vg = p19_sv[11:6]; vb = p19_sv[17:12];
                     hr = exp5(p19_toon[4:0]); hg = exp5(p19_toon[9:5]); hb = exp5(p19_toon[14:10]);

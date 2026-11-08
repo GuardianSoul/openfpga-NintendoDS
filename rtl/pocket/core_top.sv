@@ -516,7 +516,8 @@ module core_top #(
     nds_controls controls (.clk(clk_bus), .reset(rst_bus), .apf_keys(cont1_key[15:0]), .apf_type(4'd0),
         .apf_joy(32'h8080_8080), .cursor(), .frame(frame_pulse),
         .combo_sel(2'd0), .gest(12'h001), .speed(2'd1), .layout_set(2'd0), .set_new(1'b0),
-        .layout(layout_sel), .touch(touch), .pen(pen), .cur_x(cur_x), .cur_y(cur_y), .pen_x(), .pen_y(), .ds_keys(ds_keys));
+        .layout(layout_sel), .touch(touch), .pen(pen), .cur_x(cur_x), .cur_y(cur_y), .pen_x(), .pen_y(), .ds_keys(ds_keys),
+        .io_we0(1'b0), .io_we1(1'b0), .io_take(1'b0), .io_wd(32'd0), .io_pend(), .io_r0(), .io_st(), .io_set());
     // display-only status from clk_74a
     wire [35:0] disp;
     nds_sync #(.W(36)) s_disp (.clk(clk_bus), .d({prog_b, prog_a, boxes}), .q(disp));

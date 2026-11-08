@@ -3,6 +3,10 @@
     .global _start
 _start:
     li      sp, 0x4000
+    .option push
+    .option norelax
+    la      gp, __global_pointer$
+    .option pop
     la      t0, __bss_start
     la      t1, __bss_end
 1:  bgeu    t0, t1, 2f

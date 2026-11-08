@@ -136,7 +136,15 @@ def main():
         else:
             run = 0
     if best[1] < need:
-        sys.exit(f'no {need:#x}-byte run of zeros in main RAM for the overlay (largest {best[1]:#x})')
+        # no run long enough (gsdd-continue: 0x12000 of 0x13000): the window with the most zero pages. tb_ds writes
+        # main RAM's own bytes back over the overlay before the release, so only the restore sees the overlay there
+        pages = [a for a in range(0x1000, 0x400000 - need + 0x1000, 0x1000)
+                 if not ((dsize and dbase <= MAIN + a + need - 1 and MAIN + a < dbase + dsize) or MAIN + a < isize)]
+        zp = {a: main_ram[a:a + 0x1000].count(0) == 0x1000 for a in range(0x1000, 0x400000, 0x1000)}
+        a0 = max(pages, key=lambda a: sum(zp[b] for b in range(a, a + need, 0x1000)))
+        print(f'warning: no {need:#x}-byte run of zeros in main RAM (largest {best[1]:#x}); the overlay covers '
+              f'{sum(not zp[b] for b in range(a0, a0 + need, 0x1000))} non-zero pages at {MAIN + a0:#010x}')
+        best = (a0, need)
     stage = MAIN + best[0]
     t9, t7, data, end = build(stage)
     ov = bytearray(end - stage + 4 * (len(t9) + len(t7)))

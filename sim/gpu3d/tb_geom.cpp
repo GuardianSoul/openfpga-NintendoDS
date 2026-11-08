@@ -4,6 +4,7 @@
 //   tb_geom --trace gx.bin [--frames N] [--dump DIR]   census GX trace
 //   tb_geom --synth N [--seed S]                         random command streams
 //   tb_geom --timing N [--seed S]                        GXSTAT per system cycle against GPU3D::Run
+//   tb_geom --gxcost                                     single-command costs (GXSTAT busy) against the DS (hwref run 3)
 //
 // Trace and synth modes feed the same FIFO entries to both; melonDS executes
 // them back to back (GPU3D::ExecuteCommand), the RTL as fast as its FIFO
@@ -373,7 +374,8 @@ u32 bits(const u32* w, int lo, int n)
 }
 
 bool g_prof = false;
-std::string g_prof_dump, g_pct;      // --prof-dump FILE: executions per microinstruction address (4095: idle)
+std::string g_prof_dump, g_pct;
+const char* g_dstime = nullptr;      // --dstime TRACE: the DS's time a flush (melonDS's exact command timing)      // --prof-dump FILE: executions per microinstruction address (4095: idle)
 std::vector<u64> g_prof_hist;
 u64 g_cmd_n[64], g_cmd_cyc[64];
 void prof_report()
@@ -805,10 +807,18 @@ int run_trace(const char* path, int max_frames, bool verbose)
                 static u32 lastf = 0;
                 fcyc.push_back(rtl.cyc - last);
                 if (frames > 0) futil.push_back((double)(rtl.cyc - last) / ((fframe - lastf) * 1120340.0));
+                // the DS's time for the same entries: melonDS's command timing (exact against the DS within a
+                // cycle: ds-rules, gxtime runs 3-8; build with GEOM_CHEAP=0), its CycleCount accumulated (trace
+                // mode never runs GPU3D::Run), in system cycles; x2 for 67 MHz clocks
+                static s64 ds_last = 0;
+                s64 ds_now = gd.g->CycleCount;
                 if (g_fstat && frames > 0)
-                    printf("flush %d frame %u: %llu clocks, %u frames, util %.2f, polys %u verts %u\n", frames, fframe,
-                           (unsigned long long)(rtl.cyc - last), fframe - lastf, (double)(rtl.cyc - last) / ((fframe - lastf) * 1120340.0),
-                           gd.g->RenderNumPolygons, 0u);
+                    printf("flush %d frame %u: %llu clocks, %u frames, util %.2f, polys %u verts %u | DS %lld system cycles = %lld clocks, ours %.2fx\n",
+                           frames, fframe, (unsigned long long)(rtl.cyc - last), fframe - lastf,
+                           (double)(rtl.cyc - last) / ((fframe - lastf) * 1120340.0), gd.g->RenderNumPolygons, 0u,
+                           (long long)(ds_now - ds_last), 2 * (long long)(ds_now - ds_last),
+                           (double)(rtl.cyc - last) / std::max<s64>(1, 2 * (ds_now - ds_last)));
+                ds_last = ds_now;
                 last = rtl.cyc;
                 lastf = fframe;
             }
@@ -1200,6 +1210,57 @@ int run_synth(int nframes, u32 seed, bool verbose)
 // after every system cycle. Writes wait while the FIFO holds 240 entries or
 // more, so the FIFO-full stall is not exercised here.
 int g_timing = 0;
+// --dstime TRACE [--frames N]: the DS's time for a census trace's frames, by melonDS's command timing (exact
+// against the DS within a cycle: ds-rules, gxtime runs 3-8; build with GEOM_CHEAP=0). Each entry is written to its
+// command port as soon as the 256-entry FIFO has room (a DMA feed: one write a system cycle at most), GPU3D::Run
+// stepped one system cycle at a time; at each flush record the time until the engine is idle (GXSTAT bit 27 clear,
+// FIFO and pipe empty), then a VBlank. Prints system cycles a flush and x2 (67 MHz clocks).
+int run_dstime(const char* path, int max_frames)
+{
+    Golden gd;
+    Trace tr;
+    if (!tr.load(path)) { fprintf(stderr, "dstime: cannot load %s\n", path); return 2; }
+    tr.i = 8;
+    u64 t = 0, t0 = 0;
+    int frames = 0;
+    auto step = [&]() { t++; gd.nds->ARM9Timestamp = t << gd.nds->ARM9ClockShift; gd.g->Run(); };
+    auto idle = [&]() { return !(gd.g->GXStat & (1u << 27)) && gd.g->CmdFIFO.IsEmpty() && gd.g->CmdPIPE.IsEmpty(); };
+    while (tr.i < tr.d.size())
+    {
+        char k = (char)tr.get<u8>();
+        if (k == 'C')
+        {
+            u8 c = tr.get<u8>(); u32 v = tr.get<u32>();
+            for (u64 g = 0; gd.g->CmdFIFO.Level() >= 256; g++) { step(); if (g > 100000000) { printf("dstime: FIFO stuck\n"); return 2; } }
+            if (c >= 0x10 && c <= 0x72) gd.g->Write32(0x04000400 + 0x40 + (u32)(c - 0x10) * 4, v);
+            step();
+        }
+        else if (k == 'F')
+        {
+            u32 fframe = tr.get<u32>(); tr.get<u32>(); tr.get<u32>(); tr.get<u32>(); tr.get<u32>();
+            tr.i += 1 + 64 + 16 + 4 + 4 + 32 + 4 + 4;
+            for (u64 g = 0; !idle() && !gd.g->FlushRequest; g++) { step(); if (g > 100000000) { printf("dstime: never idle\n"); return 2; } }
+            for (u64 g = 0; !gd.g->CmdPIPE.IsEmpty() || !gd.g->CmdFIFO.IsEmpty(); g++) { step(); if (g > 100000000) break; }
+            if (frames > 0)
+                printf("dstime flush %d frame %u: DS %llu system cycles = %llu clocks\n", frames, fframe,
+                       (unsigned long long)(t - t0), 2 * (unsigned long long)(t - t0));
+            gd.g->VBlank();
+            step();
+            t0 = t;
+            frames++;
+            if (max_frames && frames >= max_frames) break;
+        }
+        else if (k == 'V')
+        {
+            tr.get<u32>(); tr.i += 9;
+            static const u32 size[9] = { 0x20000, 0x20000, 0x20000, 0x20000, 0x10000, 0x4000, 0x4000, 0x8000, 0x4000 };
+            for (int b = 0; b < 9; b++) tr.i += size[b];
+        }
+        else { printf("dstime: unknown record %c at %zu\n", k, tr.i - 1); return 2; }
+    }
+    return 0;
+}
+
 int run_timing(int nframes, u32 seed)
 {
     Golden gd;
@@ -1317,6 +1378,113 @@ int run_timing(int nframes, u32 seed)
     return bad ? 2 : 0;
 }
 
+// --gxcost: the CPU-visible cost of single commands against the DS (hwref gxtime run 3 / run 8, system cycles per
+// body), measured as the DS measured them: SWAP_BUFFERS, then setup-free prefix + n bodies queued behind it, a
+// VBlank, and D(n) = system cycles until GXSTAT busy clears; cycles per body = (D(n2) - D(n1)) / (n2 - n1), n2 as
+// many bodies as fit in 240 entries (at most 64), n1 = n2 / 4 (gxtime's n1/n2). The gated rows are the DS rules the
+// cheap model follows (ds-rules "GX command costs"): |RTL - DS| <= 1.5. The other rows are printed: the in-context
+// controls and BOX_TEST's outcome-dependent costs (parked). Exit 1 when a gated row misses.
+int run_gxcost()
+{
+    u8 np[256] = {};
+    for (int c : {0x10, 0x12, 0x13, 0x14, 0x20, 0x21, 0x22, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x30, 0x31, 0x32, 0x33,
+                  0x40, 0x50, 0x60, 0x72}) np[c] = 1;
+    np[0x16] = np[0x18] = 16; np[0x17] = np[0x19] = 12; np[0x1A] = 9; np[0x1B] = np[0x1C] = np[0x70] = 3;
+    np[0x23] = np[0x71] = 2; np[0x34] = 32;
+    using L = std::vector<u32>;
+    auto XY = [](int x, int y) { return ((u32)x & 0xFFFF) | ((u32)y << 16); };
+    const u32 NRMP = (0u & 0x3FF) | ((0u & 0x3FF) << 10) | (((u32)-511 & 0x3FF) << 20);
+    const int Q = 0x400;
+    const L ID44 = {0x18, 0x1000, 0, 0, 0, 0, 0x1000, 0, 0, 0, 0, 0x1000, 0, 0, 0, 0, 0x1000};
+    const L TRI = {0x23, XY(0, 0), 0, 0x23, XY(Q, 0), 0, 0x23, XY(0, Q), 0};
+    const L NTRI = {0x21, NRMP, 0x23, XY(0, 0), 0, 0x21, NRMP, 0x23, XY(Q, 0), 0, 0x21, NRMP, 0x23, XY(0, Q), 0};
+    // gxtime's S0: END, identity matrices (mode 2 last), viewport, attributes, material, lights
+    const L S0 = {0x41, 0x10, 0, 0x15, 0x10, 3, 0x15, 0x10, 2, 0x15, 0x60, (255u << 16) | (191u << 24),
+                  0x29, 0x001F00C0, 0x2A, 0, 0x2B, 0, 0x20, 0x7FFF, 0x30, 0x7FFF | (0x2108u << 16), 0x31, 0};
+    auto cat = [](L a, const L& b) { a.insert(a.end(), b.begin(), b.end()); return a; };
+    struct T { const char* name; L setup, prefix, body; double ds; bool gate; };
+    const std::vector<T> tests = {
+        {"mult44_m0", {0x10, 0}, {}, ID44, 34.50, true},
+        {"mult44_m1", {0x10, 1}, {}, ID44, 35.00, true},
+        {"mult44_m2", {}, {}, ID44, 65.41, true},
+        {"mult44_m3", {0x10, 3}, {}, ID44, 33.00, true},
+        {"normal_l0", {}, {0x40, 0}, {0x21, NRMP}, 9.00, true},
+        {"normal_l1", {0x29, 0x001F00C1}, {0x40, 0}, {0x21, NRMP}, 9.00, true},
+        {"normal_l2", {0x29, 0x001F00C3}, {0x40, 0}, {0x21, NRMP}, 10.06, true},
+        {"normal_l3", {0x29, 0x001F00C7}, {0x40, 0}, {0x21, NRMP}, 11.06, true},
+        {"normal_l4", {0x29, 0x001F00CF}, {0x40, 0}, {0x21, NRMP}, 12.12, true},
+        {"pos_test", {}, {}, {0x71, XY(0, 0), 0}, 7.12, true},
+        {"vec_test", {}, {}, {0x72, NRMP}, 5.25, true},
+        {"box_test", {}, {}, {0x70, XY(0, 0), XY(0, Q), XY(Q, Q)}, 257.10, true},
+        {"box_test_out", {}, {}, {0x70, XY(0x3000, 0), XY(0, Q), XY(Q, Q)}, 102.93, false},
+        {"box_test_partial", {}, {}, {0x70, XY(0xE00, 0), XY(0, 0x400), XY(Q, Q)}, 518.97, false},
+        {"tri_v16", {}, {0x40, 0}, TRI, 27.70, false},
+        {"tri_nrm_v16_l1", {0x29, 0x001F00C1}, {0x40, 0}, NTRI, 28.65, false},
+        {"tri_nrm_v16_l4", {0x29, 0x001F00CF}, {0x40, 0}, NTRI, 30.45, false},
+        {"mult44_tri", {}, {0x40, 0}, cat(ID44, TRI), 80.25, false},
+        {"identity_m2", {}, {}, {0x15}, 19.00, false},
+    };
+    Rtl rtl;
+    auto* r = rtl.m->rootp;
+    if (!(rtl.cyc & 1)) rtl.cycle();
+    auto sys = [&](bool req, u32 a, u32 v, bool vb) {
+        bool done = false;
+        for (int k = 0; k < 2; k++)
+        {
+            rtl.m->vblank = vb && k == 0;
+            rtl.m->io_req = req && !done; rtl.m->io_we = 1; rtl.m->io_be = 0xF;
+            rtl.m->io_addr = (a >> 2) & 0xFF; rtl.m->io_wdata = v;
+            rtl.m->clk = 0; rtl.m->tick = rtl.cyc & 1; rtl.m->eval();
+            if (req && !done && !rtl.m->io_wait) done = true;
+            rtl.cycle();
+        }
+        rtl.m->io_req = 0; rtl.m->io_we = 0; rtl.m->vblank = 0;
+        return done;
+    };
+    bool stuck = false;
+    auto wr = [&](u32 cmd, u32 v) {
+        for (int g = 0; !sys(true, 0x04000400 + cmd * 4, v, false); g++)
+            if (g > 2000000) { stuck = true; return; }
+    };
+    auto emit = [&](const L& l) {
+        for (size_t i = 0; i < l.size();)
+        {
+            u32 c = l[i++];
+            if (!np[c]) wr(c, 0);
+            else for (int k = 0; k < np[c]; k++) wr(c, l[i++]);
+        }
+    };
+    auto writes = [&](const L& l) { int n = 0; for (size_t i = 0; i < l.size(); i++) { int k = np[l[i]]; n += k ? k : 1; i += k; } return n; };
+    auto busy = [&]() { return (r->gpu3d_geom__DOT__gxstat >> 27) & 1; };
+    auto idle = [&]() { for (int g = 0; g < 4000000 && busy(); g++) sys(false, 0, 0, false); };
+    auto drain = [&](const T& t, int n) -> u64 {
+        emit(S0); emit(t.setup); idle();
+        // the previous run's SWAP: one VBlank so no flush is pending, then the timed one
+        sys(false, 0, 0, true); idle();
+        wr(0x50, 0); emit(t.prefix);
+        for (int k = 0; k < n; k++) emit(t.body);
+        sys(false, 0, 0, true);
+        u64 d = 1;
+        for (; busy() && d < 4000000; d++) sys(false, 0, 0, false);
+        return d;
+    };
+    int bad = 0;
+    printf("%-18s %4s %4s %8s %8s %8s %s\n", "gxcost", "n1", "n2", "RTL", "DS", "RTL-DS", "");
+    for (const T& t : tests)
+    {
+        int wb = writes(t.body), wp = writes(t.prefix);
+        int n2 = std::min(64, (240 - wp) / wb), n1 = std::max(1, n2 / 4);
+        u64 d1 = drain(t, n1), d2 = drain(t, n2);
+        double per = (double)((s64)d2 - (s64)d1) / (n2 - n1);
+        bool miss = t.gate && std::fabs(per - t.ds) > 1.5;
+        bad += miss || stuck;
+        printf("%-18s %4d %4d %8.2f %8.2f %+8.2f %s\n", t.name, n1, n2, per, t.ds, per - t.ds,
+               stuck ? "STUCK" : miss ? "MISS" : t.gate ? "ok" : "(not gated)");
+    }
+    printf("gxcost: %d gated rows miss\n", bad);
+    return bad ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -1324,11 +1492,12 @@ int main(int argc, char** argv)
     Verilated::commandArgs(argc, argv);
 #if defined(GEOM_CHEAP) && GEOM_CHEAP
     // the RTL has GX cheap timing (gpu3d_gxfront CHEAP): melonDS gets the same table (gx-timing.patch's
-    // GX_CHEAP), from this repository unless the environment names one
+    // GX_CHEAP), from this repository unless the environment names one. gx-cheap-table-rtl.txt is what the RTL
+    // charges: gx-cheap-table-full.txt without the matrix-mode rows the RTL does not follow (all but MTX_MULT_4x4's)
     if (!getenv("GX_CHEAP")) {
         std::string root = __FILE__;
         root = root.substr(0, root.rfind("/sim/gpu3d/"));
-        setenv("GX_CHEAP", (root + "/tools/melonds-census/gx-cheap-table-full.txt").c_str(), 1);
+        setenv("GX_CHEAP", (root + "/tools/melonds-census/gx-cheap-table-rtl.txt").c_str(), 1);
     }
 #endif
     const char* trace = nullptr;
@@ -1343,6 +1512,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[a], "--frames") && a + 1 < argc) frames = atoi(argv[++a]);
         else if (!strcmp(argv[a], "-v")) verbose = true;
         else if (!strcmp(argv[a], "--order")) g_order_dump = true;
+        else if (!strcmp(argv[a], "--dstime") && a + 1 < argc) g_dstime = argv[++a];
         else if (!strcmp(argv[a], "--prof")) g_prof = true;
         else if (!strcmp(argv[a], "--prof-dump") && a + 1 < argc) { g_prof = true; g_prof_dump = argv[++a]; }
         else if (!strcmp(argv[a], "--pct") && a + 1 < argc) { g_prof = true; g_pct = argv[++a]; }
@@ -1365,6 +1535,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[a], "--synth") && a + 1 < argc) synth = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--seed") && a + 1 < argc) seed = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--timing") && a + 1 < argc) g_timing = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--gxcost")) return run_gxcost();
         else if (!strcmp(argv[a], "--wild")) g_wild = true;
         else if (!strcmp(argv[a], "--edge")) g_edge = true;
         else if (!strcmp(argv[a], "--counts")) g_counts = true;
@@ -1372,6 +1543,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[a], "--pops") && a + 2 < argc) { g_from = atoll(argv[++a]); g_to = atoll(argv[++a]); }
     }
     if (rwlog) return run_rwlog(rwlog);
+    if (g_dstime) return run_dstime(g_dstime, frames);
     if (trace) return run_trace(trace, frames, verbose);
     if (g_timing) return run_timing(g_timing, seed);
     if (synth) return run_synth(synth, seed, verbose);

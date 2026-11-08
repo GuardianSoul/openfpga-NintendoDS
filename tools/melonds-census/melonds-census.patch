@@ -766,7 +766,7 @@ index c6dc85f..9640a52 100644
  
  const s32 kMaxIterationCycles = 64;
 diff --git a/src/NDSCart.cpp b/src/NDSCart.cpp
-index 35394c9..a477c38 100644
+index 35394c9..f791e35 100644
 --- a/src/NDSCart.cpp
 +++ b/src/NDSCart.cpp
 @@ -27,6 +27,7 @@
@@ -777,7 +777,26 @@ index 35394c9..a477c38 100644
  
  #include "NDSCart/CartCommon.h"
  #include "NDSCart/CartRetail.h"
-@@ -795,7 +796,10 @@ void NDSCartSlot::Interface::WriteROMCnt(u32 val, u32 mask)
+@@ -443,6 +444,18 @@ std::unique_ptr<CartCommon> ParseROM(std::unique_ptr<u8[]>&& romdata, u32 romlen
+             romparams.SaveMemType = 2; // assume EEPROM 64k (TODO FIXME)
+     }
+ 
++    // census: the game list marks some carts NAND (8-10) whose header has no
++    // NAND save area (0x96 = 0), e.g. Electroplankton (ATIx): the NAND cart
++    // would then return FF for every ROM read. Such a cart gets EEPROM 8 KiB,
++    // as the core's savelist does (NAND counts as not listed); --save-type wins.
++    if (romparams.SaveMemType >= 8 && romparams.SaveMemType <= 10 && header.NANDRWStart == 0)
++    {
++        Log(LogLevel::Warn, "census: %.4s listed NAND without a NAND area, using EEPROM 8 KiB\n", header.GameCode);
++        romparams.SaveMemType = 2;
++    }
++    if (args && args->SaveMemType)
++        romparams.SaveMemType = *args->SaveMemType;
++
+     if (romparams.ROMSize != romlen)
+         Log(LogLevel::Warn, "!! bad ROM size %d (expected %d) rounded to %d\n", romlen, romparams.ROMSize, cartromsize);
+ 
+@@ -795,7 +808,10 @@ void NDSCartSlot::Interface::WriteROMCnt(u32 val, u32 mask)
             datasize);*/
  
      if (Parent.CartActive && Parent.CPUSelect == Num)
@@ -788,6 +807,21 @@ index 35394c9..a477c38 100644
  
      // reset the FIFO
      ROMDataPosCPU = 0;
+diff --git a/src/NDSCart.h b/src/NDSCart.h
+index d61806f..75cfcbe 100644
+--- a/src/NDSCart.h
++++ b/src/NDSCart.h
+@@ -61,6 +61,10 @@ struct NDSCartArgs
+     /// If 0, then the cart's SRAM buffer will be empty.
+     /// Ignored for homebrew ROMs.
+     u32 SRAMLength = 0;
++
++    /// Save memory type (ROMList SaveMemType, 0-10) to use instead of the
++    /// game list's entry. If \c nullopt, the game list decides.
++    std::optional<u32> SaveMemType = std::nullopt;
+ };
+ 
+ class NDSCartSlot
 diff --git a/src/SPU.cpp b/src/SPU.cpp
 index e1d49f9..4727f0e 100644
 --- a/src/SPU.cpp

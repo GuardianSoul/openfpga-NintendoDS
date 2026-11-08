@@ -9,7 +9,7 @@
  
  namespace melonDS
  {
-@@ -1732,10 +1734,66 @@
+@@ -1732,10 +1734,77 @@ GPU3D::CmdFIFOEntry GPU3D::CmdFIFORead() noexcept
      return ret;
  }
  
@@ -21,6 +21,7 @@
 +struct GxTiming
 +{
 +    bool init = false, cheap = false, stats = false;
++    bool nrm = false;          // GX_CHEAP: the entry before was a NORMAL
 +    s32 tab[1536] {};
 +    u64 cnt[512] {}, sum[512] {};
 +    std::string statsPath;
@@ -67,6 +68,16 @@
 +                s32 cost = g_gxt.tab[key];
 +                if (cmd >= 0x11 && cmd <= 0x1C && (key & 1) && g_gxt.tab[mk])
 +                    cost = g_gxt.tab[mk];
++                // the NORMAL pipeline (gpu3d_gxfront CHEAP; DS hwref run 3, ds-rules "GX command costs"): 7
++                // cycles that a vertex hides and any other entry pays; a NORMAL straight after a NORMAL also
++                // costs its lighting, 1 + max(1, lights)
++                if (cmd == 0x21 && g_gxt.nrm)
++                {
++                    int l = __builtin_popcount(g.CurPolygonAttr & 0xF);
++                    cost = 1 + (l ? l : 1);
++                }
++                if (g_gxt.nrm && !(cmd >= 0x23 && cmd <= 0x28)) cost += 7;
++                g_gxt.nrm = cmd == 0x21;
 +                g.CycleCount = c0 + cost;
 +                g.VertexPipeline = 0; g.NormalPipeline = 0; g.PolygonPipeline = 0;
 +                g.VertexSlotCounter = 0; g.VertexSlotsFree = 1;

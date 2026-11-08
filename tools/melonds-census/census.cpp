@@ -1370,7 +1370,7 @@ static void Usage()
         "              [--frames N=3600] [--save F] [--shot-every N=300]\n"
         "              [--gx-first FRAME --gx-frames N [--vram-every FLUSHES=30]]\n"
         "              [--vram-trace-first FRAME [--vram-trace-frames N=60]]\n"
-        "              [--no-hooks 1] [--mutate 1] [--cart-trace 1]\n"
+        "              [--no-hooks 1] [--mutate 1] [--cart-trace 1] [--save-type N]\n"
         "              [--gpu2d-dump F --gpu2d-at FRAME:N[,FRAME:N...] [--gpu2d-name NAME]]\n"
         "              [--sd-dir DIR [--sd-mb N=64]]\n"
         "              [--load-state F] [--save-state F --save-state-at FRAME [--save-state-save F]]\n"
@@ -1483,6 +1483,10 @@ int main(int argc, char** argv)
     // synced back to it when the cart is destroyed at exit.
     if (opt.count("sd-dir"))
         cartargs.SDCard = FATStorageArgs{out + "/sd.img", (opt.count("sd-mb") ? std::stoull(opt["sd-mb"]) : 64ull) << 20, false, opt["sd-dir"]};
+    // --save-type N: the save chip (melonDS SaveMemType 0-10) instead of the game
+    // list's, e.g. 2 (EEPROM 8 KiB, the core's default) for a game the list
+    // wrongly marks NAND (8-10: every ROM read then returns FF)
+    if (opt.count("save-type")) cartargs.SaveMemType = (u32)std::stoul(opt["save-type"]);
     auto cart = NDSCart::ParseROM(rom.data(), rom.size(), nullptr, std::move(cartargs));
     if (!cart) { fprintf(stderr, "ROM not recognised\n"); return 1; }
     nds->SetNDSCart(std::move(cart));

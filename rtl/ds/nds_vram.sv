@@ -30,7 +30,40 @@ module nds_vram
     parameter bit VR_POST = 0,
     // VR_RDB: this port's reads fill a line of 8 words, one block on the VRAM port, and hit it after that: the
     // same title's copy of a captured bank took 22 clocks a word through single reads. Any write empties the line.
-    parameter bit VR_RDB = 0
+    parameter bit VR_RDB = 0,
+    // VR_PASS (with VR_POST): a 2D block read waits for the FIFO to drain only if its 8 words fall in the range of
+    // the words posted since the FIFO was last empty (it waited for every posted word: each DMA word then went alone
+    // and the next waited behind 2D, ~22 clocks a word for Golden Sun DD's HBlank DMA against the DS's 6.3). Posted
+    // words now follow each other into the FIFO, whose controller writes them as one row chain, and a full-word
+    // write is posted while 2D block words are still arriving (it doesn't use the VRAM port; the controller serves
+    // a port's block before a chain write; a word for a line one of the last two blocks reads waits for them: the
+    // testbench's ordering contract allows no port read of a word while a chain write to it is pending).
+    parameter bit VR_PASS = 0,
+    // VR_WB (with VR_PASS): a full-word write is acked as soon as a one-word buffer takes it; the buffer resolves
+    // and posts it while the fabric runs the next unit (main->VRAM DMA: 4.10 system cycles a word here, the DS's
+    // 3.15, unitmem). The buffer goes before this port's other CPU requests, so a later read waits for it.
+    parameter bit VR_WB = 0,
+    // VR_CWF (with VR_RDB): a line fill acks the read as its word arrives (critical word); the rest of the line
+    // fills while the fabric goes on, and this port's next request waits for the fill's end.
+    parameter bit VR_CWF = 0,
+    // VR_HIT (with VR_RDB): a read of the line in rb is answered from S_IDLE, beside the state machine (it went
+    // S_IDLE -> S_CRES -> ack); only while res is the CPU port's (no 2D request, no buffered write).
+    parameter bit VR_HIT = 0,
+    // VR_YIELD (with VR_PASS): a CPU access waiting in S_CRES (behind a block's line or the FIFO drain), S_WRES or
+    // S_POST (FIFO full: it is shared with the 3D ring's writes) goes back to S_IDLE when the 2D engine asks for a
+    // block, so the block starts (only S_IDLE starts one); the request stays pending and is resolved again.
+    parameter bit VR_YIELD = 0,
+    // VR_PDRAIN (with VR_PASS): post_p ends when the last posted word has left the shared FIFO (its pop count
+    // passes the word's place, taken at the post from cw_pcnt + cw_fill), not when the whole FIFO is empty: the
+    // 3D ring and the bottom screen keep it busy, so a 2D block in S_GRES behind pr_hit waited unbounded (gsdd 7 late lines).
+    parameter bit VR_PDRAIN = 0,
+    // VR_PF (with VR_RDB): the read line is two ways (one MLAB). A DMA read (c_dma) that hits or fills line L asks for
+    // L+1 in the other way; the prefetch's block goes from S_IDLE when no 2D words are due and no posted word may
+    // still be in the FIFO, and its words fill beside the state machine (as a 2D block's: S_PBLK returns to
+    // S_IDLE), so the DMA's next reads hit the current way meanwhile (VRAM->main units: 6.46 system cycles a word,
+    // the DS's 4.08, unitmem). Anything else that needs the port waits for the prefetch's words; any write
+    // invalidates both ways and the prefetch in flight, as it did the line.
+    parameter bit VR_PF = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -38,6 +71,7 @@ module nds_vram
     // CPU port (fabric): request held until ack
     input  logic        c_req,
     input  logic        c_cpu,          // 0 ARM9 map, 1 ARM7 map
+    input  logic        c_dma,          // VR_PF: the request is a DMA's
     input  logic        c_we,
     input  logic [23:2] c_addr,         // offset in 0x06000000..0x06FFFFFF
     input  logic [3:0]  c_be,
@@ -60,6 +94,8 @@ module nds_vram
     output logic [31:0] cw_data,
     input  logic        cw_ack,
     input  logic        cw_drained,
+    input  logic [6:0]  cw_fill,     // VR_PDRAIN: the FIFO's words written and not popped (lags)
+    input  logic [6:0]  cw_pcnt,     // VR_PDRAIN: the FIFO's words popped, mod 128 (lags)
     // the cartridge's save memory (1 MiB at physical 0x100000) and the WiFi
     // block's memory (0x0F0000), lowest priority
     input  logic        sv_req,
@@ -216,7 +252,7 @@ module nds_vram
     end
 
     // ---- state machine
-    typedef enum logic [3:0] { S_IDLE, S_GBLK, S_GZERO, S_CAP, S_CPU, S_CPUR, S_GRES, S_CRES, S_POST, S_RBLK, S_RFIL } st_t;
+    typedef enum logic [3:0] { S_IDLE, S_GBLK, S_GZERO, S_CAP, S_CPU, S_CPUR, S_GRES, S_CRES, S_POST, S_RBLK, S_RFIL, S_WRES, S_PBLK } st_t;
     st_t         st;
     logic [20:0] res_q;         // the resolver's answer for the request taken (S_GRES, S_CRES)
     logic [2:0]  beat;          // words received (block)
@@ -224,18 +260,19 @@ module nds_vram
     logic [31:0] r_q;                  // the CPU's or the save port's read word
     assign c_rdata = r_q; assign sv_rdata = r_q; assign g_rdata = {w1, w0};
     logic        cap_v;
-    logic [17:0] cap_a;
+    logic        cap_a0;        // the word's halfword: cap_pa is its word (a halfword index's bits 17:1)
     logic [15:0] cap_d;
     // Capture writes go in pairs: an even halfword is held until its odd
     // partner arrives, and the two leave as one 32-bit write (cap_w, the low
-    // half in cap_lo). A line's 256 writes were each a request on the VRAM
+    // half in cap_pd: a new halfword is taken only with no word waiting, so the
+    // held even one and a waiting word's low half are never both live). A line's 256 writes were each a request on the VRAM
     // port, 8 or more clocks apiece against the 3D ring's traffic: the
     // composite pass took 2,000-2,470 clocks instead of 526 and the line
     // went late (MKDS intro's dual-screen 3D, docs/2d-engine.md). An even
     // halfword whose partner does not follow within 4 clocks (a capture that
     // ends there, a changed address) is written alone.
     logic        cap_w, cap_p;
-    logic [15:0] cap_lo, cap_pd;
+    logic [15:0] cap_pd;
     logic [16:0] cap_pa;
     logic [2:0]  cap_t;
     logic [20:2] va;
@@ -250,11 +287,32 @@ module nds_vram
     logic        bw_odd;        // the next block word is the second of a pair
     logic        bw_acc;        // a block request was accepted this cycle
     logic        post_p, post_d; // VR_POST: a posted word may still be in the FIFO: nothing reads VRAM yet
-    wire         g_go = g_req && bw_left <= 5'd8 && !post_p;
-    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rb [8];  // VR_RDB: the read line (MLAB: an M10K here was the 309th of 308 with MKDS's G3D_SL 9; read in S_IDLE, written in S_RBLK)
-    logic [19:5] rb_tag;
-    logic        rb_v, rb_inv;   // the line is valid; a write came during its fill
+    logic [3:0]  pf_left;       // VR_PF: prefetch words still to come (they come before any later block's)
+    // (VR_PF: at most two blocks out; prefetch and block words are both due only with a whole block behind it)
+    wire         g_go = g_req && (VR_PF && pf_left != 4'd0 ? bw_left == 5'd0 : bw_left <= 5'd8) && (VR_PASS || !post_p);
+    logic [19:5] pr_lo, pr_hi;   // VR_PASS: the 8-word lines of the words posted while post_p is set
+    wire         pr_hit = post_p && res_q[19:5] >= pr_lo && res_q[19:5] <= pr_hi;
+    logic [19:5] bt0, bt1;       // VR_PASS: the lines of the last two 2D blocks (in flight while bw_left != 0)
+    wire         bt_hit = bw_left != 5'd0 && (res_q[19:5] == bt0 || res_q[19:5] == bt1);
+    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rb [16];  // VR_RDB: the read line (MLAB: an M10K here was the 309th of 308 with MKDS's G3D_SL 9; read in S_IDLE, written in S_RBLK); {way, word}: one write site in every setting (a second, or an index wider than the array, built it from flip-flops: #2050, #2052)
+    logic [19:5] lt [2];         // the ways' lines (VR_PF: way 1 too)
+    logic        lv [2];         // a way is valid
+    logic        rb_inv;         // a write came during the fill
     logic [2:0]  rb_w;
+    logic        cur, fw, rd_dma; // VR_PF: the way the last read used, the way a fill writes, the fill is a DMA's
+    logic        pf_req, pf_way, pf_inv;
+    logic [2:0]  pf_w;
+    function automatic logic [3:0] rbi(input logic wy, input logic [2:0] w);
+        return {VR_PF && wy, w};
+    endfunction
+    wire  [1:0]  lhit = {VR_PF && lv[1] && lt[1] == res_q[19:5], lv[0] && lt[0] == res_q[19:5]};
+    wire         lh = VR_PF && lhit[1];
+    wire  [19:5] l_nx = res_q[19:5] + 15'd1;
+    // VR_PF: L+1 for a DMA read of L into the other way w, unless it is there or asked for already. The request
+    // takes w's tag at once (lv 0): the pending line is lt[pf_way]; none while prefetch words are due
+    function automatic logic pf_want(input logic w);
+        return pf_left == 4'd0 && (lt[w] != l_nx || (!lv[w] && !pf_req));
+    endfunction
     wire         any_w;
 
     // One resolver for both, registered: a request waits one clock in S_GRES or
@@ -263,15 +321,24 @@ module nds_vram
     // reach g_ack through the bank match (#1323 -1.01 ns to va, -0.46 to q_blk).
     // A block is taken with g_ack, so its source may change after that (nds_blk_arb).
     logic [20:0] res;
-    assign res   = resolve(vramcnt, g_req ? g_view : c_view, g_req ? g_off : c_off);
+    logic        wb_v, wb_p;     // VR_WB: the buffer holds a write; the post in S_POST is the buffer's
+    logic [3:0]  wb_view;
+    logic [19:2] wb_off;
+    logic [31:0] wb_d;
+    wire         c_full = VR_POST && c_req && c_we && c_be == 4'hF;
+    wire         wb_take = VR_WB && c_full && !c_ack && !wb_v;
+    assign res   = resolve(vramcnt, g_req ? g_view : VR_WB && wb_v ? wb_view : c_view,
+                           g_req ? g_off : VR_WB && wb_v ? {wb_off, 2'b00} : c_off);
+    wire         hit0 = VR_HIT && VR_RDB && st == S_IDLE && !g_req && !(VR_WB && wb_v) && c_req && !c_ack && !c_we
+                        && !VR_PF && res[20] && lv[0] && lt[0] == res[19:5];
 
     assign g_ack = st == S_IDLE && g_go;
     assign bw_acc = st == S_GBLK && vm_ack;
     wire cw_pair = CAP_CHAIN && cap_v && cap_w;
     wire cw_post = VR_POST && st == S_POST && !cw_pair;
     assign cw_valid = cw_pair || cw_post;
-    assign cw_addr  = cw_pair ? {7'd0, cap_a[17:16], cap_a[15:1]} : {6'd0, res_q[19:2]};
-    assign cw_data  = cw_pair ? {cap_d, cap_lo} : c_wdata;
+    assign cw_addr  = cw_pair ? {7'd0, cap_pa} : {6'd0, res_q[19:2]};
+    assign cw_data  = cw_pair ? {cap_d, cap_pd} : VR_WB && wb_p ? wb_d : c_wdata;
     assign cap_ready = !cap_v && (!cap_p || (cap_addr[0] && cap_addr[17:1] == cap_pa));
 
     always_ff @(posedge clk) begin
@@ -281,64 +348,104 @@ module nds_vram
         if (cap_we && cap_ready) begin
             if (!cap_addr[0]) begin cap_p <= 1'b1; cap_pa <= cap_addr[17:1]; cap_pd <= cap_data; cap_t <= 3'd0; end
             else begin
-                cap_v <= 1'b1; cap_a <= cap_addr; cap_d <= cap_data;
-                cap_w <= cap_p; cap_lo <= cap_pd; cap_p <= 1'b0;
+                cap_v <= 1'b1; cap_pa <= cap_addr[17:1]; cap_a0 <= 1'b1; cap_d <= cap_data;   // (cap_pa unchanged with a pair)
+                cap_w <= cap_p; cap_p <= 1'b0;
             end
         end else if (cap_p) begin
             cap_t <= cap_t + 3'd1;
             if (cap_t == 3'd4 && !cap_v) begin
-                cap_v <= 1'b1; cap_a <= {cap_pa, 1'b0}; cap_d <= cap_pd; cap_w <= 1'b0; cap_p <= 1'b0;
+                cap_v <= 1'b1; cap_a0 <= 1'b0; cap_d <= cap_pd; cap_w <= 1'b0; cap_p <= 1'b0;
             end
         end
         if (cw_pair && cw_ack) cap_v <= 1'b0;
         // block words: pairs to the 2D engine
-        bw_left <= bw_left + (bw_acc ? 5'd8 : 5'd0) - (vm_rvalid && bw_left != 5'd0 ? 5'd1 : 5'd0);
-        if (vm_rvalid && bw_left != 5'd0) begin
+        bw_left <= bw_left + (bw_acc ? 5'd8 : 5'd0) - (vm_rvalid && bw_left != 5'd0 && pf_left == 4'd0 ? 5'd1 : 5'd0);
+        if (VR_PF && vm_rvalid && pf_left != 4'd0) begin    // the prefetch's words (before any later block's)
+            pf_w <= pf_w + 3'd1; pf_left <= pf_left - 4'd1;
+            if (pf_left == 4'd1) lv[pf_way] <= !pf_inv;
+        end
+        if (vm_rvalid && bw_left != 5'd0 && pf_left == 4'd0) begin
             bw_odd <= !bw_odd;
             if (!bw_odd) w0 <= vm_rdata;
             else begin g_rvalid <= 1'b1; w1 <= vm_rdata; end
         end
         if (st == S_IDLE) res_q <= res;
+        if (bw_acc) begin bt0 <= va[19:5]; bt1 <= bt0; end
+        if (hit0) begin c_ack <= 1'b1; r_q <= rb[rbi(1'b0, res[4:2])]; end
+        if (wb_take) begin wb_v <= 1'b1; wb_view <= c_view; wb_off <= c_off[19:2]; wb_d <= c_wdata; c_ack <= 1'b1; end
         if (rst) begin
-            st <= S_IDLE; cap_v <= 1'b0; cap_p <= 1'b0; bw_left <= 5'd0; bw_odd <= 1'b0;
+            st <= S_IDLE; cap_v <= 1'b0; cap_p <= 1'b0; bw_left <= 5'd0; bw_odd <= 1'b0; wb_v <= 1'b0; wb_p <= 1'b0;
+            pf_left <= 4'd0; pf_req <= 1'b0; cur <= 1'b0;
         end else case (st)
             S_IDLE: begin
                 beat <= 3'd0;
                 if (g_req) begin
                     if (g_go) st <= S_GRES;
-                end else if (bw_left != 5'd0) ;
+                end else if (VR_WB && wb_v) st <= S_WRES;                // the buffer first (posted: no port use)
+                else if (VR_WB && c_full) ;                               // waits for the buffer
+                else if (VR_PASS && bw_left != 5'd0 && c_req && !c_ack && c_we && c_be == 4'hF) st <= S_CRES;   // posted: no port use
+                else if (bw_left != 5'd0) ;
+                else if (VR_PF && pf_left != 4'd0) begin if (c_req && !c_ack) st <= S_CRES; end   // (a hit, or it waits there)
                 else if (cap_v && !cw_pair) begin
                     // capture writes go to banks A-D through their LCDC addresses
-                    st <= S_CAP; va <= {cap_a[17:16], cap_a[15:1]}; vwe <= 1'b1; vblk <= 1'b0;
-                    vbe <= cap_w ? 4'b1111 : cap_a[0] ? 4'b1100 : 4'b0011; vwd <= cap_w ? {cap_d, cap_lo} : {cap_d, cap_d};
-                end else if (c_req && !c_ack) st <= S_CRES;
+                    st <= S_CAP; va <= cap_pa; vwe <= 1'b1; vblk <= 1'b0;
+                    vbe <= cap_w ? 4'b1111 : cap_a0 ? 4'b1100 : 4'b0011; vwd <= cap_w ? {cap_d, cap_pd} : {cap_d, cap_d};
+                end else if (c_req && !c_ack && !hit0) st <= S_CRES;
+                else if (VR_PF && pf_req && !post_p) begin
+                    st <= S_PBLK; va <= {lt[pf_way], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; pf_inv <= 1'b0;
+                end
                 else if (sv_req && !sv_ack) begin
                     st <= S_CPU; va <= sv_addr; vwe <= sv_we; vblk <= 1'b0; vbe <= sv_be; vwd <= sv_wdata;
                     vsv <= 1'b1;
                 end
             end
             S_GRES:
-                if (res_q[20]) begin
+                if (VR_PASS && res_q[20] && pr_hit) ;      // its words may still be in the FIFO
+                else if (res_q[20]) begin
                     st <= S_GBLK; va <= res_q[19:2]; vwe <= 1'b0; vblk <= 1'b1;
                 end else if (bw_left == 5'd0) st <= S_GZERO;     // (in order, after the blocks in flight)
             S_CRES:
                 if (!res_q[20]) begin c_ack <= 1'b1; r_q <= 32'd0; st <= S_IDLE; end
-                else if (VR_POST && c_we && c_be == 4'hF) st <= S_POST;
-                else if (VR_RDB && !c_we && rb_v && rb_tag == res_q[19:5]) begin c_ack <= 1'b1; r_q <= rb[res_q[4:2]]; st <= S_IDLE; end
-                else if (post_p) ;
-                else if (VR_RDB && !c_we) begin st <= S_RBLK; va <= {res_q[19:5], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; rb_w <= 3'd0; rb_inv <= 1'b0; end
+                else if (VR_POST && c_we && c_be == 4'hF) begin
+                    if (!(VR_PASS && bt_hit)) st <= S_POST;   // not into a line a block still reads
+                    else if (VR_YIELD && g_req) st <= S_IDLE;
+                end
+                else if (VR_RDB && !c_we && |lhit) begin
+                    c_ack <= 1'b1; r_q <= rb[rbi(lh, res_q[4:2])]; st <= S_IDLE;
+                    cur <= lh;
+                    if (VR_PF && c_dma && pf_want(!lh)) begin pf_req <= 1'b1; lt[!lh] <= l_nx; lv[!lh] <= 1'b0; pf_way <= !lh; end
+                end
+                else if (VR_PF && pf_left != 4'd0) begin if (VR_YIELD && g_req) st <= S_IDLE; end   // the port's words are the prefetch's
+                else if (post_p) begin if (VR_YIELD && g_req) st <= S_IDLE; end
+                else if (VR_RDB && !c_we) begin
+                    st <= S_RBLK; va <= {res_q[19:5], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; rb_w <= 3'd0; rb_inv <= 1'b0;
+                    fw <= VR_PF && !cur; rd_dma <= c_dma; pf_req <= 1'b0;   // (asked again at the fill's end)
+                end
                 else begin
                     st <= S_CPU; va <= res_q[19:2]; vwe <= c_we; vblk <= 1'b0; vbe <= c_be; vwd <= c_wdata;
                     vsv <= 1'b0;
                 end
-            S_POST: if (cw_post && cw_ack) begin c_ack <= 1'b1; st <= S_IDLE; end
+            S_POST: if (cw_post && cw_ack) begin
+                if (wb_p) begin wb_v <= 1'b0; wb_p <= 1'b0; end else c_ack <= 1'b1;
+                st <= S_IDLE;
+            end else if (VR_YIELD && g_req) begin wb_p <= 1'b0; st <= S_IDLE; end   // (wb_v stays: S_WRES again)
+            S_WRES:                                                       // VR_WB: the buffer's word
+                if (!res_q[20]) begin wb_v <= 1'b0; st <= S_IDLE; end    // unmapped: dropped
+                else if (!bt_hit) begin wb_p <= 1'b1; st <= S_POST; end
+                else if (VR_YIELD && g_req) st <= S_IDLE;
             S_RBLK: if (vm_ack) st <= S_RFIL;
             S_RFIL: if (vm_rvalid) begin
-                rb[rb_w] <= vm_rdata; rb_w <= rb_w + 3'd1;
+                rb_w <= rb_w + 3'd1;
                 if (rb_w == res_q[4:2]) r_q <= vm_rdata;
-                if (rb_w == 3'd7) begin c_ack <= 1'b1; rb_tag <= res_q[19:5]; rb_v <= !rb_inv; st <= S_IDLE; end
+                if (VR_CWF ? rb_w == res_q[4:2] : rb_w == 3'd7) c_ack <= 1'b1;
+                if (rb_w == 3'd7) begin
+                    lt[fw] <= res_q[19:5]; lv[fw] <= !rb_inv; st <= S_IDLE;
+                    cur <= fw;
+                    if (VR_PF && rd_dma && pf_want(!fw)) begin pf_req <= 1'b1; lt[!fw] <= l_nx; lv[!fw] <= 1'b0; pf_way <= !fw; end
+                end
             end
             S_GBLK: if (vm_ack) st <= S_IDLE;     // the words follow (bw_left)
+            S_PBLK: if (vm_ack) begin pf_left <= 4'd8; pf_w <= 3'd0; pf_req <= 1'b0; st <= S_IDLE; end   // VR_PF: they follow (pf_left)
             S_GZERO: begin
                 g_rvalid <= 1'b1; w0 <= 32'd0; w1 <= 32'd0; beat <= beat + 3'd1;
                 if (beat == 3'd3) st <= S_IDLE;
@@ -357,16 +464,36 @@ module nds_vram
             end
         endcase
         // VR_RDB: after the state machine, so a write wins over the line's end of fill
-        if (rst || any_w) rb_v <= 1'b0;
-        if (any_w) rb_inv <= 1'b1;
+        if (rst || any_w) begin lv[0] <= 1'b0; lv[1] <= 1'b0; end
+        if (any_w) begin rb_inv <= 1'b1; pf_inv <= 1'b1; end
     end
 
     assign any_w = (cw_valid && cw_ack) || (vm_req && vm_ack && vwe);
+    // the line's one write port (MLAB): a fill's word (S_RFIL) or the prefetch's (VR_PF: never both, a fill
+    // starts only with no prefetch words due); two write statements built it in registers (#2050: +554)
+    wire        rb_pfw = VR_PF && vm_rvalid && pf_left != 4'd0;
+    wire        rb_we  = rb_pfw || (st == S_RFIL && vm_rvalid);
+    wire [3:0]  rb_wa  = rb_pfw ? rbi(pf_way, pf_w) : rbi(fw, rb_w);
+    always_ff @(posedge clk) if (rb_we) rb[rb_wa] <= vm_rdata;
+    logic [6:0]  pd_tgt;         // VR_PDRAIN: the pop count at which the last posted word has left
+    // pops still due: 1..66 while the word waits (cw_fill reads up to 65: the read side pre-loads a word, and a
+    // signed 7-bit test wrapped at 66 and ended the wait at once); 0, or 96 and up after pops overtook the target
+    wire  [6:0]  pd_rem = pd_tgt - cw_pcnt;
+    wire         pd_done = pd_rem == 7'd0 || pd_rem[6:5] == 2'b11;
+    // VR_PDRAIN tracks every word nds_vram puts in the FIFO, capture pairs too (cw_addr is the word
+    // address both ways): the whole-FIFO drain covered a capture word only while a post was pending
+    wire         pd_w = VR_PDRAIN ? cw_valid && cw_ack : cw_post && cw_ack;
+    wire  [19:5] pd_l = VR_PDRAIN ? cw_addr[17:3] : res_q[19:5];
     always_ff @(posedge clk) begin
         post_d <= cw_post && cw_ack;
         if (rst) post_p <= 1'b0;
-        else if (cw_post && cw_ack) post_p <= 1'b1;
-        else if (cw_drained && !post_d) post_p <= 1'b0;
+        else if (pd_w) post_p <= 1'b1;
+        else if (VR_PDRAIN ? pd_done : cw_drained && !post_d) post_p <= 1'b0;
+        if (pd_w) pd_tgt <= cw_pcnt + cw_fill + 7'd1;
+        if (pd_w) begin
+            if (!post_p || pd_l < pr_lo) pr_lo <= pd_l;
+            if (!post_p || pd_l > pr_hi) pr_hi <= pd_l;
+        end
     end
 
     // the capture address is a halfword index in a 128 KiB bank: byte = {bank, idx, 0}
@@ -377,7 +504,7 @@ module nds_vram
         if (!rst && st == S_CPU && vwe && (vsv ? (sv_wdata != vwd || sv_be != vbe) : (c_wdata != vwd || c_be != vbe)))
             $display("nds_vram: ERROR: the %s port's write data changed before the write (%m) at %0t", vsv ? "save" : "CPU", $time);
 `endif
-    assign vm_req   = st == S_GBLK || st == S_CAP || st == S_CPU || st == S_RBLK;
+    assign vm_req   = st == S_GBLK || st == S_CAP || st == S_CPU || st == S_RBLK || st == S_PBLK;
     assign vm_we    = vwe;
     assign vm_blk   = vblk;
     assign vm_addr  = va;
@@ -386,8 +513,8 @@ module nds_vram
     // port (checked above in simulation; nds_cart's save port stalls its SPI
     // and sets its fields only before a request). vwd/vbe remain only for
     // that check (synthesis drops them).
-    assign vm_be    = st == S_CAP ? (cap_w ? 4'b1111 : cap_a[0] ? 4'b1100 : 4'b0011) : vsv ? sv_be : c_be;
-    assign vm_wdata = st == S_CAP ? (cap_w ? {cap_d, cap_lo} : {cap_d, cap_d}) : vsv ? sv_wdata : c_wdata;
+    assign vm_be    = st == S_CAP ? (cap_w ? 4'b1111 : cap_a0 ? 4'b1100 : 4'b0011) : vsv ? sv_be : c_be;
+    assign vm_wdata = st == S_CAP ? (cap_w ? {cap_d, cap_pd} : {cap_d, cap_d}) : vsv ? sv_wdata : c_wdata;
 
 
     assign vramstat = {vramcnt[31] && vramcnt[26:24] == 3'd2, vramcnt[23] && vramcnt[18:16] == 3'd2};

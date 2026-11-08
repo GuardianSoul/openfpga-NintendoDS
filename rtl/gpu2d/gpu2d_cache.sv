@@ -72,7 +72,12 @@ module gpu2d_cache
     // the rest. The scrubber walks words (scrub is IDXW + 2 bits) and clears
     // a word's copy of an older generation. Needs GW + tag bits <= 16 (the
     // ext-palette caches with VLO)
-    parameter bit TAG_DATA = 0
+    parameter bit TAG_DATA = 0,
+    // HALF: q is the 16-bit halfword a_half of the word (in q[15:0], the rest
+    // 0), read from the data RAM as two byte lanes of mixed width (written
+    // 32 bits, read 8: gpu2d_ram_w32r8), so the owner needs no 4:1 halfword
+    // select; the same M10Ks as the 64-bit RAM. Not with TAG_DATA
+    parameter bit HALF = 0
 ) (
     input  logic        clk,
     input  logic        idle,        // owner idle: scrub
@@ -83,6 +88,7 @@ module gpu2d_cache
     input  logic        hold,
     input  blk_t        a_blk,       // address for the next read (when !hold)
     input  logic [1:0]  a_word,
+    input  logic [1:0]  a_half,      // HALF: the halfword of the word (latched with it)
     output logic [63:0] q,
     output logic        hit,
     output blk_t        cur_blk,     // block of the latched address (fill request)
@@ -101,9 +107,9 @@ module gpu2d_cache
     endfunction
 
     blk_t       q_blk;
-    logic [1:0] q_word;
+    logic [1:0] q_word, q_half;
     always_ff @(posedge clk)
-        if (!hold) begin q_blk <= a_blk; q_word <= a_word; end
+        if (!hold) begin q_blk <= a_blk; q_word <= a_word; q_half <= a_half; end
     blk_t r_blk;
     assign r_blk = hold ? q_blk  : a_blk;
     // The index folds the next block-address bits in: BG map bases are 2 KB
@@ -135,8 +141,9 @@ module gpu2d_cache
     logic [IDXW-1:0] r_idx, r_bidx;
     assign r_bidx = idx_of(r_blk);
     assign r_idx = idle ? scrub[IDXW-1:0] : r_bidx;
-    logic [1:0] r_word;
+    logic [1:0] r_word, r_half;
     assign r_word = hold ? q_word : a_word;
+    assign r_half = hold ? q_half : a_half;
     logic [IDXW-1:0] fidx;
     assign fidx = idx_of(fill_blk);
 
@@ -144,6 +151,7 @@ module gpu2d_cache
     generate if (TAG_DATA) begin : g_td
         // synthesis translate_off
         initial if (GW + TW > 16) $fatal(1, "gpu2d_cache: TAG_DATA needs GW + TW <= 16, not %0d", GW + TW);
+        initial if (HALF) $fatal(1, "gpu2d_cache: HALF is not for TAG_DATA");
         // synthesis translate_on
         logic [79:0] d_q, d_wd;
         logic        d_we, s_we;
@@ -160,9 +168,21 @@ module gpu2d_cache
             .raddr(idle ? scrub : {r_bidx, r_word}), .rdata(d_q));
         assign q = d_q[63:0];
     end else begin : g_tt
-        gpu2d_ram #(.W(64), .AW(IDXW+2)) u_data (
-            .clk, .we(fill_we), .waddr({fidx, fill_beat}), .wdata(fill_data),
-            .raddr({r_bidx, r_word}), .rdata(q));
+        if (HALF) begin : g_h
+            // lane 0: bytes 0, 2, 4, 6 of the word; lane 1: bytes 1, 3, 5, 7
+            logic [7:0] q0, q1;
+            gpu2d_ram_w32r8 #(.AW(IDXW+2)) u_d0 (.clk, .we(fill_we), .waddr({fidx, fill_beat}),
+                .wdata({fill_data[55:48], fill_data[39:32], fill_data[23:16], fill_data[7:0]}),
+                .raddr({r_bidx, r_word, r_half}), .rdata(q0));
+            gpu2d_ram_w32r8 #(.AW(IDXW+2)) u_d1 (.clk, .we(fill_we), .waddr({fidx, fill_beat}),
+                .wdata({fill_data[63:56], fill_data[47:40], fill_data[31:24], fill_data[15:8]}),
+                .raddr({r_bidx, r_word, r_half}), .rdata(q1));
+            assign q = {48'd0, q1, q0};
+        end else begin : g_w
+            gpu2d_ram #(.W(64), .AW(IDXW+2)) u_data (
+                .clk, .we(fill_we), .waddr({fidx, fill_beat}), .wdata(fill_data),
+                .raddr({r_bidx, r_word}), .rdata(q));
+        end
 
         logic            tag_we;
         logic [IDXW-1:0] tag_wa;

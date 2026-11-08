@@ -22,6 +22,15 @@ The runner uses the interpreter CPU and the software renderer, boots with the
 real BIOS and firmware, and direct-boots the cartridge. It runs at roughly
 150–250 frames per second.
 
+Save chip: melonDS's game list picks it. `--save-type N` (melonDS
+SaveMemType: 1 EEPROM 512 B, 2 EEPROM 8 KiB, 3 EEPROM 64 KiB, 5-7 FLASH, 8-10
+NAND) overrides the list. A game the list marks NAND (8-10) whose header has
+no NAND save area (0x96 = 0) gets EEPROM 8 KiB, as the core's savelist does
+(NAND counts as not listed); stock melonDS emulates a NAND cart there, whose
+save area then starts at ROM address 0, so every ROM read returns FF and the
+game fails to boot. 130 list entries are NAND; Electroplankton (ATIE, ATIJ,
+ATIP) is one: it boots in the census only with this rule.
+
 ## Files
 
 | File | Purpose |

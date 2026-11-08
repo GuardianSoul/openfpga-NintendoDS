@@ -1511,8 +1511,14 @@ module arm_core import arm_pkg::*; #(
   always_comb begin
     if (SLOW && ROT_DSP) x_rot = rot_p[31:0] | rot_p[63:32];
     else begin
-      x_rot = (e2_b >> e2_rot) | (e2_b << (6'd32 - {1'b0, e2_rot}));
-      if (e2_rot == 5'd0) x_rot = e2_b;
+      // five rotate stages (as arm7_ds): the two variable shifts and the rotate-0 case
+      // mapped to 308 LEs of muxes in #1685 (ShiftLeft3/ShiftRight2); docs/space-cg.md
+      x_rot = e2_b;
+      if (e2_rot[4]) x_rot = {x_rot[15:0], x_rot[31:16]};
+      if (e2_rot[3]) x_rot = {x_rot[7:0],  x_rot[31:8]};
+      if (e2_rot[2]) x_rot = {x_rot[3:0],  x_rot[31:4]};
+      if (e2_rot[1]) x_rot = {x_rot[1:0],  x_rot[31:2]};
+      if (e2_rot[0]) x_rot = {x_rot[0],    x_rot[31:1]};
     end
     for (int i = 0; i < 32; i++)
       sh_out[i] = e2_keep[i] ? x_rot[i] : ((e2_fasr & e2_b[31]) | (e2_frrx & cfwd & (i == 31)));
@@ -1540,15 +1546,16 @@ module arm_core import arm_pkg::*; #(
   // Adder operands for E3, chosen and inverted here so E3 starts at the
   // carry chain: E3 computes x + y + ci (y is replaced there by the product
   // for the uops that use it, which only add)
-  logic [31:0] e2_x, e2_y, e2_av;
+  // (x itself is not registered: it is e3_b for RSB/RSC/QADD/QSUB, else opa, chosen in E3 by e3_swap)
+  logic [31:0] e2_y, e2_av;
   always_comb begin
     e2_av = (e2.a_sel == OA_ZERO) ? 32'h0 : e2_a;
     case (e2.alu)
-      AL_SUB, AL_CMP, AL_SBC: begin e2_x = e2_av;  e2_y = ~sh_out; end
-      AL_RSB, AL_RSC:         begin e2_x = sh_out; e2_y = ~e2_av;  end
-      AL_QADD:                begin e2_x = sh_out; e2_y = e2_ad;   end
-      AL_QSUB:                begin e2_x = sh_out; e2_y = ~e2_ad;  end
-      default:                begin e2_x = e2_av;  e2_y = sh_out;  end
+      AL_SUB, AL_CMP, AL_SBC: e2_y = ~sh_out;
+      AL_RSB, AL_RSC:         e2_y = ~e2_av;
+      AL_QADD:                e2_y = e2_ad;
+      AL_QSUB:                e2_y = ~e2_ad;
+      default:                e2_y = sh_out;
     endcase
   end
 
@@ -1586,7 +1593,8 @@ module arm_core import arm_pkg::*; #(
   );
 
   // ---------------------------------------------------------------- E3 (te)
-  logic [31:0] e3_a, e3_b, e3_c, e3_x, e3_y;
+  logic [31:0] e3_a, e3_b, e3_c, e3_y;
+  logic        e3_swap;             // the adder's x is e3_b (RSB/RSC/QADD/QSUB), else opa (was a 32-bit copy, e3_x)
   logic        e3_shc, e3_shcold, e3_qsat;
 
   logic [31:0] opa, opb, res, maddr, psr_val, cur_cpsr;
@@ -1617,7 +1625,7 @@ module arm_core import arm_pkg::*; #(
 
     // One adder computes x + y + ci (operands prepared in E2); the carry-in
     // rides in an extra low bit so it stays on the same carry chain
-    x = e3_x;
+    x = e3_swap ? e3_b : opa;
     y = (e3.b_sel == OB_SH) ? e3_y : opb;
     alu_arith = 1'b1;
     case (e3.alu)
@@ -2076,7 +2084,7 @@ module arm_core import arm_pkg::*; #(
       e3 <= e2;
       if (wb_kill || (solo && kill_e)) e3.valid <= 1'b0;
       e3_a <= e2_a;
-      e3_x <= e2_x;
+      e3_swap <= e2.alu == AL_RSB || e2.alu == AL_RSC || e2.alu == AL_QADD || e2.alu == AL_QSUB;
       e3_y <= e2_y;
       e3_b <= sh_out;
       e3_c <= e2_c;
@@ -2084,16 +2092,13 @@ module arm_core import arm_pkg::*; #(
         if (e2_lfc) e3_c <= lw_val;
         if (e2_lfa) begin
           e3_a <= lw_val;
-          case (e2.alu)
-            AL_RSB, AL_RSC: e3_y <= ~lw_val;
-            default:        e3_x <= lw_val;
-          endcase
+          if (e2.alu == AL_RSB || e2.alu == AL_RSC) e3_y <= ~lw_val;
         end
         if (e2_lfb) begin
           e3_b <= lw_val;
           case (e2.alu)
             AL_SUB, AL_CMP, AL_SBC: e3_y <= ~lw_val;
-            AL_RSB, AL_RSC:         e3_x <= lw_val;
+            AL_RSB, AL_RSC:         ;                   // (x is e3_b)
             default:                e3_y <= lw_val;
           endcase
         end
@@ -2101,16 +2106,13 @@ module arm_core import arm_pkg::*; #(
       if (D1 && e3_exec) begin
         if (e2_f1a) begin
           e3_a <= res;
-          case (e2.alu)
-            AL_RSB, AL_RSC: e3_y <= ~res;
-            default:        e3_x <= res;
-          endcase
+          if (e2.alu == AL_RSB || e2.alu == AL_RSC) e3_y <= ~res;
         end
         if (e2_f1b) begin
           e3_b <= res;
           case (e2.alu)
             AL_SUB, AL_CMP, AL_SBC: e3_y <= ~res;
-            AL_RSB, AL_RSC:         e3_x <= res;
+            AL_RSB, AL_RSC:         ;
             default:                e3_y <= res;
           endcase
         end

@@ -70,7 +70,7 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     // ---------------- DS raster (from the DS's own line starts) ----------------
     reg [12:0] hc = 0;                      // clk_sys clocks into the DS line (0..4259)
     reg [8:0] dl = 0;
-    reg top_a = 0;                          // engine A is the top screen this frame
+    reg top_a = 0;                          // engine A is the top screen at line 0 (NDS_SWAP_LINE0_MUT: the frame's)
     reg [1:0] gen_layout = 0;
     always @(posedge clk) begin
         if (line_start) begin hc <= 0; dl <= vcount; end
@@ -82,10 +82,24 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     assign frame_pulse = line_start && vcount == 0;
 
     // ---------------- pixels in ----------------
-    // px_eng: 0 engine A, 1 engine B (nds_disp). POWCNT1 bit 15 (top_a) puts
-    // engine A on the upper screen; #72/#87 had the mapping inverted
-    wire bot_px = px_eng == top_a;
-    wire live_eng = gen_layout == 2'd2 ? top_a : !top_a;     // the engine the live screen shows
+    // px_eng: 0 engine A, 1 engine B (nds_disp). POWCNT1 bit 15 puts engine A
+    // on the upper screen (#72/#87 had the mapping inverted). It applies per
+    // scanline, as on the DS (hwref swapline v1: a write in line n routes line
+    // n and the lines after it; one in line 0 the whole frame): a line takes
+    // the bit as it is at its first pixel (nds_disp draws line n in line n's
+    // HBlank, both engines' pixels tagged px_line) and keeps it for that line
+    // on both screens (the live one and the SDRAM bottom buffer)
+    reg [7:0] sw_line = 8'hFF;              // the line whose bit is held
+    reg sw_held = 0;
+    wire sw_new = px_valid && px_line != sw_line;
+`ifdef NDS_SWAP_LINE0_MUT
+    wire top_l = top_a;                     // (mutation: the frame's bit, latched at line 0, as before)
+`else
+    wire top_l = sw_new ? swap : sw_held;
+`endif
+    always @(posedge clk) if (sw_new) begin sw_line <= px_line; sw_held <= swap; end
+    wire bot_px = px_eng == top_l;
+    wire live_eng = gen_layout == 2'd2 ? top_l : !top_l;     // the engine the live screen shows
     wire [7:0] dx = px_x - cur_x, dy = px_line - cur_y;
     wire near_x = dx < 6 || dx > 250, near_y = dy < 6 || dy > 250;
     wire cursor = touch && bot_px && ((px_x == cur_x && near_y) || (px_line == cur_y && near_x));
