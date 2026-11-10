@@ -291,7 +291,8 @@ int main(int argc, char** argv)
     }
 
     Vnds_top* t = new Vnds_top;
-    t->clk = 0; t->rst = 1; t->go = 0; t->rom_size = romsize;
+    t->clk = 0; t->clk_cpu = 0; t->clk_2x = 0;
+    t->rst = 1; t->go = 0; t->rom_size = romsize;
     t->mem_dirty = 0;       // the memory models start zeroed, as melonDS's
     t->sv_loaded = 0; t->save_info = 0;
     if (!sav_in.empty())
@@ -738,8 +739,12 @@ int main(int argc, char** argv)
         {
             u64 t0 = cyc * 24;
             struct Ev { u64 at; int which; int v; };
-            Ev ev[8]; int n = 0;
+            Ev ev[12]; int n = 0;
             ev[n++] = {t0, 0, 1}; ev[n++] = {t0 + 12, 0, 0};
+#if DS_CLK2X
+            ev[n++] = {t0, 2, 1}; ev[n++] = {t0 + 6, 2, 0};
+            ev[n++] = {t0 + 12, 2, 1}; ev[n++] = {t0 + 18, 2, 0};
+#endif
             for (u64 k = (t0 >= 5 ? (t0 - 5) / 18 : 0); 18 * k + 5 < t0 + 24; k++)
             {
                 u64 r = 18 * k + 5;
@@ -747,15 +752,23 @@ int main(int argc, char** argv)
                 if (r + 9 >= t0 && r + 9 < t0 + 24) ev[n++] = {r + 9, 1, 0};
             }
             std::sort(ev, ev + n, [](const Ev& a, const Ev& b) { return a.at < b.at; });
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < n;)
             {
-                if (ev[i].which == 0) t->clk = ev[i].v; else t->clk_cpu = ev[i].v;
-                Verilated::threadContextp()->time(1 + ev[i].at);
+                const u64 at = ev[i].at;
+                bool cpu_rise = false;
+                // Apply coincident edges together, as on the board.
+                do {
+                    if (ev[i].which == 0) t->clk = ev[i].v;
+                    else if (ev[i].which == 1) { t->clk_cpu = ev[i].v; cpu_rise |= ev[i].v != 0; }
+                    else t->clk_2x = ev[i].v;
+                    i++;
+                } while (i < n && ev[i].at == at);
+                Verilated::threadContextp()->time(1 + at);
                 t->eval();
 #ifdef DS_FST
-                if (fst && cyc >= fst_from && cyc < fst_to) fst->dump(ev[i].at);
+                if (fst && cyc >= fst_from && cyc < fst_to) fst->dump(at);
 #endif
-                if (ev[i].which == 1 && ev[i].v == 1) observe_dbg();
+                if (cpu_rise) observe_dbg();
             }
 #ifdef DS_FST
             if (fst && cyc + 1 == fst_to) fst->close();

@@ -428,8 +428,10 @@ module arm9_mem import arm_pkg::*; #(
   end
   assign cprb_q = cprb_v[cprb_ra] ? cprb[cprb_ra] : 32'h0;
 `ifndef SYNTHESIS
+  // As with the fetch-match checks below, wait for the first local reset:
+  // CPU_FAST's reset synchronizer has not asserted it on the first edge.
   always_ff @(posedge clk)
-    if (!rst && w_cprb_ra !== ((w_crn == 4'd6) ? {1'b0, w_crm[2:0]} : (w_crn == 4'd9) ? {2'b10, w_crm != 4'd1, w_opc2[0]} : 4'd12))
+    if (chk_on && !rst && w_cprb_ra !== ((w_crn == 4'd6) ? {1'b0, w_crm[2:0]} : (w_crn == 4'd9) ? {2'b10, w_crm != 4'd1, w_opc2[0]} : 4'd12))
       $error("arm9_mem: registered cprb address %h, w_cpop's %h", w_cprb_ra, w_cpop);
 `endif
   always_ff @(posedge clk) begin
