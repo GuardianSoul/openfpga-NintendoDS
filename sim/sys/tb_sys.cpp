@@ -223,9 +223,18 @@ static void test_sqrt(int n) {
             else if (i < 128) { u64 s = (u64)(0xFFFFFFFFu - (i - 64)); v = s * s + (i & 1 ? 1 : -1); }
             else { u64 s = r64() >> rnd(33); v = s * s + rnd(3) - 1; }
             if (!mode) v &= 0xFFFFFFFF;
-            io(0, 0x2B8, true, 0xF, (u32)v); io(0, 0x2BC, true, 0xF, (u32)(v >> 32));
+            // In 32-bit mode, the high parameter word must be ignored.
+            io(0, 0x2B8, true, 0xF, (u32)v);
+            io(0, 0x2BC, true, 0xF, mode ? (u32)(v >> 32) : 0xA5A5A5A5u);
             idle(26);
-            io(0, 0x2B4, false); io(0, 0x2B0, false);
+            u32 root = io(0, 0x2B4, false);
+            // Independent of the RTL and golden recurrence: the root must
+            // bracket v between consecutive squares. The next square is
+            // beyond u64 only for the largest possible u32 root.
+            u64 square = u64(root) * root, next = u64(root) + 1;
+            CHECK(square <= v && (root == 0xFFFFFFFFu || v < next * next),
+                  "sqrt floor bound: n=%016llx root=%08x", (unsigned long long)v, root);
+            io(0, 0x2B0, false);
         }
     }
 }
