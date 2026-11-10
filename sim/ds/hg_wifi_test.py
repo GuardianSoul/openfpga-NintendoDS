@@ -64,7 +64,7 @@ def build(obj, params):
     mk = (ROOT / 'sim/ds/ds.mk').read_text()
     rtl = mk.split('DS_RTL   :=')[1].split('DS_TB')[0].replace('\\', ' ').split()
     cmd = [str(TOOLS / 'verilator'), '--cc', '--exe', '--build', '-j', '8', '-O3', '--x-assign', 'fast',
-           '--x-initial', 'fast', '--savable', '-Wno-fatal', '-Wno-WIDTHEXPAND', '-Wno-WIDTHTRUNC', '-Wno-UNUSEDSIGNAL',
+           '--x-initial', 'fast', '--savable', str(ROOT / 'sim/ds/ds_config.vlt'), '-Wno-fatal', '-Wno-WIDTHEXPAND', '-Wno-WIDTHTRUNC', '-Wno-UNUSEDSIGNAL',
            '-Wno-CASEINCOMPLETE', '--top-module', 'nds_top', *params, '--Mdir', str(obj), '-CFLAGS', '-std=c++17 -O2',
            *[str(ROOT / f) for f in rtl], str(ROOT / 'sim/ds/tb_ds.cpp')]
     r = subprocess.run(cmd, capture_output=True, text=True)

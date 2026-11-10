@@ -83,7 +83,7 @@ def run(i, m, frames):
     srcs = [str(d / r) if r.startswith('rtl/ds/') else str(ROOT / r) for r in rtl]
     obj = d / 'obj'
     cmd = [str(TOOLS / 'verilator'), '--cc', '--exe', '--build', '-j', '4', '-O3', '--x-assign', 'fast',
-           '--x-initial', 'fast', '--savable', '-Wno-fatal', '-Wno-WIDTHEXPAND', '-Wno-WIDTHTRUNC', '-Wno-UNUSEDSIGNAL',
+           '--x-initial', 'fast', '--savable', str(ROOT / 'sim/ds/ds_config.vlt'), '-Wno-fatal', '-Wno-WIDTHEXPAND', '-Wno-WIDTHTRUNC', '-Wno-UNUSEDSIGNAL',
            '-Wno-CASEINCOMPLETE', '--top-module', 'nds_top', '--Mdir', str(obj), '-CFLAGS', '-std=c++17 -O2',
            *srcs, str(ROOT / 'sim/ds/tb_ds.cpp')]
     r = subprocess.run(cmd, capture_output=True, text=True)

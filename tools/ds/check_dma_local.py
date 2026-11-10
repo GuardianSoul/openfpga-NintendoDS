@@ -58,7 +58,7 @@ def main():
     if rc:
         sys.exit('ROM build failed; see ' + str(out / 'rom-build.log'))
     sources = list((ROOT / 'rtl').rglob('*.sv')) + [ROOT / p for p in
-               ('sim/ds/tb_ds.cpp', 'sim/ds/ds.mk', 'tools/ds/pocket_params.py',
+               ('sim/ds/tb_ds.cpp', 'sim/ds/ds.mk', 'sim/ds/ds_config.vlt', 'tools/ds/pocket_params.py',
                 'sw/tests/tests.mk', 'build/ds-tests/dmalocal.nds', 'build/ds-tests/dmalocal_m7.nds')]
     hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     (out / 'input-sha256.json').write_text(json.dumps(hashes, indent=2) + '\n')

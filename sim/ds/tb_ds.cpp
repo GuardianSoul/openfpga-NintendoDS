@@ -26,6 +26,7 @@
 #define DS_CLK2X 0
 #endif
 #include "Vnds_top.h"
+#include "Vnds_top___024root.h"
 #include "verilated.h"
 #include "verilated_save.h"
 #include "wifi_model.h"
@@ -586,7 +587,13 @@ int main(int argc, char** argv)
         }
         else if (pm.state == 2)
         {
-            t->mr_rvalid = 1; t->mr_rdata = rd32(mram, (pm.addr & (pm.n == 8 ? 0x7FFFE0 : 0x7FFFF0)) + pm.k * 4);
+            // Match nds_psram's wrapped burst order. With CWF enabled, an
+            // eight-word fill starts at the missed word; four-word reads
+            // remain aligned. Derive CWF from the actual compiled core.
+            constexpr bool cwf = (Vnds_top___024root::nds_top__DOT__A9_OPT >> 30) & 1;
+            const u32 word = (pm.n == 8 && cwf) ? ((pm.addr >> 2) + pm.k) & 7 : pm.k;
+            const u32 addr = (pm.addr & (pm.n == 8 ? 0x7FFFE0 : 0x7FFFF0)) + word * 4;
+            t->mr_rvalid = 1; t->mr_rdata = rd32(mram, addr);
             if (++pm.k == pm.n) pm.state = 0;
         }
         else if (pm.state == 0) {}
