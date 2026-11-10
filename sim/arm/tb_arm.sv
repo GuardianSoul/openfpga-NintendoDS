@@ -1,7 +1,9 @@
 // Testbench for rtl/arm/arm_cpu.sv (Verilator --binary and Icarus).
 //
-// Each context has its own flat memory: 16 regions (address bits 27:24) of
-// 256 KB (bits 17:2), loaded from a $readmemh image. Plusargs:
+// Each context has its own memory: 16 regions (address bits 27:24) of
+// 256 KB, except main RAM (region 2), which has all 4 MB and its mirrors.
+// Main RAM beyond the first 256 KB uses additional image slots so existing
+// low-address images retain their indices. Loaded from $readmemh. Plusargs:
 //   +img0=<hex> +img1=<hex>        memory images (sim/arm/tools/mkhex.py)
 //   +pc0=<hex>  +pc1=<hex>         reset PC per context
 //   +run=<0..3>                    context enable mask
@@ -26,10 +28,14 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
   logic clk = 1'b0;
   logic rst = 1'b1;
 
-  logic [31:0] mem0 [0:(1<<20)-1];
-  logic [31:0] mem1 [0:(1<<20)-1];
+  logic [31:0] mem0 [0:(1<<21)-1];
+  logic [31:0] mem1 [0:(1<<21)-1];
 
   function automatic int unsigned midx(input logic [31:0] a);
+    // swflush's data at 02040000 must not overwrite code at 02000000.
+    // Bit22 is still ignored: 02440000 is the uncached mirror of 02040000.
+    if (a[27:24] == 4'h2 && a[21:18] != 0)
+      return 32'h00100000 | {12'h0, a[21:2]};
     return {12'h0, a[27:24], a[17:2]};
   endfunction
 
@@ -124,7 +130,7 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
   initial begin
     int v;
     logic [31:0] hv;
-    for (int i = 0; i < (1<<20); i++) begin
+    for (int i = 0; i < (1<<21); i++) begin
       mem0[i] = 32'h0;
       mem1[i] = 32'h0;
     end

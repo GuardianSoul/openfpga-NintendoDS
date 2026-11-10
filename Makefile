@@ -148,11 +148,14 @@ $(B)/tb_arm.vvp: $(ARM_RTL) $(ARM_TB)
 ASFLAGS_V4 := --target=armv4t-none-eabi -c
 ASFLAGS_V5 := --target=armv5te-none-eabi -c
 
-arm-images: $(B)/exc.hex $(B)/hazard0.hex $(B)/hazard1.hex $(B)/cache.hex \
+ARM_IMAGES := $(B)/exc.hex $(B)/hazard0.hex $(B)/hazard1.hex $(B)/cache.hex \
             $(B)/bpred7.hex $(B)/bpred9.hex $(B)/halt.hex \
             $(B)/hazard_c.hex $(B)/rockwrestler_c.hex $(B)/jsmolka_thumb9c.hex \
             $(B)/stress_c.hex $(B)/stress1.hex $(B)/jsmolka_arm.hex $(B)/jsmolka_thumb.hex \
             $(B)/armwrestler.hex $(B)/armwrestler.hooks $(B)/rockwrestler.hex $(B)/lzcopy.hex $(B)/swflush.hex $(B)/evict.hex $(B)/ldruse2.hex $(B)/hum.hex
+
+arm-images: $(ARM_IMAGES)
+$(filter %.hex,$(ARM_IMAGES)): sim/arm/tools/mkhex.py
 
 $(B)/%.o: sim/arm/tests/%.s sim/arm/tests/cp15.inc
 	@mkdir -p $(B)

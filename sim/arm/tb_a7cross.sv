@@ -37,7 +37,7 @@ module tb_a7cross;
   logic [3:0]  cx_be, cf_be;
   logic [31:0] cx_wdata, cx_rdata, cf_addr, cf_wdata, cf_rdata;
   generate if (PORT == 0) begin : g_min
-    nds_arm7_port_min #(.BOOT_FAB(1)) u_p (.clk(cclk), .rst(c_rst), .wramcnt(2'd3), .biosprot(16'h1204),
+    nds_arm7_port_min #(.BOOT_FAB(1)) u_p (.clk(cclk), .rst(c_rst), .wramcnt(2'd3),
       .i_req, .i_addr, .i_rdata, .i_ok, .d_req, .d_we, .d_be, .d_addr, .d_wdata, .d_rdata, .d_ok,
       .ib_addr(), .i_boot_q(32'd0), .db_addr(), .d_boot(), .d_boot_q(32'd0),
       .x_req(cx_req), .x_we(cx_we), .x_addr(cx_addr), .x_be(cx_be), .x_wdata(cx_wdata),
@@ -45,7 +45,7 @@ module tb_a7cross;
       .f_req(cf_req), .f_we(cf_we), .f_addr(cf_addr), .f_be(cf_be), .f_wdata(cf_wdata),
       .f_ack(cf_ack), .f_rdata(cf_rdata), .wr_mon(1'b0), .wr_addr(32'd0));
   end else begin : g_c
-    nds_arm7_port #(.BOOT_FAB(1)) u_p (.clk(cclk), .rst(c_rst), .wramcnt(2'd3), .biosprot(16'h1204),
+    nds_arm7_port #(.BOOT_FAB(1)) u_p (.clk(cclk), .rst(c_rst), .wramcnt(2'd3),
       .i_req, .i_addr, .i_rdata, .i_ok, .d_req, .d_we, .d_be, .d_addr, .d_wdata, .d_rdata, .d_ok,
       .ib_addr(), .i_boot_q(32'd0), .db_addr(), .d_boot(), .d_boot_q(32'd0),
       .x_req(cx_req), .x_we(cx_we), .x_addr(cx_addr), .x_be(cx_be), .x_wdata(cx_wdata),
