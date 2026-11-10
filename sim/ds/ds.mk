@@ -29,6 +29,15 @@ DS_TB    := $(DS_B)/obj/Vnds_top
 DS_VFLAGS := --cc --exe --build -j 8 -O3 --x-assign fast --x-initial fast --threads $(DS_THREADS) --savable sim/ds/ds_config.vlt \
              -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDSIGNAL -Wno-CASEINCOMPLETE \
              --top-module nds_top -GSOUND=$(DS_SOUND) -GGPU3D=$(DS_3D) -GCPU_FAST=$(DS_FAST) -GARM7_CACHE=$(DS_A7C) -GGX_USORT=$(DS_USORT) $(DS_G)
+DS_CONFIG := $(DS_B)/verilator-config.txt
+# A reused DS_B must rebuild when command-line parameters or clock drive
+# change. Keep the stamp's mtime when the effective settings are identical.
+.PHONY: ds-config-force
+$(DS_CONFIG): ds-config-force
+	@mkdir -p $(DS_B)
+	@set -e; tmp='$@.tmp.'$$$$; trap 'rm -f "$$tmp"' 0; \
+	  printf '%s\n' '$(subst ','"'"',$(VERILATOR))' '$(subst ','"'"',$(DS_VFLAGS))' 'DS_FAST=$(DS_FAST)' 'DS_CLK2X=$(DS_CLK2X)' > "$$tmp"; \
+	  if cmp -s "$$tmp" '$@'; then rm -f "$$tmp"; else mv -f "$$tmp" '$@'; fi
 BOOT_OBJS := $(BOOT_B)/boot9.o $(BOOT_B)/boot7.o $(BOOT_B)/key1.o $(BOOT_B)/import.o $(BOOT_B)/savelist.o
 
 .PHONY: bootrom ds-sim test-ds test-ds-pocket
@@ -59,7 +68,7 @@ bootrom-check: $(BOOT_B)/bootrom.bin
 bootrom-update: $(BOOT_B)/bootrom.bin
 	cp $< sw/boot/bootrom.bin
 
-$(DS_TB): $(DS_RTL) sim/ds/tb_ds.cpp sim/ds/ds.mk sim/ds/ds_config.vlt
+$(DS_TB): $(DS_RTL) sim/ds/tb_ds.cpp sim/ds/ds.mk sim/ds/ds_config.vlt $(DS_CONFIG)
 	@mkdir -p $(DS_B)/obj
 	$(VERILATOR) $(DS_VFLAGS) --Mdir $(DS_B)/obj -CFLAGS "-std=c++17 -O2 -DCPU_FAST=$(DS_FAST) -DDS_CLK2X=$(DS_CLK2X)" \
 	  $(DS_RTL) $(abspath sim/ds/tb_ds.cpp) >$(DS_B)/verilator.log 2>&1 \
@@ -69,7 +78,7 @@ ds-sim: $(DS_TB) bootrom
 
 # the same with FST waveforms (--fst F --fst-from C --fst-to C)
 DS_TBF := $(DS_B)/objf/Vnds_top
-$(DS_TBF): $(DS_RTL) sim/ds/tb_ds.cpp sim/ds/ds.mk sim/ds/ds_config.vlt
+$(DS_TBF): $(DS_RTL) sim/ds/tb_ds.cpp sim/ds/ds.mk sim/ds/ds_config.vlt $(DS_CONFIG)
 	@mkdir -p $(DS_B)/objf
 	$(VERILATOR) $(DS_VFLAGS) --trace-fst --Mdir $(DS_B)/objf -CFLAGS "-std=c++17 -O2 -DDS_FST -DCPU_FAST=$(DS_FAST) -DDS_CLK2X=$(DS_CLK2X)" \
 	  $(DS_RTL) $(abspath sim/ds/tb_ds.cpp) >$(DS_B)/verilator-fst.log 2>&1 \
@@ -78,7 +87,7 @@ ds-sim-fst: $(DS_TBF) bootrom
 
 # the same with the ARM9 main-RAM shadow check (sim/ds/ds_memcheck.sv, run with +memcheck)
 DS_TBC := $(DS_B)/objc/Vnds_top
-$(DS_TBC): $(DS_RTL) sim/ds/tb_ds.cpp sim/ds/ds_memcheck.sv sim/ds/ds.mk sim/ds/ds_config.vlt
+$(DS_TBC): $(DS_RTL) sim/ds/tb_ds.cpp sim/ds/ds_memcheck.sv sim/ds/ds.mk sim/ds/ds_config.vlt $(DS_CONFIG)
 	@mkdir -p $(DS_B)/objc
 	$(VERILATOR) $(DS_VFLAGS) --Mdir $(DS_B)/objc -CFLAGS "-std=c++17 -O2 -DCPU_FAST=$(DS_FAST) -DDS_CLK2X=$(DS_CLK2X)" \
 	  $(DS_RTL) sim/ds/ds_memcheck.sv $(abspath sim/ds/tb_ds.cpp) >$(DS_B)/verilator-chk.log 2>&1 \
