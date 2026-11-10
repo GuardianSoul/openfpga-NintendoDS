@@ -143,6 +143,10 @@ echo "PROJECT_REVISION = \"$top\"" > $top.qpf
   case "$qmode" in *d*) echo 'set_global_assignment -name DSP_BLOCK_BALANCING "DSP BLOCKS"' ;; esac
   case "$qmode" in *e*) echo 'set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON' ;; esac
   case "$qmode" in *u*) echo 'set_global_assignment -name AUTO_RAM_TO_LCELL_CONVERSION OFF' ;; esac
+  # Preserve all existing timing requirements; spend more effort routing short hold paths.
+  echo 'set_global_assignment -name ROUTER_TIMING_OPTIMIZATION_LEVEL MAXIMUM'
+  # Auto Fit may skip timing optimizations; complete the standard optimization flow.
+  echo 'set_global_assignment -name FITTER_EFFORT "STANDARD FIT"'
   # "q": timing closure when the chip is nearly full: physical synthesis
   # (combinational resynthesis, register retiming and duplication) and the
   # router's maximum timing effort; costs a little area

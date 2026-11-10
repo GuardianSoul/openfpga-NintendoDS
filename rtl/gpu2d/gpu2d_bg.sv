@@ -707,7 +707,7 @@ module gpu2d_bg
         end
         if (white) mb = 18'h3FFFF;
         // capture (DoCapture)
-        if (capcnt[24]) ca = {s5.c3d[22:15] != 8'd0, s5.c3d[14:0]};
+        if (capcnt[24]) ca = {s3_l3op, s5.c3d[14:0]};
         else            ca = {1'b1, s5.o2d[17:13], s5.o2d[11:7], s5.o2d[5:1]};
         // (source B's null gates the B product, not its multiplier input; both chosen at S4 -> S5: CAPCNT, the LCDC map
         // and DISPCNT change only between jobs)
