@@ -101,7 +101,7 @@ module sys_math #(
     typedef enum logic [1:0] {S_IDLE, S_ITER, S_WAIT} sstate_t;
     sstate_t     sst;
     logic [4:0]  scnt;
-    logic [4:0]  sit;               // clks left; nibble sit-1 of the parameter
+    logic [3:0]  sit;               // index of the next parameter nibble
     // Before each consumed step Q <= 2^31-1 and -(2Q+1) <= R <= 2Q.
     // The next remainder fits signed 34 bits; intermediate sums wrap modulo 2^34.
     logic [33:0] srem;              // partial remainder, signed
@@ -127,7 +127,7 @@ module sys_math #(
     logic        sq_tg = 1'b0, sq_tq = 1'b0;
     wire         sq_mid = sq_tg != sq_tq;
     always_comb begin
-        nib = param[{4'(sit - 5'd1), 2'b00} +: 4];
+        nib = param[{sit, 2'b00} +: 4];
         r1 = sq_step(srem, sacc, PUMP && !sq_mid ? nib[1:0] : nib[3:2]); q1 = {sacc[30:0], !r1[33]};
         r2 = sq_step(r1, q1, nib[1:0]);    q2 = {q1[30:0], !r2[33]};
     end
@@ -187,8 +187,8 @@ module sys_math #(
             if (sst != S_IDLE && scnt != 5'd0 && tick) scnt <= scnt - 5'd1;
             case (sst)
                 S_ITER: begin
-                    sit <= sit - 5'd1;
-                    if (sit == 5'd1) sst <= S_WAIT;
+                    sit <= sit - 4'd1;
+                    if (sit == 4'd0) sst <= S_WAIT;
                 end
                 S_WAIT: if (s_fin) begin
                     bs <= !bs; cs <= 1'b0; sqrtcnt[15] <= 1'b0; sst <= S_IDLE;
@@ -220,7 +220,7 @@ module sys_math #(
             if (sqrt_start) begin
                 sst  <= S_ITER;
                 scnt <= 5'd13 - 5'(tick);
-                sit  <= (wa == 4'd12 ? wdata[0] : sqrtcnt[0]) ? 5'd16 : 5'd8;
+                sit  <= (wa == 4'd12 ? wdata[0] : sqrtcnt[0]) ? 4'd15 : 4'd7;
             end
         end
     end
