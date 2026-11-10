@@ -50,8 +50,12 @@ def run(exe, seeds, blocks):
         result = subprocess.run([str(exe), f'+seed={s}', f'+blocks={blocks}'], capture_output=True, text=True,
                                 timeout=600)
         out = result.stdout
-        if result.returncode != 0 or 'TEST PASSED' not in out:
-            first = next((l for l in out.splitlines() if l.startswith(('ERROR', 'stuck'))), 'failed')
+        if result.returncode != 0:
+            raise RuntimeError(f'{exe}: simulator exited {result.returncode}\n{result.stderr[-2000:]}')
+        if 'TEST PASSED' not in out:
+            first = next((l for l in out.splitlines() if l.startswith(('ERROR', 'stuck'))), None)
+            if 'TEST FAILED' not in out or first is None:
+                raise RuntimeError(f'{exe}: missing test verdict or failure witness\n{out[-2000:]}')
             return f'seed {s}: {first}'
     return None
 

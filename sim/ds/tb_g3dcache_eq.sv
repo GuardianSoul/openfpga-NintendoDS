@@ -34,16 +34,18 @@ module tb_g3dcache_eq;
     logic [63:0]   b_rdata [2];
     nds_g3d_cache_ref #(.AW(AW), .LW(LW)) u_ref (.clk, .rst, .flush, .req, .addr, .valid(valid[0]), .data(data[0]),
         .b_req(b_req[0]), .b_blk(b_blk[0]), .b_ack(b_ack[0]), .b_rvalid(b_rvalid[0]), .b_rdata(b_rdata[0]));
+    // Both cache state enums start C_IDLE=0, C_LOOK=1. Avoid hierarchical
+    // enum-item references: Verilator 5.052 breaks them when AW is overridden.
     logic new_idle_look, new_busy;
     generate if (V2) begin : g_v2
         nds_g3d_cache2 #(.AW(AW), .LW(LW), .QL(QL), .SCAN(SCAN)) u_new (.clk, .clk2(1'b0), .rst, .flush, .req, .addr, .valid(valid[1]), .data(data[1]),
             .b_req(b_req[1]), .b_blk(b_blk[1]), .b_ack(b_ack[1]), .b_rvalid(b_rvalid[1]), .b_rdata(b_rdata[1]));
-        assign new_idle_look = u_new.st == u_new.C_IDLE && u_new.n != 0 && !u_new.tc_busy;
+        assign new_idle_look = u_new.st == 'd0 && u_new.n != 0 && !u_new.tc_busy;
         assign new_busy = u_new.tc_busy;
     end else begin : g_v1
         nds_g3d_cache #(.AW(AW), .LW(LW), .FAST(FAST), .MIF2(MIF2), .WAYS(WAYS), .QL(QL)) u_new (.clk, .rst, .flush, .req, .addr, .valid(valid[1]), .data(data[1]),
             .b_req(b_req[1]), .b_blk(b_blk[1]), .b_ack(b_ack[1]), .b_rvalid(b_rvalid[1]), .b_rdata(b_rdata[1]));
-        assign new_idle_look = u_new.st == u_new.C_IDLE && u_new.n != 0 && !u_new.tc_busy;
+        assign new_idle_look = u_new.st == 'd0 && u_new.n != 0 && !u_new.tc_busy;
         assign new_busy = u_new.tc_busy;
     end endgenerate
     // V2: the flush count at each lookup (l_en), passed on to the answer it gives (C_LOOK hit)
@@ -51,7 +53,7 @@ module tb_g3dcache_eq;
     if (V2) begin : g_lf
         always @(posedge clk) begin
             if (g_v2.u_new.l_en) lf1 <= nflush + (flush ? 1 : 0);
-            if (g_v2.u_new.st == g_v2.u_new.C_LOOK && g_v2.u_new.hit) lf2 <= lf1;
+            if (g_v2.u_new.st == 'd1 && g_v2.u_new.hit) lf2 <= lf1;
         end
     end
 
@@ -119,7 +121,7 @@ module tb_g3dcache_eq;
         end
         end
         // lookups: the flush count when the lookup reads the tags
-        always @(posedge clk) if (k == 0 ? u_ref.st == u_ref.C_IDLE && u_ref.n != 0 : new_idle_look)
+        always @(posedge clk) if (k == 0 ? u_ref.st == 'd0 && u_ref.n != 0 : new_idle_look)
             look_f[k] <= nflush + (flush ? 1 : 0);
         always @(posedge clk) if (!rst && valid[k]) begin
             logic [AW-1:1] a;
