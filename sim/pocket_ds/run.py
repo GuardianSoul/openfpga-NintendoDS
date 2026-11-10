@@ -51,10 +51,15 @@ def read_verdicts(output, require_touch=False, require_vmcheck=False):
     touch_verdicts = set()
     vm_checked = False
     vm_bad = False
+    model_bad = False
     for line in output:
         sys.stdout.write(line)
         sys.stdout.flush()
         token = line.strip()
+        # Some controller contract checks use $display rather than $fatal.
+        # A later ROM PASS cannot clear those hardware-model diagnostics.
+        if re.search(r'\bERROR\b|%Error\b|\bAssertion failed\b', token):
+            model_bad = True
         if token in ('PASS', 'FAIL') and verdict != 'FAIL':
             verdict = token
         if token in ('TOUCH PASS', 'TOUCH FAIL'):
@@ -66,7 +71,7 @@ def read_verdicts(output, require_touch=False, require_vmcheck=False):
     touch_ok = 'TOUCH FAIL' not in touch_verdicts and (
         not require_touch or 'TOUCH PASS' in touch_verdicts)
     vm_ok = not vm_bad and (not require_vmcheck or vm_checked)
-    return verdict, touch_ok and vm_ok
+    return verdict, touch_ok and vm_ok and not model_bad
 
 
 def import_images(d, out):
@@ -240,7 +245,7 @@ def main():
         require_vmcheck=any(arg.startswith('+vmcheck') for arg in plus))
     rc = p.wait()
     if not checks_ok:
-        sys.exit(rc or 'FAIL: touchscreen/VRAM check failed or produced no requested verdict')
+        sys.exit(rc or 'FAIL: model/protocol, touchscreen or VRAM check failed or produced no requested verdict')
     if rc == 0 and verdict is None and Path(a.rom).resolve().parent == (ROOT / 'build/ds-tests').resolve():
         sys.exit(f'FAIL: the test ROM wrote no verdict in {a.frames} frames (hello needs about 60)')
     sys.exit(rc or (1 if verdict == 'FAIL' else 0))

@@ -45,6 +45,27 @@ class VerdictTests(unittest.TestCase):
     def test_diagnostic_text_is_not_a_rom_verdict(self):
         self.check_log('TOUCH PASS\nnot PASS\n', (None, True))
 
+    def test_protocol_error_before_rom_pass(self):
+        self.check_log("nds_sdram_bport: ERROR: the client's request changed before c_ready\nPASS\n",
+                       ('PASS', False))
+
+    def test_protocol_error_after_rom_pass(self):
+        self.check_log('PASS\nnds_sdram_bus: ERROR: the grant bank/row differs\n',
+                       ('PASS', False))
+
+    def test_protocol_error_cannot_be_erased_by_clean_monitors(self):
+        self.check_log('nds_sdram_bport: ERROR: changed request\nTOUCH PASS\nPASS\n'
+                       'vmcheck: 1408 words read, 0 mismatches\n',
+                       ('PASS', False), require_touch=True, require_vmcheck=True)
+
+    def test_simulator_errors_are_sticky(self):
+        for error in ('[10] %Error: stopped', 'Assertion failed: request', 'ERROR video: short line'):
+            with self.subTest(error=error):
+                self.check_log(error + '\nPASS\n', ('PASS', False))
+
+    def test_clean_model_summary_is_not_an_error(self):
+        self.check_log('models: sdram errors 0, cram errors 0/0\nPASS\n', ('PASS', True))
+
 
 if __name__ == '__main__':
     unittest.main()
