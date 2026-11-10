@@ -7,7 +7,9 @@ Writes OUTDIR/NDS.zip: Cores/GuardianSoul.NintendoDS/ (bit-reversed RBF, the APF
 icon.bin from support/pocket-art/core-icon.png)
 and Platforms/nds.json with its image Platforms/_images/nds.bin
 (support/pocket-art/ds-banner.png) for cards without a DS platform (install
-it only if the card has none). BIOS, firmware and ROMs come from the card's
+it only if the card has none). The core's own boot image (ARM boot code plus
+SERV firmware) is included in Assets/nds/GuardianSoul.NintendoDS/nds_boot.bin.
+BIOS, firmware and ROMs come from the card's
 Assets/nds/common/; none is included.
 
 --diag: the NDSDiag core (docs/diag.md; a core_top_ds DIAG = 1 build): Cores/GuardianSoul.NintendoDSDiag/ in
@@ -70,17 +72,29 @@ DIAG_SLOT = {'name': 'Diag log', 'id': 11, 'required': False, 'parameters': '0xA
              'extensions': ['ndg'], 'size_maximum': '0x80000', 'address': '0x70000000'}
 
 
+def boot_image():
+    """The ID 12 layout also loaded by sim/pocket_ds/run.py: no byte reversal."""
+    parts = []
+    for source, size in (('sw/boot/bootrom.bin', 8192), ('sw/scpu/cache.bin', 4096)):
+        image = (ROOT / source).read_bytes()
+        if len(image) > size:
+            sys.exit(f'{source}: {len(image)} bytes exceeds its {size}-byte boot region')
+        parts.append(image.ljust(size, b'\0'))
+    return b''.join(parts)
+
+
 def main():
     global CORE
     diag = '--diag' in sys.argv[3:]
     desc = next((a.split('=', 1)[1] for a in sys.argv[3:] if a.startswith('--desc=')),
-                'Nintendo DS (NDS_Pocket Phase 2: CPUs, system, 2D; no 3D or sound yet)')
+                'Nintendo DS core for Analogue Pocket (local validation build)')
     if diag:
         CORE = 'GuardianSoul.NintendoDSDiag'
     rbf, out = Path(sys.argv[1]), Path(sys.argv[2])
     original = rbf.read_bytes()
     if len(original) < 10000:
         sys.exit('RBF missing or truncated')
+    boot = boot_image()
     table = bytes(int(f'{b:08b}'[::-1], 2) for b in range(256))
     reversed_rbf = original.translate(table)
     if reversed_rbf.translate(table) != original:
@@ -90,6 +104,9 @@ def main():
     core = sd / 'Cores' / CORE
     core.mkdir(parents=True)
     (core / 'bitstream.rbf_r').write_bytes(reversed_rbf)
+    assets = sd / 'Assets' / PLATFORM / CORE
+    assets.mkdir(parents=True)
+    (assets / 'nds_boot.bin').write_bytes(boot)
     (core / 'icon.bin').write_bytes(art('core-icon.png', (36, 36)))
 
     def write(name, value):
@@ -158,12 +175,12 @@ def main():
     write('variants.json', {'variants': {'magic': 'APF_VER_1', 'variant_list': []}})
     write('audio.json', {'audio': {'magic': 'APF_VER_1'}})
     (core / 'info.txt').write_text(
-        'NDS_Pocket DS core, Phase 2 (docs/phase2-integration.md)\n'
+        'Nintendo DS core for Analogue Pocket: local validation build.\n'
         '* Pick a .nds ROM in Assets/nds/common. bios9.bin, bios7.bin and firmware.bin\n'
         '  must be there too.\n'
         '* Direct boot: the game starts without the firmware menu.\n'
-        '* No 3D and no sound in this version; no saves.\n'
-        '* SELECT+R: stacked / top only / bottom only; SELECT+L: touch cursor (D-pad, A = pen)\n'
+        '* Saves are written on quit through the Pocket menu; quit before powering off.\n'
+        '* SELECT+L or R: screen layout; SELECT+A, B, X or Y: touch mode (D-pad, A = pen).\n'
         '* On quit, a short log goes to Saves/nds/common/nds-log.bin\n'
         + ('* NDSDiag: on quit, the diagnostics log goes to Saves/nds/common/<game>.ndg (docs/diag.md)\n' if diag else ''))
     notices = core / 'licenses'
@@ -172,6 +189,9 @@ def main():
         shutil.copyfile(ROOT / 'rtl/apf' / name, notices / name)
     shutil.copyfile(ROOT / 'rtl/serv/LICENSE', notices / 'SERV-LICENSE.txt')
     shutil.copyfile(ROOT / 'LICENSE', notices / 'LICENSE.txt')
+    shutil.copyfile(ROOT / 'THIRD_PARTY_NOTICES.md', notices / 'THIRD_PARTY_NOTICES.md')
+    for name in ('MIT.txt', 'Apache-2.0.txt'):
+        shutil.copyfile(ROOT / 'licenses' / name, notices / name)
     (notices / 'NOTICE.txt').write_text(NOTICE)
     platforms = sd / 'Platforms'
     platforms.mkdir()
