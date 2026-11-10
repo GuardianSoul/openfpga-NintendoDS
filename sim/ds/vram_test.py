@@ -21,10 +21,10 @@ BUILD = ROOT / 'build/vram_tb'
 
 MUTANTS = [
     # a new block while two are streaming: words of three blocks interleave in the count
-    ("wire         g_go = g_req && bw_left <= 5'd8;",
-     "wire         g_go = g_req;"),
+    ("(VR_PF && pf_left != 4'd0 ? bw_left == 5'd0 : bw_left <= 5'd8)",
+     "1'b1"),
     # CPU access while block words still come: its read takes a block word
-    ("end else if (bw_left != 5'd0) ;", "end else if (1'b0) ;"),
+    ("else if (bw_left != 5'd0) ;", "else if (1'b0) ;"),
     # an unmapped block's zero beats while a mapped one still streams
     ("end else if (bw_left == 5'd0) st <= S_GZERO;",
      "end else st <= S_GZERO;"),
@@ -47,9 +47,10 @@ def build(name, rtl):
 
 def run(exe, seeds, blocks):
     for s in range(1, seeds + 1):
-        out = subprocess.run([str(exe), f'+seed={s}', f'+blocks={blocks}'], capture_output=True, text=True,
-                             timeout=600).stdout
-        if 'TEST PASSED' not in out:
+        result = subprocess.run([str(exe), f'+seed={s}', f'+blocks={blocks}'], capture_output=True, text=True,
+                                timeout=600)
+        out = result.stdout
+        if result.returncode != 0 or 'TEST PASSED' not in out:
             first = next((l for l in out.splitlines() if l.startswith(('ERROR', 'stuck'))), 'failed')
             return f'seed {s}: {first}'
     return None
@@ -63,11 +64,14 @@ def main():
     a = ap.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
     src = ROOT / 'rtl/ds/nds_vram.sv'
+    text = src.read_text()
+    if a.mutate:
+        for old, _ in MUTANTS:
+            assert text.count(old) == 1, old
     fail = run(build('ref', src), a.seeds, a.blocks)
     print(f'reference: {"FAIL " + fail if fail else "PASS"}')
     if fail or not a.mutate:
         sys.exit(1 if fail else 0)
-    text = src.read_text()
 
     def one(i):
         old, new = MUTANTS[i]
