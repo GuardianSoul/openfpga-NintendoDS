@@ -102,20 +102,22 @@ module sys_math #(
     sstate_t     sst;
     logic [4:0]  scnt;
     logic [4:0]  sit;               // clks left; nibble sit-1 of the parameter
-    logic [37:0] srem;              // partial remainder, signed
+    // Before each consumed step Q <= 2^31-1 and -(2Q+1) <= R <= 2Q.
+    // The next remainder fits signed 34 bits; intermediate sums wrap modulo 2^34.
+    logic [33:0] srem;              // partial remainder, signed
     logic [31:0] sacc;
     wire         s_fin = sst == S_WAIT && scnt == 5'd1 && tick && !sqrt_start;
 
     // Non-restoring square root. Keep the full 34-bit 4Q+1 / 4Q+3
     // trial term: truncating it to 32 bits rounds some 64-bit roots up.
     // For example sqrt(0x4000000000000001) must be 0x80000000.
-    function automatic logic [37:0] sq_step(input logic [37:0] r, input logic [31:0] q,
+    function automatic logic [33:0] sq_step(input logic [33:0] r, input logic [31:0] q,
                                             input logic [1:0] pair);
-        logic [37:0] op;
-        op = r[37] ? {4'd0, q, 2'b11} : ~{4'd0, q, 2'b01};
-        return {r[35:0], pair} + op + 38'(!r[37]);
+        logic [33:0] op;
+        op = r[33] ? {q, 2'b11} : ~{q, 2'b01};
+        return {r[31:0], pair} + op + 34'(!r[33]);
     endfunction
-    logic [37:0] r1, r2;
+    logic [33:0] r1, r2;
     logic [31:0] q1, q2;
     logic [3:0]  nib;
     // PUMP: one step a clk2 edge, on one sq_step: the nibble's high pair at
@@ -126,8 +128,8 @@ module sys_math #(
     wire         sq_mid = sq_tg != sq_tq;
     always_comb begin
         nib = param[{4'(sit - 5'd1), 2'b00} +: 4];
-        r1 = sq_step(srem, sacc, PUMP && !sq_mid ? nib[1:0] : nib[3:2]); q1 = {sacc[30:0], !r1[37]};
-        r2 = sq_step(r1, q1, nib[1:0]);    q2 = {q1[30:0], !r2[37]};
+        r1 = sq_step(srem, sacc, PUMP && !sq_mid ? nib[1:0] : nib[3:2]); q1 = {sacc[30:0], !r1[33]};
+        r2 = sq_step(r1, q1, nib[1:0]);    q2 = {q1[30:0], !r2[33]};
     end
     generate if (PUMP) begin : g_sqp
         always_ff @(posedge clk) sq_tg <= ~sq_tg;
