@@ -226,12 +226,12 @@ module nds_sdram_bport #(parameter bit SHARED = 0, parameter bit SYNC_TAKE = 0) 
         end
     end
 `ifndef ALTERA_RESERVED_QIS
-    // the client contract the copies could rely on: c_* unchanged from the
-    // capture until c_ready (simulation check; the copies stay meanwhile)
+    // Hold request fields until c_ready; byte enables and data apply only to
+    // writes. The shared port may forward another client's BE during a read.
     always @(posedge clk_bus)
         if (!reset && busy && take_b == take_seen &&
-            (!c_valid || c_write != b_we || c_quad != b_quad || c_addr != b_addr || c_be != b_be ||
-             (b_we && c_wdata != b_wdata)))
+            (!c_valid || c_write != b_we || c_quad != b_quad || c_addr != b_addr ||
+             (b_we && (c_be != b_be || c_wdata != b_wdata))))
             $display("nds_sdram_bport: ERROR: the client's request changed before c_ready (%m) at %0t", $time);
 `endif
     // The arbiter reads a request only once it has granted it: m_valid rises
