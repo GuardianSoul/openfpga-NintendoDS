@@ -239,10 +239,9 @@ static int tsc_conv(u8 ctl, bool rel = true) {
     CHECK(z == 0, "third result byte %02x", z);
     return (hi << 5) | (lo >> 3);
 }
-static int tsc_raw(int t, int k, int o) {
-    int v = ((t * k) >> 8) + (int16_t)o;
-    return v < 0 ? 0 : v > 4095 ? 4095 : v;
-}
+// Fixed cursor mapping documented by nds_spi and boot7's replacement user
+// calibration. Inputs are unsigned 8-bit coordinates: raw ranges 8..4088.
+static int tsc_raw(int t) { return t * 16 + 8; }
 
 static void test_tsc() {
     phase = "tsc";
@@ -250,30 +249,30 @@ static void test_tsc() {
     CHECK(top->pen_down == 0, "pen_down without pen");
     int x = tsc_conv(0xD0), y = tsc_conv(0x90);
     CHECK(x == 0 && y == 0xFFF, "pen up X %03x Y %03x", x, y);
-    struct { int tx, ty, kx, ky, ox, oy; } cs[] = {
-        {0, 0, 0x1000, 0x1000, 0, 0}, {255, 191, 0x1000, 0x1000, 0, 0},
-        {128, 96, 0x0E00, 0x1300, 0x0100, 0x00C0}, {10, 180, 0x0F80, 0x1460, -50, -300},
-        {200, 20, 0xFFFF, 0xFFFF, 0, 0}, {3, 4, 0x1100, 0x1200, -200, -200},
-        {255, 191, 0x0E3A, 0x1488, 0x01F7, 0x0131},
+    struct { int tx, ty; } cs[] = {
+        {0, 0}, {255, 191}, {128, 96}, {10, 180}, {200, 20}, {3, 4},
+        {0, 255}, {255, 0}, {1, 254}, {254, 1}, {255, 255},
+        {32, 24}, {224, 168}, // the two boot calibration points
     };
     top->pen = 1;
     for (auto& c : cs) {
-        top->tx = c.tx; top->ty = c.ty; top->kx = c.kx; top->ky = c.ky;
-        top->ox = (u16)c.ox; top->oy = (u16)c.oy;
+        top->tx = c.tx; top->ty = c.ty;
         x = tsc_conv(0xD0, (c.tx & 1) != 0); y = tsc_conv(0x90);
         CHECK(top->pen_down == 1, "pen_down with pen");
-        int wx = tsc_raw(c.tx, c.kx, c.ox), wy = tsc_raw(c.ty, c.ky, c.oy);
+        int wx = tsc_raw(c.tx), wy = tsc_raw(c.ty);
         CHECK(x == wx && y == wy, "cursor %d,%d: X %03x Y %03x, want %03x %03x", c.tx, c.ty, x, y, wx, wy);
         int x8 = tsc_conv(0xD8);
         CHECK(x8 == (wx & 0xFF0), "8-bit X %03x, want %03x", x8, wx & 0xFF0);
+        int y8 = tsc_conv(0x98);
+        CHECK(y8 == (wy & 0xFF0), "8-bit Y %03x, want %03x", y8, wy & 0xFF0);
     }
     // libnds overlap: the next control byte goes out with the low byte
-    top->tx = 100; top->ty = 50; top->kx = 0x1000; top->ky = 0x1000; top->ox = 7; top->oy = 9;
+    top->tx = 100; top->ty = 50;
     xfer(2, 0x90, true);
     u8 h = xfer(2, 0, true), l = xfer(2, 0xD0, true);
     u8 h2 = xfer(2, 0, true), l2 = xfer(2, 0, false);
     y = (h << 5) | (l >> 3); x = (h2 << 5) | (l2 >> 3);
-    CHECK(x == 1607 && y == 809, "overlapped X %d Y %d, want 1607 809", x, y);
+    CHECK(x == 1608 && y == 808, "overlapped X %d Y %d, want 1608 808", x, y);
     int t = tsc_conv(0xA0), m = tsc_conv(0xE0);
     CHECK(t == 0xFFF && m == 0x800, "channel 2 %03x, mic %03x", t, m);
     top->pen = 0;

@@ -22,16 +22,12 @@ module tb_ds_dev #(
     input  logic        pen,
     input  logic [7:0]  tx,
     input  logic [7:0]  ty,
-    input  logic [15:0] kx,
-    input  logic [15:0] ky,
-    input  logic [15:0] ox,
-    input  logic [15:0] oy,
     output logic        pen_down
 );
     nds_spi u_spi (
         .clk, .rst, .tick, .io_req(spi_req), .io_we, .io_be, .io_wdata, .io_rdata(spi_rdata),
         .irq(spi_irq), .pwr_off, .fw_req, .fw_addr, .fw_ack, .fw_rdata,
-        .pen, .tx, .ty, .kx, .ky, .ox, .oy, .pen_down);
+        .pen, .tx, .ty, .pen_down);
     nds_rtc #(.SEC_TICKS(SEC_TICKS)) u_rtc (
         .clk, .rst, .tick, .io_req(rtc_req), .io_we, .io_be, .io_wdata, .io_rdata(rtc_rdata));
 endmodule
