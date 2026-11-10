@@ -106,14 +106,13 @@ module sys_math #(
     logic [31:0] sacc;
     wire         s_fin = sst == S_WAIT && scnt == 5'd1 && tick && !sqrt_start;
 
-    // Non-restoring steps (no restore mux): on root Q, R' = 4R + pair - P
-    // if R >= 0, where P = (4Q+1) mod 2^32 (melonDS's u32 prod), else
-    // 4R + pair + (4Q+3), plus 2^32 when that P was truncated (Q[30], the
-    // last step of a 64-bit root only).
+    // Non-restoring square root. Keep the full 34-bit 4Q+1 / 4Q+3
+    // trial term: truncating it to 32 bits rounds some 64-bit roots up.
+    // For example sqrt(0x4000000000000001) must be 0x80000000.
     function automatic logic [37:0] sq_step(input logic [37:0] r, input logic [31:0] q,
                                             input logic [1:0] pair);
         logic [37:0] op;
-        op = r[37] ? {4'd0, q[30], 1'b0, q[29:0], 2'b11} : ~{6'd0, q[29:0], 2'b01};
+        op = r[37] ? {4'd0, q, 2'b11} : ~{4'd0, q, 2'b01};
         return {r[35:0], pair} + op + 38'(!r[37]);
     endfunction
     logic [37:0] r1, r2;

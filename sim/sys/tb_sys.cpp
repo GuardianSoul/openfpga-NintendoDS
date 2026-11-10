@@ -190,6 +190,14 @@ static void test_div(int n) {
 }
 static void test_sqrt(int n) {
     phase = "sqrt";
+    // Independent constant: the old RTL and reference both wrapped their
+    // trial term here and incorrectly returned 0x80000001.
+    io(0, 0x2B0, true, 0x3, 1);
+    io(0, 0x2B8, true, 0xF, 1);
+    io(0, 0x2BC, true, 0xF, 0x40000000);
+    idle(28);
+    u32 boundary_root = io(0, 0x2B4, false);
+    CHECK(boundary_root == 0x80000000u, "64-bit sqrt trial overflow: %08x", boundary_root);
     for (int i = 0; i < n; i++) {
         int k = rnd(4);
         if (k == 0) io(0, 0x2B0, true, 0x3, rnd(2));
