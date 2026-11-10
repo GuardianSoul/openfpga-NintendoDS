@@ -45,6 +45,30 @@ def write_hex(path, data):
     path.write_text(''.join('%08x\n' % int.from_bytes(data[i:i + 4], 'little') for i in range(0, len(data), 4)))
 
 
+def read_verdicts(output, require_touch=False, require_vmcheck=False):
+    """Keep failures sticky and require a verdict for each requested check."""
+    verdict = None
+    touch_verdicts = set()
+    vm_checked = False
+    vm_bad = False
+    for line in output:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        token = line.strip()
+        if token in ('PASS', 'FAIL') and verdict != 'FAIL':
+            verdict = token
+        if token in ('TOUCH PASS', 'TOUCH FAIL'):
+            touch_verdicts.add(token)
+        vm = re.fullmatch(r'vmcheck: (\d+) words read, (\d+) mismatches', token)
+        if vm:
+            vm_checked = True
+            vm_bad |= int(vm[2]) != 0
+    touch_ok = 'TOUCH FAIL' not in touch_verdicts and (
+        not require_touch or 'TOUCH PASS' in touch_verdicts)
+    vm_ok = not vm_bad and (not require_vmcheck or vm_checked)
+    return verdict, touch_ok and vm_ok
+
+
 def import_images(d, out):
     """tb_ds_pocket's +imp_* images of a state export: main RAM with the overlay (and its own
     words), VRAM in the VRAM port's layout (nds_vram), the WRAMs as the SRAM holds them"""
@@ -110,7 +134,7 @@ def main():
     ap.add_argument('--vmcheck', action='store_true', help='check every VRAM-port read word against a shadow of the words written there')
     ap.add_argument('--ringgen', type=int, metavar='GAP', help='nds_ring_gen on the line ring\'s SDRAM ports (RING_GEN), random gap 0..GAP clocks between blocks')
     ap.add_argument('--vmlat', type=int, help='from this video frame, VRAM block-port latency histograms (tb_ds --vlat/--jitter/--stall)')
-    ap.add_argument('--touchtest', type=int, help='DS frame: SELECT+L, then hold RIGHT and DOWN (TOUCH PASS/FAIL)')
+    ap.add_argument('--touchtest', type=int, help='DS frame: SELECT+A, then hold RIGHT and DOWN (requires TOUCH PASS)')
     ap.add_argument('--swatch', help='hex SDRAM word address: log bridge data and SDRAM writes of its 8 words')
     ap.add_argument('--line-stats', type=int, help='DS frame: per-line VRAM blocks and busy cycles')
     ap.add_argument('--cwatch', help='hex ROM offset: log card reads of its 64-byte window')
@@ -184,7 +208,7 @@ def main():
         plus += import_images(Path(a.imp), out)
     if a.line_stats is not None:
         plus.append(f'+line_stats={a.line_stats}')
-    if a.touchtest:
+    if a.touchtest is not None:
         plus.append(f'+touchtest={a.touchtest}')
     if a.vmcheck:
         plus.append('+vmcheck')
@@ -209,14 +233,14 @@ def main():
         shots = Path(a.shots).resolve()
         shots.mkdir(parents=True, exist_ok=True)
         plus.append(f'+shots={shots}')
-    # the output passes through as it comes; a FAIL verdict line (the ROM's result block) fails the run
+    # The ROM and each requested control check must pass independently.
     p = subprocess.Popen([str(obj / 'Vtb_ds_pocket'), *plus], cwd=out, text=True, stdout=subprocess.PIPE)
-    verdict = None
-    for line in p.stdout:
-        sys.stdout.write(line); sys.stdout.flush()
-        if line.strip() in ('PASS', 'FAIL'):
-            verdict = line.strip()
+    verdict, checks_ok = read_verdicts(
+        p.stdout, require_touch=any(arg.startswith('+touchtest=') for arg in plus),
+        require_vmcheck=any(arg.startswith('+vmcheck') for arg in plus))
     rc = p.wait()
+    if not checks_ok:
+        sys.exit(rc or 'FAIL: touchscreen/VRAM check failed or produced no requested verdict')
     if rc == 0 and verdict is None and Path(a.rom).resolve().parent == (ROOT / 'build/ds-tests').resolve():
         sys.exit(f'FAIL: the test ROM wrote no verdict in {a.frames} frames (hello needs about 60)')
     sys.exit(rc or (1 if verdict == 'FAIL' else 0))
