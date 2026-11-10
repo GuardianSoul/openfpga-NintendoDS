@@ -5,7 +5,7 @@
 
 DT        := build/ds-tests
 DT_SRC    := sw/tests
-DT_ROMS   := hello irq sys cart g3d plane cputime latch win dmacpu g3dtex affdma dmau unitmem unitgx unita7 unitcpu
+DT_ROMS   := hello irq sys cart g3d plane cputime latch win dmacpu g3dtex affdma dmau unitmem unitgx unita7 unitcpu mathprobe dmalocal
 DT_A7_w   := 0x037F8000
 DT_A7_m   := 0x02380000
 DT_CODE_hello := TSHE
@@ -25,6 +25,8 @@ DT_CODE_unitmem := TSUM
 DT_CODE_unitgx := TSUG
 DT_CODE_unita7 := TSU7
 DT_CODE_unitcpu := TSUC
+DT_CODE_mathprobe := TSMP
+DT_CODE_dmalocal := TSDL
 DT_PAT_cart   := --pattern 0x20000:0x10000
 
 DT_CF     := -O2 -marm -ffreestanding -fno-builtin -nostdlib -fno-pic -mfloat-abi=soft \

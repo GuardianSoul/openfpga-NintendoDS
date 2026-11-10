@@ -485,9 +485,18 @@ module gpu3d_tdp2c #(
 `ifndef SYNTHESIS
     // synthesis translate_off
     // a B write at an A read's edge: undefined in the block
-    realtime wt = -1.0;
-    always @(posedge clk_b) if (b_we) wt = $realtime;
-    always @(posedge clk_a) #0 if (wt == $realtime) $error("gpu3d_tdp2c: a port-B write at a port-A read's edge");
+    realtime rt = -1.0, wt = -1.0;
+    // Check in both event handlers: whichever executes second detects the
+    // collision, without an inactive-region #0 delay (unsupported by some
+    // simulators). A B edge without a write is not a collision.
+    always @(posedge clk_a) begin
+        rt = $realtime;
+        if (wt == rt) $error("gpu3d_tdp2c: a port-B write at a port-A read's edge");
+    end
+    always @(posedge clk_b) if (b_we) begin
+        wt = $realtime;
+        if (rt == wt) $error("gpu3d_tdp2c: a port-B write at a port-A read's edge");
+    end
     // synthesis translate_on
 `endif
 `endif

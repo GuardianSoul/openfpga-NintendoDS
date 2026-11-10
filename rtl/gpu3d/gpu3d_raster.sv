@@ -468,14 +468,14 @@ module gpu3d_raster #(
     // cycle (the pipeline has that slot's read port then). Quartus does not
     // define SYNTHESIS and takes a hierarchical reference for a declaration.
     always_ff @(posedge clk)
-        if (!rst && pp_rd && u_fpass.fst inside {u_fpass.F_0, u_fpass.F_2, u_fpass.F_3, u_fpass.F_3B} &&
-            ((fpt_raddr[9:8] == sl20 && !(TR3 && u_fpass.fst == u_fpass.F_2)) || (u_fpass.fst == u_fpass.F_2 && fpb_raddr[9:8] == sl20)))
+        if (!rst && pp_rd && u_fpass.sim_read_any &&
+            ((fpt_raddr[9:8] == sl20 && !(TR3 && u_fpass.sim_read_bot)) || (u_fpass.sim_read_bot && fpb_raddr[9:8] == sl20)))
             $error("gpu3d_raster: line-buffer slot read by both the pipeline and the final pass");
     // LB2: the final pass's own line (top x = 0 and x+1, the lower layer) is
     // never in the group the pipeline reads
     always_ff @(posedge clk)
-        if (LB2 && !rst && pp_rd && u_fpass.fst inside {u_fpass.F_0, u_fpass.F_2, u_fpass.F_3B} &&
-            ((u_fpass.fst != u_fpass.F_2 && fpt_raddr[9] == sl20[1]) || (u_fpass.fst == u_fpass.F_2 && fpb_raddr[9] == sl20[1])))
+        if (LB2 && !rst && pp_rd && u_fpass.sim_read_own &&
+            ((!u_fpass.sim_read_bot && fpt_raddr[9] == sl20[1]) || (u_fpass.sim_read_bot && fpb_raddr[9] == sl20[1])))
             $error("gpu3d_raster: LB2 group read by both the pipeline and the final pass's own line");
     // synthesis translate_on
 `endif

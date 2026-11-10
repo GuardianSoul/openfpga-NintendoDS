@@ -117,7 +117,9 @@ module nds_rtc #(
         return {x[23:0], x[24] ^ x[21]};
     endfunction
     function automatic logic [24:0] sc_jump(input int unsigned k, input logic [24:0] s0);
-        logic [24:0] a [25], r [25], t [25];
+        // Packed rows also avoid an unpacked constant-array initialization
+        // failure in Verilator 5.052. Index i still selects matrix row i.
+        logic [24:0][24:0] a, r, t;
         logic [24:0] v;
         for (int i = 0; i < 25; i++) begin a[i] = '0; r[i] = 25'd1 << i; end
         a[0] = (25'd1 << 24) | (25'd1 << 21);           // row i: the bits that XOR into bit i

@@ -131,6 +131,8 @@ int main(int argc, char** argv)
     std::string import_dir;
     int trace_from = 0;     // --trace-from-frame F: start the traces at frame F (e.g. after --load) instead of the entry
     bool diag = false;      // --diag: count nds_disp's NDSDiag outputs and check them against the tb's own measures (docs/diag.md)
+    bool dma_local_check = false; // dmalocal ROM's marked ARM9 R10 increments during DMA
+    bool stop_done = false; // --stop-done: stop at a frame boundary after the result block completes
     int line_stats = -1;    // --line-stats FRAME: per DS line VRAM blocks/words, busy cycles and late lines of that frame
     for (int i = 1; i < argc; i++)
     {
@@ -192,9 +194,15 @@ int main(int argc, char** argv)
         else if (a == "--sav-out") { sav_out = nx(); sav_bytes = strtoul(nx().c_str(), 0, 0); }
         else if (a == "--line-stats") line_stats = atoi(nx().c_str());
         else if (a == "--diag") diag = true;
+        else if (a == "--dma-local-check") dma_local_check = result = true;
+        else if (a == "--stop-done") stop_done = result = true;
         else if (a[0] != '+') { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (rom.empty()) { fprintf(stderr, "--rom required\n"); return 2; }
+    if (dma_local_check && !load_file.empty()) {
+        fprintf(stderr, "--dma-local-check requires a fresh boot (observer state is not in checkpoints)\n");
+        return 2;
+    }
     if (!import_dir.empty() && sav_in.empty())
     {
         FILE* f = fopen((import_dir + "/save.bin").c_str(), "rb");
@@ -341,6 +349,9 @@ int main(int argc, char** argv)
     u32 last_vc = 0;
     u64 cyc = 0, late = 0;
     Port pm, pv, ps, pc, pf;
+    // Shared posted-write port state, included in same-build checkpoints.
+    bool fifo_pending = false, fifo_is_cw = false;
+    u32 fifo_addr = 0, fifo_data = 0, fifo_pcnt = 0;
     std::mt19937 jrng(jseed);
     struct VBlk { u32 addr; u64 start, req, ack; };
     std::deque<VBlk> vq;                 // --vpipe: block reads in flight
@@ -375,6 +386,8 @@ int main(int argc, char** argv)
         is.read(&cyc, sizeof cyc); is.read(&frame, sizeof frame); is.read(&last_vc, sizeof last_vc); is.read(&late, sizeof late);
         is.read(retired, sizeof retired); is.read(lastpc, sizeof lastpc); is.read(lastret_cyc, sizeof lastret_cyc);
         is.read(shadow, sizeof shadow); is.read(fb, sizeof fb);
+        is.read(&fifo_pending, sizeof fifo_pending); is.read(&fifo_is_cw, sizeof fifo_is_cw);
+        is.read(&fifo_addr, sizeof fifo_addr); is.read(&fifo_data, sizeof fifo_data); is.read(&fifo_pcnt, sizeof fifo_pcnt);
         is.close();
         pm.lat = mlat; pv.lat = vlat; ps.lat = slat; pc.lat = clat; pf.lat = flat;   // latencies from this run's options
         fprintf(stderr, "loaded %s: frame %d, cycle %llu\n", load_file.c_str(), frame, (unsigned long long)cyc);
@@ -407,8 +420,36 @@ int main(int argc, char** argv)
     u32 wx_data = 0;
     unsigned long long wx_n = 0;
     // the CPUs' trace outputs, once per CPU clock edge (clk_cpu with CPU_FAST)
+    bool dma_was_busy = false;
+    u64 dma_local_steps = 0, dma_local_live = 0, dma_local_raw = 0, dma_episode_steps = 0;
+    // The board shares a write FIFO between ring and posted VRAM writes.
+    // Model one-cycle commit and its global modulo-128 pop counter. A pop
+    // must follow its acceptance edge for VR_PDRAIN's target to be reached.
     auto observe_dbg = [&]()
     {
+        bool dma_busy = (t->diag_c_ev & (1u << 3)) != 0;
+        if (!dma_busy) dma_episode_steps = 0;
+        // Require the previous and current CPU-edge samples to be busy:
+        // don't credit a write on the DMA start/completion boundary. The
+        // fixed ITCM range and unique consecutive values exclude unrelated
+        // register writes, post-DMA progress, and ARM7 activity.
+        if (dma_local_check && t->dbg_wen && t->dbg_wa == 10 &&
+            lastpc[0] >= 0x1000 && lastpc[0] < 0x1100 &&
+            t->dbg_wd > 0xd1000000u && t->dbg_wd <= 0xd1001000u &&
+            shadow[0][10] + 1 == t->dbg_wd) {
+            dma_local_steps++;
+            if (dma_busy && dma_was_busy) {
+                dma_local_raw++;
+                // Holding fetch still allows previously accepted work to
+                // retire. In the tested SOLO_ONLY/IB4 frontend there are at
+                // most four fetched tokens plus E1/E2/E3/WB/WB2. This fixed
+                // ADD/SUBS/BNE loop has no multi-uop instruction. Discarding
+                // the first 16 marked writes per busy episode exceeds that
+                // nine-token bound, independent of memory stalls or cycles.
+                if (++dma_episode_steps > 16) dma_local_live++;
+            }
+        }
+        dma_was_busy = dma_busy;
         if (t->dbg_wen) shadow[t->dbg_wa >> 5][t->dbg_wa & 31] = t->dbg_wd;
             if (t->dbg_retire)
             {
@@ -555,9 +596,24 @@ int main(int argc, char** argv)
         // a word a clock (one in four held a clock), a block read is acked
         // after --rglat clocks and returns 8 words a clock, after the writes
         // before it (no write left in flight when a read is acked)
-        t->rg_wack = 0; t->rg_rack = 0; t->rg_rvalid = 0;
-        t->rg_wdrained = 1;               // (its writes land at once)
-        if (t->rg_wreq && (jrng() & 3) != 0) { rgmem[t->rg_waddr & 0xFFFFFF] = t->rg_wdata; t->rg_wack = 1; }
+        t->rg_wack = 0; t->rg_rack = 0; t->rg_rvalid = 0; t->cw_ack = 0;
+        if (fifo_pending) {
+            if (fifo_is_cw) {
+                u32 a = (fifo_addr << 2) & 0x1ffffc;
+                for (int b = 0; b < 4; b++) vram[a + b] = fifo_data >> (8 * b);
+                if (a == vwatch) { vw_n++; if (t->vcount != vw_lvc) { vw_lines++; vw_lvc = t->vcount; } }
+            } else rgmem[fifo_addr & 0xffffff] = fifo_data;
+            fifo_pcnt = (fifo_pcnt + 1) & 127;
+            fifo_pending = false;
+        }
+        t->rg_wdrained = 1; t->rg_wfill = 0; t->rg_wpcnt = fifo_pcnt;
+        if (t->rg_wreq && (jrng() & 3) != 0) {
+            fifo_pending = true; fifo_is_cw = false;
+            fifo_addr = t->rg_waddr; fifo_data = t->rg_wdata; t->rg_wack = 1;
+        } else if (!t->rg_wreq && t->cw_valid) {
+            fifo_pending = true; fifo_is_cw = true;
+            fifo_addr = t->cw_addr; fifo_data = t->cw_data; t->cw_ack = 1;
+        }
         if (rg_st == 0 && t->rg_rreq) { rg_st = 1; rg_cnt = rglat; rg_a = t->rg_raddr & 0xFFFFFF; }
         else if (rg_st == 1 && --rg_cnt <= 0) { t->rg_rack = 1; rg_st = 2; rg_k = 0; rg_cnt = 6; }
         else if (rg_st == 2 && --rg_cnt <= 0) {
@@ -687,6 +743,7 @@ int main(int argc, char** argv)
             for (int i = 0; i < n; i++)
             {
                 if (ev[i].which == 0) t->clk = ev[i].v; else t->clk_cpu = ev[i].v;
+                Verilated::threadContextp()->time(1 + ev[i].at);
                 t->eval();
 #ifdef DS_FST
                 if (fst && cyc >= fst_from && cyc < fst_to) fst->dump(ev[i].at);
@@ -698,9 +755,14 @@ int main(int argc, char** argv)
 #endif
         }
 #else
+        // Distinct clock phases need distinct simulator timestamps for the
+        // dual-clock RAM collision checks. Coincident edges share a time.
+        Verilated::threadContextp()->time(1 + cyc * 24);
 #if DS_CLK2X
         // clk_2x (DS_CLK2X=1): two periods per clk_sys period, rising with it
-        t->clk = 1; t->clk_2x = 1; t->eval(); t->clk_2x = 0; t->eval();
+        t->clk = 1; t->clk_2x = 1; t->eval();
+        Verilated::threadContextp()->time(7 + cyc * 24);
+        t->clk_2x = 0; t->eval();
 #else
         t->clk = 1; t->eval();
 #endif
@@ -708,8 +770,12 @@ int main(int argc, char** argv)
         if (fst && cyc >= fst_from && cyc < fst_to) fst->dump(cyc * 2);
 #endif
 #if DS_CLK2X
-        t->clk = 0; t->clk_2x = 1; t->eval(); t->clk_2x = 0; t->eval();
+        Verilated::threadContextp()->time(13 + cyc * 24);
+        t->clk = 0; t->clk_2x = 1; t->eval();
+        Verilated::threadContextp()->time(19 + cyc * 24);
+        t->clk_2x = 0; t->eval();
 #else
+        Verilated::threadContextp()->time(13 + cyc * 24);
         t->clk = 0; t->eval();
 #endif
 #ifdef DS_FST
@@ -810,10 +876,13 @@ int main(int argc, char** argv)
                 os.write(&cyc, sizeof cyc); os.write(&frame, sizeof frame); os.write(&vc, sizeof vc); os.write(&late, sizeof late);  // vc: this boundary is already counted
                 os.write(retired, sizeof retired); os.write(lastpc, sizeof lastpc); os.write(lastret_cyc, sizeof lastret_cyc);
                 os.write(shadow, sizeof shadow); os.write(fb, sizeof fb);
+                os.write(&fifo_pending, sizeof fifo_pending); os.write(&fifo_is_cw, sizeof fifo_is_cw);
+                os.write(&fifo_addr, sizeof fifo_addr); os.write(&fifo_data, sizeof fifo_data); os.write(&fifo_pcnt, sizeof fifo_pcnt);
                 os.close();
                 fprintf(stderr, "saved %s at frame %d\n", save_file.c_str(), frame);
             }
             if (frame >= frames && (imp.st < 0 || imp.st == 3)) break;
+            if (stop_done && rd32(mram, 0x3f0000) == 0x52545344 && rd32(mram, 0x3f000c) == 1) break;
         }
         if (vc != last_vc) line_cyc = cyc;
         last_vc = vc;
@@ -852,6 +921,15 @@ int main(int argc, char** argv)
         printf("result: magic %08x checks %u mask %08x done %u\n", magic, n, mask, done);
         for (u32 i = 0; i < n && i < 32; i++) printf("  check %2u: %s value %08x\n", i, (mask >> i & 1) ? "ok " : "BAD", rd32(mram, base + 16 + 4 * i));
         bool pass = magic == 0x52545344 && done == 1 && n > 0 && mask == (n >= 32 ? 0xFFFFFFFFu : (1u << n) - 1);
+        if (dma_local_check) {
+            bool live = dma_local_steps == 4096 && dma_local_live >= 8;
+            printf("dma-local: raw-during-DMA %llu; exclude first 16 marked writes per busy episode\n",
+                   (unsigned long long)dma_local_raw);
+            printf("dma-local: steps %llu live-during-DMA %llu: %s\n",
+                   (unsigned long long)dma_local_steps, (unsigned long long)dma_local_live,
+                   live ? "PASS" : "FAIL");
+            pass = pass && live;
+        }
         printf("%s\n", pass ? "PASS" : "FAIL");
         t->final();
         delete t;

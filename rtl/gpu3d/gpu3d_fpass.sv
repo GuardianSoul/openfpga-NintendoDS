@@ -106,6 +106,15 @@ module gpu3d_fpass #(
         F_IDLE, F_0, F_1, F_2, F_3, F_3B, F_4A, F_EM, F_FT, F_4W, F_4, F_5
     } fstate_t;
     fstate_t     fst;
+`ifndef SYNTHESIS
+    // synthesis translate_off
+    // Parent assertions use predicates rather than hierarchical enum items
+    // (which trigger a broken-link error in Verilator 5.052).
+    wire sim_read_any = fst inside {F_0, F_2, F_3, F_3B};
+    wire sim_read_own = fst inside {F_0, F_2, F_3B};
+    wire sim_read_bot = fst == F_2;
+    // synthesis translate_on
+`endif
     logic [7:0]  fp_x;
     // TR3: three slots (line mod 3; the line above is not kept: no edge marking)
     // (fy3 = fp_y mod 3 and fd3 = fp_done mod 3, counted with them: the slot is

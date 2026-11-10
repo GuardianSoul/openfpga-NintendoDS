@@ -109,6 +109,9 @@ def main():
     # ds.mk's own knobs for the parameters it always passes; the rest by -G
     knob = {'SOUND': 'DS_SOUND', 'GPU3D': 'DS_3D', 'CPU_FAST': 'DS_FAST', 'ARM7_CACHE': 'DS_A7C', 'GX_USORT': 'DS_USORT'}
     lines = [f'{knob[n]}={v}' for n, v in sets.items() if n in knob]
+    # The board PLL drives nds_top.clk_2x even with CPU_FAST=0. In
+    # particular, G3D_PUMP's cache RAMs must not see a stopped clock.
+    lines.append('DS_CLK2X=1')
     g = ' '.join(f'-G{n}={v}' for n, v in sets.items() if n not in knob)
     lines.append('DS_G=' + g)
     lines.append('DS_B=build/ds-pocket' + ('-3d' if sets.get('GPU3D') else '-2d'))

@@ -117,6 +117,10 @@ test-ds-pocket:
 	@mkdir -p build && $(PYTHON) tools/ds/pocket_params.py $(POCKET_P) > build/ds-pocket.args && cat build/ds-pocket.args
 	xargs -d '\n' -a build/ds-pocket.args $(MAKE) test-ds
 
+.PHONY: test-dma-local
+test-dma-local:
+	$(PYTHON) tools/ds/check_dma_local.py --tools $(TOOLS) --bios $(BOOT_ROMDIR)
+
 # the state import's restore stub (sw/stateload, docs/state-import.md): checked in as
 # sw/stateload/stateload.bin, as the boot ROM (the Laptop has no ARM toolchain)
 $(BOOT_B)/stateload.bin: sw/stateload/stateload.s
