@@ -75,6 +75,11 @@ int main(void)
         DMA_DAD(0) = 0x04000028;
         DMA_CNT(0) = DMA_ENABLE | DMA_HBLANK | DMA_REPEAT | DMA_32BIT | DMA_DST_RELOAD | 2;
         while (VCOUNT != 0) ;
-        while (VCOUNT < 191) BG3X_A = (u32)(VCOUNT * 5) << 8;
+        for (;;) {
+            /* Use one VCOUNT sample for the condition and the write value. */
+            u32 line = VCOUNT;
+            if (line >= 191) break;
+            BG3X_A = (line * 5) << 8;
+        }
     }
 }
