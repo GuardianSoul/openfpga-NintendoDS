@@ -12,6 +12,8 @@ import subprocess
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--verilator', default='verilator')
 p.add_argument('--out', default='build/rtc-behavior-mutations')
+p.add_argument('--self-test-survivor', action='store_true',
+               help='run baseline then a harmless edit; must exit nonzero as NOT CAUGHT')
 a = p.parse_args()
 root = pathlib.Path(__file__).resolve().parents[2]
 out = pathlib.Path(a.out).resolve()
@@ -28,13 +30,24 @@ mutations = {
     'century-wrap-broken': ("v[7:4] == 4'h9 ? 4'h0", "v[7:4] == 4'h9 ? 4'h1"),
     'count-through-cs': ('wire k_rel = pend && !io[2];', 'wire k_rel = pend;'),
 }
+if a.self_test_survivor:
+    mutations = {'baseline': None, 'deliberate-survivor':
+                 ('// ---- state', '// ---- state (deliberate equivalent control)')}
+
+
+def require(condition, message):
+    # These are acceptance checks, never Python asserts: -O must retain them.
+    if not condition:
+        raise SystemExit(message)
+
+
 for name, edit in mutations.items():
     work = out / name
     work.mkdir(exist_ok=True)
     rtl = source
     if edit:
         old, new = edit
-        assert rtl.count(old) == 1, (name, 'mutation must match exactly once')
+        require(rtl.count(old) == 1, name + ': mutation must match exactly once')
         rtl = rtl.replace(old, new)
     path = work / 'nds_rtc.sv'
     path.write_text(rtl)
@@ -52,7 +65,9 @@ for name, edit in mutations.items():
                                 stdout=log, stderr=subprocess.STDOUT, timeout=180)
     report = (work / 'run.log').read_text()
     if edit:
-        assert result.returncode == 1 and 'FAIL [rtc-exhaust]' in report, (name, 'not caught', report[-500:])
+        require(result.returncode == 1 and 'FAIL [rtc-exhaust]' in report,
+                name + ': NOT CAUGHT or invalid execution: ' + report[-500:])
     else:
-        assert result.returncode == 0 and 'PASS:' in report, ('baseline failed', report[-500:])
+        require(result.returncode == 0 and 'PASS:' in report,
+                'baseline failed: ' + report[-500:])
     print(name + ': ' + ('CAUGHT ' if edit else '') + report.strip().splitlines()[-1], flush=True)
