@@ -1,0 +1,34 @@
+[
+  [
+    "reg [8:0] dl = 0;",
+    "reg dl_live = 0, dl_lead = 0, dl_pad = 0;\n    reg [1:0] row_phase = 2'd1;"
+  ],
+  [
+    "if (line_start) begin hc <= 0; dl <= vcount; end",
+    "if (line_start) begin\n            hc <= 0;\n            dl_live <= vcount >= 9'd3 && vcount <= 9'd194;\n            dl_lead <= vcount == 9'd2;\n            dl_pad <= vcount == 9'd195;\n            row_phase <= vcount[1:0] - 2'd3;\n        end"
+  ],
+  [
+    "if (reset) begin hc <= 0; dl <= 0; end",
+    "if (reset) begin\n            hc <= 0;\n            dl_live <= 0; dl_lead <= 0; dl_pad <= 0;\n            row_phase <= 2'd1;\n        end"
+  ],
+  [
+    "wire live_line = dl >= 3 && dl <= 194;",
+    "wire live_line = dl_live;"
+  ],
+  [
+    "    wire [7:0] m = dl[7:0] - 8'd3;\n",
+    ""
+  ],
+  [
+    "wire lead_line = dl == 2;",
+    "wire lead_line = dl_lead;"
+  ],
+  [
+    "layout != 0 && dl == 195",
+    "layout != 0 && dl_pad"
+  ],
+  [
+    "m[1:0], live_x",
+    "row_phase, live_x"
+  ]
+]

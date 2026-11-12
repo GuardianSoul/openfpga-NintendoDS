@@ -69,15 +69,26 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
 );
     // ---------------- DS raster (from the DS's own line starts) ----------------
     reg [10:0] hc = 0;                      // output timing only; saturates after all live windows
-    reg [8:0] dl = 0;
+    reg dl_live = 0, dl_lead = 0, dl_pad = 0;
+    reg [1:0] row_phase = 2'd1;
     reg top_a = 0;                          // engine A is the top screen at line 0 (NDS_SWAP_LINE0_MUT: the frame's)
     reg [1:0] gen_layout = 0;
     always @(posedge clk) begin
-        if (line_start) begin hc <= 0; dl <= vcount; end
+        if (line_start) begin
+            hc <= 0;
+            dl_live <= vcount >= 9'd3 && vcount <= 9'd194;
+            dl_lead <= vcount == 9'd2;
+            dl_pad <= vcount == 9'd195;
+            row_phase <= vcount[1:0] - 2'd3;
+        end
         else if (hc != 11'h7FF) hc <= hc + 1'b1;
         if (line_start && vcount == 0) begin gen_layout <= layout_in; top_a <= swap; end
         if (line_start && vcount == 2) layout <= gen_layout;
-        if (reset) begin hc <= 0; dl <= 0; end
+        if (reset) begin
+            hc <= 0;
+            dl_live <= 0; dl_lead <= 0; dl_pad <= 0;
+            row_phase <= 2'd1;
+        end
     end
     assign frame_pulse = line_start && vcount == 0;
 
@@ -195,8 +206,7 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     reg vt_s = 0, vt_d = 0;
     always @(posedge clk) begin vt_s <= vid_t; vt_d <= vt_s; end
     wire ph = vt_s != vt_d;                 // the clock after the one that saw a clk_vid edge
-    wire live_line = dl >= 3 && dl <= 194;
-    wire [7:0] m = dl[7:0] - 8'd3;
+    wire live_line = dl_live;
     wire buf_de = obuf && lc >= 240 && lc < 1264;
     wire [8:0] buf_x = lc[10:2] - 9'd60;
     wire live_de = live_line && hc >= 400 && hc < 1424;
@@ -206,8 +216,8 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     // picture), then one black lead DE line: the APF scaler drops the first
     // DE line after VS (openfpga-PlayStation LEAD_LINE), and without it the top row was
     // lost and a coloured row showed at the top (#65 green, #72/#87 red)
-    wire lead_line = dl == 2;
-    wire pad_line = layout != 0 && dl == 195;           // single layouts; stacked pads with k == 192
+    wire lead_line = dl_lead;
+    wire pad_line = layout != 0 && dl_pad;           // single layouts; stacked pads with k == 192
     wire pad_de = pad_line && hc >= 400 && hc < 1424;
     wire lead_de = lead_line && hc >= 400 && hc < 1424;
     wire de0 = buf_de || live_de || lead_de || pad_de;
@@ -222,7 +232,7 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     wire [2:0] slot_n = rotation == 2'd1 ? (one ? 3'd4 : 3'd2) : rotation == 2'd2 ? (one ? 3'd5 : 3'd3) : {2'b00, one};
     always @(posedge clk) begin
         ring_q <= ring[{k[0], buf_x[7:1]}];
-        live_q <= live[{m[1:0], live_x[7:0]}];
+        live_q <= live[{row_phase, live_x[7:0]}];
         de1 <= de0; hs1 <= hs0; vs1 <= vs0; buf1 <= buf_de; buf1s <= obuf; half1 <= buf_x[0];
         lead1 <= lead_de || pad_de || (buf_de && k == 8'd192);
         if (ph) begin
