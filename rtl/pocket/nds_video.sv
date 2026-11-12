@@ -236,7 +236,10 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
                     rgb <= {c[15:11], c[15:13], c[10:5], c[10:9], c[4:0], c[4:2]};
                 end else
                     rgb <= {live_q[5:0], live_q[5:4], live_q[11:6], live_q[11:10], live_q[17:12], live_q[17:16]};
-            end else rgb <= slot1 ? {8'd0, slot_n, 13'b0} : 24'h0;
+            // de is the previous emitted level until this nonblocking update.
+            // Reset may truncate a row before slot1: its falling edge still
+            // needs the current slot, or the external scaler selects slot 0.
+            end else rgb <= (slot1 || de) ? {8'd0, slot_n, 13'b0} : 24'h0;
         end
     end
 endmodule
