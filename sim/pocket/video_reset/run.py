@@ -45,7 +45,9 @@ def run(cmd,name,timeout,compile=False):
  commands.append(row);save(OUT/'commands.json',commands);need(not error and not cancel and not cleanup,'command lifecycle failure '+str(error));return code
 current=(ROOT/'rtl/pocket/nds_video.sv').read_text();original=subprocess.check_output(['git','show',BASE+':rtl/pocket/nds_video.sv'],cwd=ROOT,text=True);(OUT/'reference-source.sv').write_text(original)
 if A.revert:
- old='(slot1 || de) ?';need(current.count(old)==1,'revert anchor');current=current.replace(old,'slot1 ?')
+ # Revert the complete edge-slot change to the exact qualified original.
+ need(current.count('end else rgb <= de ?')==1 and 'wire slot0 =' not in current,'edge-only revert anchor')
+ current=original
 header=original[:original.index('    // ---------------- DS raster')].replace('module nds_video #','module video_reset_miter #',1).replace('output reg','output wire')
 import re
 header=re.sub(r' = 0(?=,|\n)', '', header)
@@ -56,7 +58,7 @@ sv=header+'nds_video_impl candidate('+conn(False)+');\nnds_video_ref reference('
 source=OUT/'video_reset_miter.sv';source.write_text(sv)
 cmd=['verilator','--cc','--exe','--build','-j','2','-O2','-Wno-WIDTHEXPAND','-Wno-WIDTHTRUNC','-Wno-UNUSEDSIGNAL','--top-module','video_reset_miter','--Mdir',str(OUT/'obj'),'-CFLAGS','-std=c++17 -O2',str(source),str(HERE/'video_reset.cpp')]
 need(run(cmd,'compile',180,True)==0,'compile failed');exe=OUT/'obj/Vvideo_reset_miter';results=[]
-for suite in (['short-pulses']if A.short_pulses else ['reset']if A.revert else ['reset','steady']if A.expect_reset_failure else ['reset','boundaries','steady']):
+for suite in (['short-pulses']if A.short_pulses else ['reset']if A.revert else ['reset','steady']if A.expect_reset_failure else ['reset','boundaries','steady','short-pulses']):
  rc=run([str(exe),suite],suite,300);log=(OUT/(suite+'.log')).read_text();m=re.search(r'^RESULT suite=([\w-]+) cases=(\d+) passed=(\d+) failed=(\d+)$',log,re.M);need(m is not None,'suite receipt missing');total,passed,failed=map(int,m.groups()[1:]);expected_failure=suite=='reset'and(A.revert or A.expect_reset_failure)
  if expected_failure:
   need(rc==1 and(total,passed,failed)==(36,4,32),'baseline/revert did not discriminate modes');need(sum(x.startswith('FAIL ')and'reset-DE-fall-slot'in x for x in log.splitlines())==32,'wrong failure predicate')

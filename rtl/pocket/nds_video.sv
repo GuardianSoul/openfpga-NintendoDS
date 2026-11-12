@@ -213,10 +213,9 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     wire de0 = buf_de || live_de || lead_de || pad_de;
     wire hs0 = (obuf && lc < 4) || (lead_line ? hc >= 16 && hc < 20 : hc < 4 && (layout != 0 || live_line));
     wire vs0 = lead_line && hc < 4;
-    wire slot0 = (obuf && lc >= 1264 && lc < 1268) || ((live_line || lead_line || pad_line) && hc >= 1424 && hc < 1428);
     reg [31:0] ring_q = 0;
     reg [17:0] live_q = 0;
-    reg de1 = 0, hs1 = 0, vs1 = 0, slot1 = 0, buf1 = 0, buf1s = 0, half1 = 0, lead1 = 0;
+    reg de1 = 0, hs1 = 0, vs1 = 0, buf1 = 0, buf1s = 0, half1 = 0, lead1 = 0;
     // the scaler slot word's slot: stacked 0, one screen 1; rotated (2026-10-28: all layouts) stacked
     // 2 (left) and 3 (right), one screen 4 (left) and 5 (right)
     wire one = layout != 0 && !buf1s;
@@ -224,7 +223,7 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     always @(posedge clk) begin
         ring_q <= ring[{k[0], buf_x[7:1]}];
         live_q <= live[{m[1:0], live_x[7:0]}];
-        de1 <= de0; hs1 <= hs0; vs1 <= vs0; slot1 <= slot0; buf1 <= buf_de; buf1s <= obuf; half1 <= buf_x[0];
+        de1 <= de0; hs1 <= hs0; vs1 <= vs0; buf1 <= buf_de; buf1s <= obuf; half1 <= buf_x[0];
         lead1 <= lead_de || pad_de || (buf_de && k == 8'd192);
         if (ph) begin
             de <= de1; hs <= hs1; vs <= vs1;
@@ -237,9 +236,9 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
                 end else
                     rgb <= {live_q[5:0], live_q[5:4], live_q[11:6], live_q[11:10], live_q[17:12], live_q[17:16]};
             // de is the previous emitted level until this nonblocking update.
-            // Reset may truncate a row before slot1: its falling edge still
-            // needs the current slot, or the external scaler selects slot 0.
-            end else rgb <= (slot1 || de) ? {8'd0, slot_n, 13'b0} : 24'h0;
+            // Announce the slot on every emitted DE falling edge, including
+            // a reset-truncated row; no separate raster-end pulse is needed.
+            end else rgb <= de ? {8'd0, slot_n, 13'b0} : 24'h0;
         end
     end
 endmodule

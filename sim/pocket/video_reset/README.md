@@ -31,3 +31,5 @@ The passive observer counts reset-high and post-deassertion DE falls separately;
 both categories must occur. It continues until the next VS without resetting
 its command history. This test-only extension reuses the prior byte-identical
 RTL proof; it does not relabel old executions as runs of new helper bytes.
+
+Edge-slot candidate: the default run now includes all276 reset cases and36 steady public-pin comparisons in one compiled model. --revert compiles the exact82d original module, restoring the complete scheduled-slot-only implementation; it must reproduce32 specific nonzero-slot failures and4Off controls. No pixel/phase/memory oracle was changed.
