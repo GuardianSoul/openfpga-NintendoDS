@@ -12,13 +12,15 @@ pixels and SDRAM are synthetic; no private runtime assets are used.
 
 `run.py --out NEW_DIRECTORY` builds the current module alongside exact parent
 82d264d and checks 36 stable layout/rotation/phase reset cases, 132 reset boundary
-cases, and 36 uninterrupted public-output cycle comparisons. All six existing
+cases, 108 short-pulse reset cases, and 36 uninterrupted public-output cycle
+comparisons. All six existing
 scaler slots are covered. The controller model aborts pending memory on global
 reset; stale responses after a new request are outside this test's contract.
 
-`--expect-reset-failure` records the original defect: 32 nonzero-slot cases fail
-and four Off/stacked controls pass. `--revert` builds the one-expression revert
-mutant and requires that same diagnostic ledger. All helpers/source must be
+`--expect-reset-failure` records the original defect when run on the original
+source: 32 nonzero-slot cases fail and four Off/stacked controls pass.
+`--revert` compiles the exact 82d original module, restoring the complete
+scheduled-slot-only implementation, and requires that same diagnostic ledger. All helpers/source must be
 committed before execution. Builds use the shared simulator lock and two workers;
 queue time is separate from bounded execution time.
 
@@ -29,7 +31,9 @@ full APF integration, physical scaler behavior, synthesis or FPGA capacity.
 combinations, four video phases, and widths one through three system clocks.
 The passive observer counts reset-high and post-deassertion DE falls separately;
 both categories must occur. It continues until the next VS without resetting
-its command history. This test-only extension reuses the prior byte-identical
-RTL proof; it does not relabel old executions as runs of new helper bytes.
+its command history. The default run includes this suite; `--short-pulses` selects it alone.
 
-Edge-slot candidate: the default run now includes all276 reset cases and36 steady public-pin comparisons in one compiled model. --revert compiles the exact82d original module, restoring the complete scheduled-slot-only implementation; it must reproduce32 specific nonzero-slot failures and4Off controls. No pixel/phase/memory oracle was changed.
+The edge-slot candidate announces the current scaler slot directly from the
+previous emitted DE level, in the low-DE output branch. The separate scheduled
+slot pulse and its register are removed. Pixel/phase/memory oracles remain
+unchanged, including blanking RGB in the uninterrupted public-pin miter.
