@@ -16,11 +16,11 @@ struct Config {
  int slot()const{return rot==1?(layout==0?2:4):rot==2?(layout==0?3:5):layout?1:0;}
 };
 struct Change {int frame,clock;Config config;};
-struct Case {std::string name;Config initial;std::vector<Change> changes;int frames=3,phase=0,cursor=1,cx=255,cy=191,service=0;bool late=false;int reset_clock=-1;bool miter=false;};
+struct Case {std::string name;Config initial;std::vector<Change> changes;int frames=3,phase=0,cursor=1,cx=255,cy=191,service=0;bool late=false;int reset_clock=-1;bool miter=false;int reset_cycles=8;};
 struct Sim {
  Vvideo_reset_miter d;Case c;Config requested,active,next,staged;uint64_t cycle=0,checks=0,pixels=0,hash=1469598103934665603ULL;
  std::array<uint32_t,24576> ram{};std::array<bool,24576>written{};
- bool pin_de=false;int actual_lastslot=0;bool wp=false,rp=false,burst=false,last_toggle=false,prev_de=false,prev_hs=false,prev_vs=false;
+ bool pin_de=false,reset_window=false;int actual_lastslot=0,fall_during_reset=0,fall_after_reset=0;bool wp=false,rp=false,burst=false,last_toggle=false,prev_de=false,prev_hs=false,prev_vs=false;
  uint32_t wa=0,wd=0,ra=0,ba=0;int wdelay=0,rdelay=0,beat=0;
  int f=0,clock=0,frame=-1,row=0,col=0,slots=0,hscount=0,complete=0,lastslot=0,external_slot=0;
  uint64_t samples=0,hs_at=0,vs_at=0,writes=0,reads=0,row_start=0,max_row_service=0,frame_reads=0,frame_writes=0;
@@ -75,10 +75,10 @@ struct Sim {
   need(d.underruns==d.ref_underruns && d.frame_pulse==d.ref_frame_pulse,"reference-status");
  }
  // External slot state never stops observing because the DUT is reset.
- if(pin_de && !d.de){actual_lastslot=d.rgb>>13;need(d.rgb==uint32_t(active.slot()<<13),"reset-DE-fall-slot",d.rgb,uint32_t(active.slot()<<13));}
+ if(pin_de && !d.de){actual_lastslot=d.rgb>>13;if(reset_window){if(reset)++fall_during_reset;else ++fall_after_reset;}need(d.rgb==uint32_t(active.slot()<<13),"reset-DE-fall-slot",d.rgb,uint32_t(active.slot()<<13));}
  pin_de=d.de;
 
- if(!reset)observe(sample,old,flags);++cycle;}
+ if(!reset)observe(sample,old,flags);if(d.vs)reset_window=false;++cycle;}
  void run(){
   d.reset=1;d.touch=c.cursor!=0;d.pen=c.cursor==2;d.cur_x=c.cx;d.cur_y=c.cy;for(int i=0;i<20;++i)tick(true);d.reset=0;
   for(f=0;f<c.frames;++f){active=requested;written.fill(false);frame_reads=frame_writes=0;
@@ -87,8 +87,8 @@ struct Sim {
     if(f==1&&clock==c.reset_clock){
      // PLL/global reset cancels backend work. Deliberately interrupt this raster;
      // the external scaler retains the last slot, while a new DS0 restarts output.
-     wp=rp=burst=false;d.line_start=0;d.px_valid=0;d.reset=1;
-     for(int z=0;z<8;++z)tick(true);d.reset=0;
+     wp=rp=burst=false;d.line_start=0;d.px_valid=0;reset_window=true;d.reset=1;
+     for(int z=0;z<c.reset_cycles;++z)tick(true);d.reset=0;
      frame=-1;prev_de=prev_hs=prev_vs=false;interrupted=true;break;
     }
     for(auto&a:c.changes)if(a.frame==f&&a.clock==clock)requested=a.config;
@@ -106,16 +106,17 @@ struct Sim {
    need(frame_writes==uint64_t(active.layout?0:24576),"frame-write-count",frame_writes,active.layout?0:24576);
    need(!wp&&!rp&&!burst,"pending-end-frame");
   }
-  printf("PASS %s frames=%d pixels=%llu reads=%llu writes=%llu max_row_service=%llu checks=%llu hash=%016llx cycles=%llu\n",c.name.c_str(),complete,(unsigned long long)pixels,(unsigned long long)reads,(unsigned long long)writes,(unsigned long long)max_row_service,(unsigned long long)checks,(unsigned long long)hash,(unsigned long long)cycle);
+  printf("PASS %s frames=%d pixels=%llu reads=%llu writes=%llu max_row_service=%llu checks=%llu hash=%016llx cycles=%llu reset_high_falls=%d post_deassert_falls=%d\n",c.name.c_str(),complete,(unsigned long long)pixels,(unsigned long long)reads,(unsigned long long)writes,(unsigned long long)max_row_service,(unsigned long long)checks,(unsigned long long)hash,(unsigned long long)cycle,fall_during_reset,fall_after_reset);
  }
 };
 int main(int argc,char**argv){
  Verilated::commandArgs(argc,argv);std::string suite=argc>1?argv[1]:"reset";int cases=0,failed=0;
- auto one=[&](int layout,int rotation,int phase,int cut){
-  Case c;c.name=suite+"-l"+std::to_string(layout)+"-r"+std::to_string(rotation)+"-p"+std::to_string(phase)+"-cut"+std::to_string(cut);c.initial={layout,rotation};c.phase=phase;c.reset_clock=cut;c.cursor=1+(layout+rotation+phase)%2;c.cx=phase%2?0:255;c.cy=phase%2?0:191;c.service=1;c.miter=suite=="steady";c.frames=cut<0?2:3;
+ auto one=[&](int layout,int rotation,int phase,int cut,int width=8){
+  Case c;c.name=suite+"-l"+std::to_string(layout)+"-r"+std::to_string(rotation)+"-p"+std::to_string(phase)+"-cut"+std::to_string(cut)+"-width"+std::to_string(width);c.initial={layout,rotation};c.phase=phase;c.reset_clock=cut;c.reset_cycles=width;c.cursor=1+(layout+rotation+phase)%2;c.cx=phase%2?0:255;c.cy=phase%2?0:191;c.service=1;c.miter=suite=="steady";c.frames=cut<0?2:3;
   try{Sim(c).run();}catch(const std::exception&e){++failed;printf("CASE_ERROR %s %s\n",c.name.c_str(),e.what());}++cases;
  };
- if(suite=="reset"||suite=="steady")for(int l=0;l<3;++l)for(int r=0;r<3;++r)for(int p=0;p<4;++p)one(l,r,p,suite=="steady"?-1:5*Sim::LINE+600);
+ if(suite=="short-pulses")for(int l=0;l<3;++l)for(int r=0;r<3;++r)for(int p=0;p<4;++p)for(int width=1;width<=3;++width)one(l,r,p,5*Sim::LINE+600,width);
+ else if(suite=="reset"||suite=="steady")for(int l=0;l<3;++l)for(int r=0;r<3;++r)for(int p=0;p<4;++p)one(l,r,p,suite=="steady"?-1:5*Sim::LINE+600);
  else if(suite=="boundaries")for(auto cfg:std::vector<Config>{{1,0},{0,1},{2,2}})for(int p=0;p<4;++p){
   int footer=cfg.layout?195*Sim::LINE:195*Sim::LINE+1+192*1400;
   for(int cut:std::vector<int>{0,2*Sim::LINE+399,2*Sim::LINE+600,2*Sim::LINE+1424,5*Sim::LINE+399,5*Sim::LINE+1424,194*Sim::LINE+200,footer+239,footer+600,footer+1424})one(cfg.layout,cfg.rot,p,cut);

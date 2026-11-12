@@ -2,7 +2,7 @@
 """Original video reset/slot regression: public pins, synthetic pixels/SDRAM, no assets."""
 import argparse,fcntl,hashlib,json,os,signal,subprocess,time
 from pathlib import Path
-P=argparse.ArgumentParser(description=__doc__);P.add_argument('--out',type=Path,required=True);P.add_argument('--expect-reset-failure',action='store_true');P.add_argument('--revert',action='store_true');A=P.parse_args()
+P=argparse.ArgumentParser(description=__doc__);P.add_argument('--out',type=Path,required=True);P.add_argument('--expect-reset-failure',action='store_true');P.add_argument('--revert',action='store_true');P.add_argument('--short-pulses',action='store_true');A=P.parse_args()
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2];OUT=A.out.resolve();BASE='82d264d6cc96ec30e35abb87f369a5a1be419f3c'
 def need(v,m):
  if not v:raise RuntimeError(m)
@@ -56,11 +56,13 @@ sv=header+'nds_video_impl candidate('+conn(False)+');\nnds_video_ref reference('
 source=OUT/'video_reset_miter.sv';source.write_text(sv)
 cmd=['verilator','--cc','--exe','--build','-j','2','-O2','-Wno-WIDTHEXPAND','-Wno-WIDTHTRUNC','-Wno-UNUSEDSIGNAL','--top-module','video_reset_miter','--Mdir',str(OUT/'obj'),'-CFLAGS','-std=c++17 -O2',str(source),str(HERE/'video_reset.cpp')]
 need(run(cmd,'compile',180,True)==0,'compile failed');exe=OUT/'obj/Vvideo_reset_miter';results=[]
-for suite in (['reset']if A.revert else ['reset','steady']if A.expect_reset_failure else ['reset','boundaries','steady']):
- rc=run([str(exe),suite],suite,300);log=(OUT/(suite+'.log')).read_text();m=re.search(r'^RESULT suite=(\w+) cases=(\d+) passed=(\d+) failed=(\d+)$',log,re.M);need(m is not None,'suite receipt missing');total,passed,failed=map(int,m.groups()[1:]);expected_failure=suite=='reset'and(A.revert or A.expect_reset_failure)
+for suite in (['short-pulses']if A.short_pulses else ['reset']if A.revert else ['reset','steady']if A.expect_reset_failure else ['reset','boundaries','steady']):
+ rc=run([str(exe),suite],suite,300);log=(OUT/(suite+'.log')).read_text();m=re.search(r'^RESULT suite=([\w-]+) cases=(\d+) passed=(\d+) failed=(\d+)$',log,re.M);need(m is not None,'suite receipt missing');total,passed,failed=map(int,m.groups()[1:]);expected_failure=suite=='reset'and(A.revert or A.expect_reset_failure)
  if expected_failure:
   need(rc==1 and(total,passed,failed)==(36,4,32),'baseline/revert did not discriminate modes');need(sum(x.startswith('FAIL ')and'reset-DE-fall-slot'in x for x in log.splitlines())==32,'wrong failure predicate')
- else:need(rc==0 and failed==0 and total==passed and total=={'reset':36,'boundaries':132,'steady':36}[suite]and'FAIL 'not in log,'positive suite failed')
+ else:need(rc==0 and failed==0 and total==passed and total=={'reset':36,'boundaries':132,'steady':36,'short-pulses':108}[suite]and'FAIL 'not in log,'positive suite failed')
+ if suite=='short-pulses':
+  high=sum(map(int,re.findall(r'reset_high_falls=(\d+)',log)));post=sum(map(int,re.findall(r'post_deassert_falls=(\d+)',log)));need(high>0 and post>0 and high+post==108,'short pulse fall coverage')
  results.append(dict(suite=suite,cases=total,passed=passed,failed=failed,expected_failure=expected_failure,log_sha256=sha(OUT/(suite+'.log'))))
 need(all(sha(p)==h for p,h in inputs.items()),'source changed');save(OUT/'summary.json',dict(pass_=True,revision=rev,baseline=BASE,revert=A.revert,expected_reset_failure=A.expect_reset_failure,inputs=inputs,compiled_source_sha256=sha(source),reference_sha256=sha(OUT/'reference-source.sv'),executable_sha256=sha(exe),commands_sha256=sha(OUT/'commands.json'),results=results,scope='Finite actual original/fixed-module pin observations and uninterrupted cycle miter. No full APF/physical scaler/shared-controller/fit claim.'))
 print(json.dumps(dict(pass_=True,revision=rev,results=results)))
