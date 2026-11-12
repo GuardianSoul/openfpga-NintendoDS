@@ -1,5 +1,10 @@
 # Original video reset / scaler-slot regression
 
+The first frame warms up the original direct layout-selection logic; its pixel
+rows/commands are checked, but previous-frame scaler agreement starts after its
+complete emitted frame. This keeps the unrelated initial mode-switch behavior
+explicitly outside the reset comparison.
+
 The passive slot observer continues across global reset. It records every DE
 falling edge, including a truncated row, then checks the last emitted command at
 the following VS. Only incomplete image checking is abandoned on reset. Test

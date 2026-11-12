@@ -47,7 +47,7 @@ struct Sim {
   if(stored){r>>=1;b>>=1;return(((r<<3)|(r>>2))<<16)|(((g<<2)|(g>>4))<<8)|((b<<3)|(b>>2));}
   return(((r<<2)|(r>>4))<<16)|(((g<<2)|(g>>4))<<8)|((b<<2)|(b>>4));
  }
- void finish(){need(!prev_de,"frame-ended-in-DE");need(row==slotheight(external_slot)+2,"external-scaler-height",row,slotheight(external_slot)+2);need(row==active.height()+2,"DE-rows",row,active.height()+2);need(slots==row,"slots",slots,row);if(!active.layout)need(hscount==row,"HS-rows",hscount,row);need(d.underruns==0,"missing-row",d.underruns);++complete;}
+ void finish(){need(!prev_de,"frame-ended-in-DE");if(f>0)need(row==slotheight(external_slot)+2,"external-scaler-height",row,slotheight(external_slot)+2);need(row==active.height()+2,"DE-rows",row,active.height()+2);need(slots==row,"slots",slots,row);if(!active.layout)need(hscount==row,"HS-rows",hscount,row);need(d.underruns==0,"missing-row",d.underruns);++complete;}
  void observe(bool sample,uint32_t oldrgb,int oldflags){
   int flags=d.de|(d.hs<<1)|(d.vs<<2);if(!sample){need(d.rgb==oldrgb&&flags==oldflags,"output-phase");return;}++samples;
   if(d.vs){need(!prev_vs,"VS-width");if(frame>=0)finish();frame=f;row=col=slots=hscount=0;vs_at=samples;external_slot=lastslot;if(f>0)need(actual_lastslot==active.slot(),"previous-LAST-slot",actual_lastslot,active.slot());need(!d.hs,"HS-on-VS");}
@@ -113,7 +113,7 @@ int main(int argc,char**argv){
  Verilated::commandArgs(argc,argv);std::string suite=argc>1?argv[1]:"reset";int cases=0,failed=0;
  auto one=[&](int layout,int rotation,int phase,int cut){
   Case c;c.name=suite+"-l"+std::to_string(layout)+"-r"+std::to_string(rotation)+"-p"+std::to_string(phase)+"-cut"+std::to_string(cut);c.initial={layout,rotation};c.phase=phase;c.reset_clock=cut;c.cursor=1+(layout+rotation+phase)%2;c.cx=phase%2?0:255;c.cy=phase%2?0:191;c.service=1;c.miter=suite=="steady";c.frames=cut<0?2:3;
-  try{Sim(c).run();}catch(const std::exception&e){++failed;fprintf(stderr,"CASE_ERROR %s %s\n",c.name.c_str(),e.what());}++cases;
+  try{Sim(c).run();}catch(const std::exception&e){++failed;printf("CASE_ERROR %s %s\n",c.name.c_str(),e.what());}++cases;
  };
  if(suite=="reset"||suite=="steady")for(int l=0;l<3;++l)for(int r=0;r<3;++r)for(int p=0;p<4;++p)one(l,r,p,suite=="steady"?-1:5*Sim::LINE+600);
  else if(suite=="boundaries")for(auto cfg:std::vector<Config>{{1,0},{0,1},{2,2}})for(int p=0;p<4;++p){
