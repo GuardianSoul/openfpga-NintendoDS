@@ -1,3 +1,5 @@
+Counter-width experiment note: this branch compares against fixed401ebad, keeps the C++ oracle unchanged, and disables the historical reset-failure/revert CLI options. The separate video_counter runner owns counter negative controls. The earlier82d history below describes the inherited test.
+
 # Original video reset / scaler-slot regression
 
 The first frame warms up the original direct layout-selection logic; its pixel

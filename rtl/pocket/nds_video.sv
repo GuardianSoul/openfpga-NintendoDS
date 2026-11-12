@@ -68,13 +68,13 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     output reg de = 0, hs = 0, vs = 0
 );
     // ---------------- DS raster (from the DS's own line starts) ----------------
-    reg [12:0] hc = 0;                      // clk_sys clocks into the DS line (0..4259)
+    reg [10:0] hc = 0;                      // output timing only; saturates after all live windows
     reg [8:0] dl = 0;
     reg top_a = 0;                          // engine A is the top screen at line 0 (NDS_SWAP_LINE0_MUT: the frame's)
     reg [1:0] gen_layout = 0;
     always @(posedge clk) begin
         if (line_start) begin hc <= 0; dl <= vcount; end
-        else if (hc != 13'h1FFF) hc <= hc + 1'b1;
+        else if (hc != 11'h7FF) hc <= hc + 1'b1;
         if (line_start && vcount == 0) begin gen_layout <= layout_in; top_a <= swap; end
         if (line_start && vcount == 2) layout <= gen_layout;
         if (reset) begin hc <= 0; dl <= 0; end
@@ -159,7 +159,7 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     reg fetching = 0;
     reg obuf = 0;
     reg [7:0] k = 0;
-    reg [11:0] lc = 0;                      // clk_sys clocks into a short line (0..1399)
+    reg [10:0] lc = 0;                      // clk_sys clocks into a short line (0..1399)
     wire buf_start = obuf && lc == 0;
     assign r_addr = {BUF_W[23:15], f_line, fq, 2'b00};
     always @(posedge clk) begin
@@ -184,7 +184,7 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
         if (reset) begin obuf <= 0; k <= 0; lc <= 0; end
         else if (layout == 0 && line_start && vcount == 9'd195) begin obuf <= 1; k <= 0; lc <= 0; end
         else if (obuf) begin
-            if (lc == 12'd1399) begin
+            if (lc == 11'd1399) begin
                 lc <= 0;
                 if (k == 8'd192) obuf <= 0; else k <= k + 1'b1;                // 192: the pad line
             end else lc <= lc + 1'b1;

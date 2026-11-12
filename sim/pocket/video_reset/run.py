@@ -3,12 +3,12 @@
 import argparse,fcntl,hashlib,json,os,signal,subprocess,time
 from pathlib import Path
 P=argparse.ArgumentParser(description=__doc__);P.add_argument('--out',type=Path,required=True);P.add_argument('--expect-reset-failure',action='store_true');P.add_argument('--revert',action='store_true');P.add_argument('--short-pulses',action='store_true');A=P.parse_args()
-HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2];OUT=A.out.resolve();BASE='82d264d6cc96ec30e35abb87f369a5a1be419f3c'
+HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2];OUT=A.out.resolve();BASE='401ebad545db14a508c1f5547296469ce30ee0c6'
 def need(v,m):
  if not v:raise RuntimeError(m)
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 def save(p,v):p.write_text(json.dumps(v,indent=2)+'\n')
-need(not OUT.exists(),'fresh output directory');OUT.mkdir(parents=True);need(not subprocess.check_output(['git','status','--porcelain'],cwd=ROOT).strip(),'commit source and helpers before execution')
+need(not A.revert and not A.expect_reset_failure,'counter experiment uses fixed401 reference; negative controls use video_counter runner');need(not OUT.exists(),'fresh output directory');OUT.mkdir(parents=True);need(not subprocess.check_output(['git','status','--porcelain'],cwd=ROOT).strip(),'commit source and helpers before execution')
 rev=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip();inputs={str(p):sha(p)for p in [ROOT/'rtl/pocket/nds_video.sv',*HERE.glob('*')]if p.is_file()};save(OUT/'inputs.json',dict(revision=rev,files=inputs));commands=[];cancel=[]
 for sig in [signal.SIGTERM,signal.SIGINT]:signal.signal(sig,lambda s,f:cancel.append(s))
 def run(cmd,name,timeout,compile=False):
