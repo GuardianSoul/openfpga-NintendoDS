@@ -11,10 +11,10 @@
 // bit order reversed, or the register form `rrrr0110` (bit 7 = read)
 // directly. Registers: status 1 and 2, date+time (7 bytes), time (3), INT1
 // (1 or 3 bytes by status 2 bit 2), INT2 (3), clock adjust, free register;
-// written date and time fields are taken as sent, without melonDS's range
-// checks, and the clock always counts 24 hours: status 1's 12/24-hour bit only
-// reads back, as games keep 24-hour mode (docs/ds-rules.md). The hour's pm bit
-// is its value's, as a 24-hour read shows it.
+// date/time writes are masked and sanitized as in melonDS WriteDateTime.
+// The hour stays in canonical 24-hour BCD internally; serial reads/writes
+// convert for status 1's 12-hour mode (00-11 plus a PM bit). A day beyond
+// the current month wraps to 1 and carries into the month/year.
 //
 // Not modelled: interrupts (INT1/INT2 settings and the alarm registers are
 // stored and read back, but nothing fires and status 1 bits 4-6 stay 0),
@@ -25,14 +25,14 @@
 // its bit 7 (power-on) when CS drops.
 //
 // Area: seconds, minutes, day, day of week, status 2, clock adjust, the free
-// register and both alarms live in a 16-byte RAM (one MLAB; M10K is the
-// scarce block on the chip); year, month, hour and pm stay in flops (a
+// register and both alarms live in the existing 16-byte RAM; no additional
+// RAM is needed. Year, month and canonical hour stay in flops (a
 // written day and the 12/24-hour switch need them inside a transfer). The
-// second count runs one field per clock (up to 5) and only while CS is low,
+// second count starts while CS is low and runs one field per clock,
 // the reset command clears the RAM over 16 clocks (all done before the next
 // field access can come: a command byte is 16 register writes); a second
 // due during a clear or a count waits (up to two are held). Behaviour is the
-// same as the all-flop version (b4eb578), cycle for cycle at the register,
+// same as the prior version on valid 24-hour traffic, cycle for cycle at the register,
 // for accesses at least 3 clocks apart (nds_fabric's IO path takes 4)
 // (docs/mlab-tables.md: sim/ds_dev/equiv/rtc_eq.sh).
 //
@@ -77,12 +77,30 @@ module nds_rtc #(
         endcase
     endfunction
 
+    // A bad digit or range maps to the minimum, after each field's mask.
+    function automatic logic [7:0] sanitize(input logic [7:0] v,
+                                           input logic [7:0] lo, hi);
+        return (v[3:0] > 4'd9 || v[7:4] > 4'd9 || v < lo || v > hi) ? lo : v;
+    endfunction
+    function automatic logic [5:0] hour24(input logic [7:0] v, input logic mode24);
+        logic [7:0] h;
+        h = sanitize(v & 8'h3f, 8'h00, mode24 ? 8'h23 : 8'h11);
+        // BCD +12: low digits 8 and 9 need the decimal correction.
+        if (!mode24 && v[6]) h = h + (h[3:0] >= 4'd8 ? 8'h18 : 8'h12);
+        return h[5:0];
+    endfunction
+    function automatic logic [5:0] hour12(input logic [5:0] h);
+        // BCD -12: low digits 0 and 1 borrow from the tens digit.
+        return h >= 6'h12 ? h - (h[3:0] < 4'd2 ? 6'h18 : 6'h12) : h;
+    endfunction
+
     // ---- state
     logic [7:0]  io;
     logic [7:0]  yr;
     logic [4:0]  mo;
     logic [5:0]  hr;
     wire         pm = hr >= 6'h12;
+    wire [5:0]   serial_hr = s1[1] ? hr : hour12(hr);
     logic        poc;           // status 1 bit 7
     logic [3:1]  s1;            // status 1 bits 3:1 (bit 1: 24-hour mode)
     logic        s2_2;          // status 2 bit 2 (INT1 layout), a copy of the RAM's
@@ -187,13 +205,13 @@ module nds_rtc #(
                 3'd1: obf = {3'd0, mo};
                 3'd2: begin ob_ram = 1'b1; ob_a = R_DY; end
                 3'd3: begin ob_ram = 1'b1; ob_a = R_DW; end
-                3'd4: obf = {1'b0, pm, hr};
+                3'd4: obf = {1'b0, pm, serial_hr};
                 3'd5: begin ob_ram = 1'b1; ob_a = R_MI; end
                 3'd6: begin ob_ram = 1'b1; ob_a = R_SE; end
                 default: ;
             endcase
             3'd6: case (out_pos)
-                3'd0: obf = {1'b0, pm, hr};
+                3'd0: obf = {1'b0, pm, serial_hr};
                 3'd1: begin ob_ram = 1'b1; ob_a = R_MI; end
                 3'd2: begin ob_ram = 1'b1; ob_a = R_SE; end
                 default: ;
@@ -229,6 +247,8 @@ module nds_rtc #(
     // field writes of a command; reads follow the output byte while idle
     logic [3:0] dat_a;                  // RAM byte a command data byte writes
     logic [7:0] dat_d;
+    wire [7:0] day_in = sanitize(ib & 8'h3f, 8'h01, 8'h31);
+    wire day_carry = day_in > dim(mo, leap(yr));
     logic       dat_wr;                 // the byte would write (dat_w without dat_in)
     always_comb begin
         dat_wr = 1'b0; dat_a = R_SE; dat_d = ib;
@@ -242,10 +262,10 @@ module nds_rtc #(
             default: ;
         endcase
         case (fld_r)
-            3'd3: begin dat_wr = 1'b1; dat_a = R_DY; end
-            3'd4: begin dat_wr = 1'b1; dat_a = R_DW; end
-            3'd6: begin dat_wr = 1'b1; dat_a = R_MI; end
-            3'd7: begin dat_wr = 1'b1; dat_a = R_SE; end
+            3'd3: begin dat_wr = 1'b1; dat_a = R_DY; dat_d = day_carry ? 8'h01 : day_in; end
+            3'd4: begin dat_wr = 1'b1; dat_a = R_DW; dat_d = sanitize(ib & 8'h07, 8'h00, 8'h06); end
+            3'd6: begin dat_wr = 1'b1; dat_a = R_MI; dat_d = sanitize(ib & 8'h7f, 8'h00, 8'h59); end
+            3'd7: begin dat_wr = 1'b1; dat_a = R_SE; dat_d = sanitize(ib & 8'h7f, 8'h00, 8'h59); end
             default: ;
         endcase
     end
@@ -369,9 +389,13 @@ module nds_rtc #(
                 default: ;
             endcase
             case (fld)
-                3'd1: yr <= ib;
-                3'd2: mo <= ib[4:0];
-                3'd5: hr <= ib[5:0];
+                3'd1: yr <= sanitize(ib, 8'h00, 8'h99);
+                3'd2: mo <= 5'(sanitize(ib & 8'h1f, 8'h01, 8'h12));
+                // Reuse the count's month/year incrementer. Both steps finish
+                // before the next legal IO write (four clocks), much less the
+                // next complete field byte. The day RAM write is already queued.
+                3'd3: if (day_carry) ks <= K_MO;
+                3'd5: hr <= hour24(ib, s1[1]);
                 default: ;
             endcase
         end

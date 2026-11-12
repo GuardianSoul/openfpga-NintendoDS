@@ -2,7 +2,7 @@
 // their register ports the way ARM7 code does: SPI bytes polled on busy, the
 // RTC's serial protocol bit-banged. Expected values come from the firmware
 // image, melonDS's documented device values and the C library's calendar.
-//   Vtb_ds_dev [--seed N] [--only spi,fw,tsc,rtc] [--fw firmware.bin]
+//   Vtb_ds_dev [--seed N] [--only spi,fw,tsc,rtc,rtc-exhaust] [--fw firmware.bin]
 #include "Vtb_ds_dev.h"
 #include "verilated.h"
 #include <cstdio>
@@ -19,6 +19,7 @@ static Vtb_ds_dev* top;
 static std::mt19937_64 rng;
 static u64 cyc = 0, tsl = 0;    // cycles; DS ticks since the RTC's init load
 static long checks = 0, fails = 0;
+static bool tick_enabled = true;
 static const char* phase = "";
 static const int SEC = 1000;    // tb_ds_dev SEC_TICKS
 #define CHECK(c, ...) do { checks++; if (!(c)) { if (fails++ < 40) { printf("FAIL [%s] cyc %llu: ", phase, (unsigned long long)cyc); printf(__VA_ARGS__); printf("\n"); } } } while (0)
@@ -42,7 +43,7 @@ static void step() {
         if (m_lat == 0) { top->fw_ack = 1; top->fw_rdata = fw_word(m_addr); m_pend = false; }
         else m_lat--;
     }
-    top->tick = cyc & 1;
+    top->tick = tick_enabled && (cyc & 1);
     top->clk = 0; top->eval();
     top->clk = 1; top->eval();
     if (top->tick) tsl++;
@@ -480,6 +481,129 @@ static void test_rtc() {
           "after reset command %s / %02x %02x %02x", hex(v).c_str(), w[0], f[0], s[0]);
 }
 
+// Reference-behavior gate independent of the two unresolved IO high-byte
+// policy checks above. The oracle uses decimal arithmetic, not RTL BCD logic.
+static int from_bcd(u8 v) { return (v >> 4) * 10 + (v & 15); }
+static u8 clean(u8 v, int lo, int hi) {
+    int n = from_bcd(v);
+    return (v >> 4) > 9 || (v & 15) > 9 || n < lo || n > hi ? bcd(lo) : v;
+}
+static int month_days(int y, int m) {
+    static const int days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    return days[m - 1] + (m == 2 && y % 4 == 0);
+}
+static void rtc_second() {
+    tick_enabled = true; idle(2 * SEC); tick_enabled = false; idle(24);
+}
+static void rtc_compare(const std::vector<u8>& expected, const char* label, int input) {
+    auto got = rtc_read(0xA6, 7);
+    CHECK(got == expected, "%s input %02x: %s want %s", label, input,
+          hex(got).c_str(), hex(expected).c_str());
+}
+static void test_rtc_exhaust() {
+    phase = "rtc-exhaust";
+    tick_enabled = false;
+    // Discard the prior suite's fractional second/pending state.
+    top->rst = 1; idle(4); top->rst = 0; idle(24);
+    rtc_write(0x06, {2});
+    const std::vector<u8> base = {0x24, 0x01, 0x15, 3, 0x08, 0x25, 0x37};
+    for (int field = 0; field < 7; field++) for (int raw = 0; raw < 256; raw++) {
+        auto sent = base, expected = base;
+        sent[field] = raw;
+        switch (field) {
+            case 0: expected[0] = clean(raw, 0, 99); break;
+            case 1: expected[1] = clean(raw & 31, 1, 12); break;
+            case 2: expected[2] = clean(raw & 63, 1, 31); break;
+            case 3: expected[3] = clean(raw & 7, 0, 6); break;
+            case 4: expected[4] = clean(raw & 63, 0, 23);
+                    if (from_bcd(expected[4]) >= 12) expected[4] |= 64; break;
+            default: expected[field] = clean(raw & 127, 0, 59); break;
+        }
+        rtc_write(0x26, sent);
+        rtc_compare(expected, "field sanitation", (field << 8) | raw);
+    }
+    // Every possible day byte for every month in leap and ordinary years.
+    for (int year : {23, 24}) for (int month = 1; month <= 12; month++)
+        for (int raw = 0; raw < 256; raw++) {
+            auto sent = base, expected = base;
+            sent[0] = expected[0] = bcd(year);
+            sent[1] = expected[1] = bcd(month); sent[2] = raw;
+            expected[2] = clean(raw & 63, 1, 31);
+            if (from_bcd(expected[2]) > month_days(year, month)) {
+                expected[2] = 1; expected[1] = bcd(month + 1);
+            }
+            rtc_write(0x26, sent); rtc_compare(expected, "day/month carry", raw);
+        }
+    // All byte inputs in both modes, then read through both mode switches.
+    for (int mode : {0, 2}) for (int raw = 0; raw < 256; raw++) {
+        rtc_write(0x06, {(u8)mode});
+        rtc_write(0x66, {(u8)raw, 0, 0});
+        int hour = from_bcd(clean(raw & 63, 0, mode ? 23 : 11));
+        if (!mode && (raw & 64)) hour += 12;
+        for (int readmode : {mode, mode ^ 2, mode}) {
+            rtc_write(0x06, {(u8)readmode});
+            u8 expected = bcd(readmode ? hour : hour % 12) | (hour >= 12 ? 64 : 0);
+            auto got = rtc_read(0xE6, 3);
+            CHECK(got == std::vector<u8>({expected, 0, 0}),
+                  "hour raw %02x write mode %d read mode %d: %s want %02x 00 00",
+                  raw, mode, readmode, hex(got).c_str(), expected);
+        }
+    }
+    // Every hour boundary in both modes, including noon/midnight and PM.
+    for (int mode : {0, 2}) for (int hour = 0; hour < 24; hour++) {
+        rtc_write(0x06, {(u8)mode});
+        u8 h = bcd(mode ? hour : hour % 12) | (hour >= 12 ? 64 : 0);
+        rtc_write(0x26, {0x24, 1, 1, 6, h, 0x59, 0x59});
+        rtc_second(); int next = (hour + 1) % 24;
+        h = bcd(mode ? next : next % 12) | (next >= 12 ? 64 : 0);
+        rtc_compare({0x24, 1, (u8)(hour == 23 ? 2 : 1), (u8)(hour == 23 ? 0 : 6), h, 0, 0},
+                    "hour boundary", hour);
+    }
+    rtc_write(0x06, {2});
+    // Every month/year boundary across the full supported century.
+    for (int year = 0; year < 100; year++) for (int month = 1; month <= 12; month++) {
+        rtc_write(0x26, {bcd(year), bcd(month), bcd(month_days(year, month)), 6, 0x23, 0x59, 0x59});
+        rtc_second();
+        rtc_compare({bcd((year + (month == 12)) % 100), bcd(month == 12 ? 1 : month + 1), 1, 0, 0, 0, 0},
+                    "calendar rollover", year * 12 + month);
+    }
+    // Cancel each partial field byte. The preceding year/month/day writes
+    // remain committed, but 0..7 bits of the next byte cannot change it.
+    for (int field = 0; field < 7; field++) for (int bits = 0; bits < 8; bits++) {
+        rtc_write(0x26, base);
+        rtc_begin(); rtc_send(0x26);
+        for (int i = 0; i < field; i++) rtc_send(base[i]);
+        for (int i = 0; i < bits; i++) {
+            rtc_w(CS1 | SCK0 | SO | 1); rtc_w(CS1 | SCK1 | SO | 1);
+        }
+        rtc_end(); rtc_compare(base, "partial-byte cancel", field * 8 + bits);
+    }
+    // CS holds a consistent view through several elapsed seconds; only one
+    // pending second is retained and released when CS falls.
+    rtc_write(0x26, {0x24, 2, 0x29, 4, 0x23, 0x59, 0x59});
+    rtc_begin(); rtc_send(0xA6); rtc_second(); rtc_second(); rtc_second();
+    std::vector<u8> held;
+    for (int i = 0; i < 7; i++) held.push_back(rtc_recv());
+    CHECK(held == std::vector<u8>({0x24, 2, 0x29, 4, 0x63, 0x59, 0x59}), "CS held %s", hex(held).c_str());
+    rtc_end(); idle(24);
+    rtc_compare({0x24, 3, 1, 5, 0, 0, 0}, "CS release count", 0);
+    // Reset command clears nonzero RAM in either mode before the next
+    // command can access it. Resetting with a held second preserves the
+    // existing timebase rule: that second is released after CS falls.
+    for (int mode : {0, 2}) {
+        rtc_write(0x26, base); rtc_write(0x46, {0x44}); rtc_write(0x76, {0xA5});
+        rtc_write(0x06, {(u8)(mode | 1)});
+        rtc_compare({0, 1, 1, 0, 0, 0, 0}, "reset command", mode);
+        CHECK(rtc_read(0xC6, 1)[0] == 0 && rtc_read(0xF6, 1)[0] == 0, "reset RAM registers");
+    }
+    rtc_write(0x06, {2}); rtc_write(0x26, base);
+    rtc_begin(); rtc_send(0x06); rtc_second(); rtc_send(3); rtc_end(); idle(24);
+    rtc_compare({0, 1, 1, 0, 0, 0, 1}, "reset held second", 0);
+    top->rst = 1; idle(4); top->rst = 0; idle(24);
+    rtc_compare({0, 1, 1, 0, 0, 0, 0}, "hardware reset", 0);
+    tick_enabled = true;
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     u64 seed = 1; std::string only, fwpath = std::string(getenv("HOME") ? getenv("HOME") : "") + "/Git/NDS_Pocket/roms/firmware.bin";
@@ -501,11 +625,12 @@ int main(int argc, char** argv) {
     phase = "reset";
     u32 r0 = io(true, false, 0xF, 0), r1 = io(false, false, 0x3, 0);
     CHECK(r0 == 0 && r1 == 0, "after reset SPI %08x RTC %08x", r0, r1);
-    auto want = [&](const char* t) { return only.empty() || only.find(t) != std::string::npos; };
+    auto want = [&](const char* t) { return only.empty() || (std::string(",") + only + ",").find(std::string(",") + t + ",") != std::string::npos; };
     if (want("spi")) { test_pm(); test_spi_bus(); }
     if (want("fw"))  test_fw();
     if (want("tsc")) test_tsc();
     if (want("rtc")) test_rtc();
+    if (want("rtc-exhaust")) test_rtc_exhaust();
     printf("%s: %ld checks, %ld failures (seed %llu, %llu cycles)\n", fails ? "FAIL" : "PASS",
            checks, fails, (unsigned long long)seed, (unsigned long long)cyc);
     delete top;
