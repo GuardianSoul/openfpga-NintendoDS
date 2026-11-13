@@ -208,9 +208,17 @@ module nds_vram
     // view offset -> physical byte address (first bank wins)
     function automatic logic [20:0] resolve(input logic [71:0] vc, input logic [3:0] v, input logic [19:0] o);
         logic [20:0] r;
+        logic [19:0] pa;
         r = '0;
+        pa = '0;
         for (int b = 8; b >= 0; b--)
-            if (bank_hit(b, vc[b*8 +: 8], v, o)) r = {1'b1, bank_base(b) | (o & bank_mask(b))};
+            if (bank_hit(b, vc[b*8 +: 8], v, o)) begin
+                pa = bank_base(b) | (o & bank_mask(b));
+                r[20:14] = {1'b1, pa[19:14]};
+            end
+        // Every bank preserves these offset bits. Gate them with mapped-valid;
+        // upper address bits still select the first matching bank.
+        r[13:0] = r[20] ? (o[13:0] & 14'h3fff) : 14'd0;
         return r;
     endfunction
 
