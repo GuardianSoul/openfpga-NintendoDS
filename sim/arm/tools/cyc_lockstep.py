@@ -5,6 +5,8 @@ cyc_lockstep.py build NAME REV|work CFG [extra verilator args...]   (REV: git re
 cyc_lockstep.py run NAME                                            (every test; traces + per-retire cycle)
 cyc_lockstep.py diff A B                                            (stdout, retire traces and retire cycles)
 CFG: def (tb defaults) | rel (release ARM9: SLOW A9_SOLO A9_OPT A7_DS EVB XD2 XI1)
+     | a9c (the card's ARM9 since RC5: arm9_core, A9_CORE=1, MLAB register file, 2 ways, RC10's 8 KiB caches)
+     | c12b (RC12b's card ARM9: core_top_ds A9_OPT (MEM1, CWF, early restart), 8 KiB D / 16 KiB I, EVB, EARLYD)
 """
 import os, subprocess, sys, filecmp, shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -13,9 +15,16 @@ sys.path.insert(0, W + "/sim/arm/tools")
 import run_tests
 B = W + "/build/arm"
 OUT = W + "/build/cyc_lockstep"
-RTL = "arm_pkg arm_regfile arm_mul arm_thumb arm_core arm7_ds arm9_ram arm9_mem arm_cpu".split()
+RTL = "arm_pkg arm_regfile arm_mul arm_thumb arm_core arm7_ds arm9_ram arm9_mem arm9_core arm_cpu".split()
 CFG = {"def": [], "rel": ["-GSLOW=1", "-GA9_SOLO=1", "-GA9_OPT=67101667", "-GA7_DS=1", "-GEVB=1",
-                          "-GA9_XD=2", "-GA9_XI=1"]}
+                          "-GA9_XD=2", "-GA9_XI=1"],
+       "a9c": ["-GSLOW=1", "-GA9_SOLO=1", "-GA9_OPT=67101667", "-GA7_DS=1", "-GEVB=1", "-GA9_CORE=1",
+               '-GA9_RF="MLAB"', "-GARM9_WAYS=2"],
+       "c12b": ["-GSLOW=1", "-GA9_SOLO=1", "-GA9_OPT=1711268835", "-GA7_DS=1", "-GEVB=1", "-GEVBW=0", "-GEARLYD=1",
+                "-GA9_CORE=1", '-GA9_RF="MLAB"', "-GARM9_WAYS=2", "-GA9_XD=1", "-GA9_XI=1"],
+       # c12g: RC12c-gold's card ARM9 (c12b with the 4-way I-cache, core_top_ds A9_IWAYS 4)
+       "c12g": ["-GSLOW=1", "-GA9_SOLO=1", "-GA9_OPT=1711268835", "-GA7_DS=1", "-GEVB=1", "-GEVBW=0", "-GEARLYD=1",
+                "-GA9_CORE=1", '-GA9_RF="MLAB"', "-GARM9_WAYS=2", "-GARM9_IWAYS=4", "-GA9_XD=1", "-GA9_XI=1"]}
 V = W + "/tools/verilator-locked"
 
 

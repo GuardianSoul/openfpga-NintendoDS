@@ -38,7 +38,16 @@ module tb_vram;
 `endif
     // TB_PF=1: VR_RDB, VR_CWF and VR_PF (the next-line prefetch for DMA reads; +cseq=1 makes the CPU's reads DMA runs)
     reg c_dma = 0;
-    nds_vram #(.VR_RDB(`TB_PF), .VR_CWF(`TB_PF), .VR_PF(`TB_PF)) dut (.clk, .rst, .vramcnt,
+`ifndef TB_HITB
+`define TB_HITB 0
+`endif
+    // TB_HITB=1: VR_RDB, VR_CWF and VR_HITB (CPU/DMA reads hit the line while 2D block words drain), VR_YIELD
+`ifndef TB_PFS
+`define TB_PFS 0
+`endif
+    // TB_PFS=1 (with TB_PF=1): VR_PFS, the prefetch's sets by line bit 5 with the read line in an M10K (RB_M10K)
+    nds_vram #(.VR_RDB(`TB_PF || `TB_HITB), .VR_CWF(`TB_PF || `TB_HITB), .VR_PF(`TB_PF), .VR_HITB(`TB_HITB), .VR_YIELD(`TB_HITB),
+               .VR_PFS(`TB_PFS), .RB_M10K(`TB_PFS)) dut (.clk, .rst, .vramcnt,
         .c_req, .c_cpu(1'b0), .c_dma, .c_we, .c_addr, .c_be, .c_wdata, .c_ack, .c_rdata,
         .g_req, .g_blk, .g_ack, .g_rvalid, .g_rdata,
         .cap_we(1'b0), .cap_addr(18'd0), .cap_data(16'd0), .cap_ready(),

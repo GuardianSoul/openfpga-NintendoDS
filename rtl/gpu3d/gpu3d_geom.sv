@@ -16,6 +16,7 @@
 // vertex beats, gpu3d_raster's ps_* layout); at the swap the render order
 // follows as (position, polygon index) pairs (so_*).
 module gpu3d_geom #(
+    parameter bit GAT_FE = 1'b0,       // gpu3d_gxfront GAT_FE (core_top_ds RAM_MOVE 4)
     parameter bit SMALL = 1'b1,        // see gpu3d_gxeng
     parameter bit DS_STRIPCLIP = 1'b1, // see gpu3d_gxeng
     parameter bit DS_FARREJ = 1'b1,    // see gpu3d_gxeng
@@ -27,6 +28,8 @@ module gpu3d_geom #(
     parameter bit LUNIT = 1'b0,        // see gpu3d_gxeng: 1 adds the lighting unit gpu3d_gxlight (with USORT)
     parameter int VFIN = 0,            // see gpu3d_gxeng: 1 adds the vertex-finish unit gpu3d_gxvfin (with LUNIT), 2 its lite form
     parameter bit FF = 1'b0,           // see gpu3d_gxeng: the geometry redesign (with USORT, without LUNIT and VFIN)
+    parameter bit FF_VTX = 1'b0,       // see gpu3d_gxeng (with FF)
+    parameter int GX_PAR = 0,          // see gpu3d_gxeng PAR: the number of GX_PAR steps, cumulative (docs/geometry-engine-par.md); with FF
     parameter bit ENG_M10K = 1'b1,     // gpu3d_gxeng VC_M10K, STK_M10K, VOC_M10K: its three MLAB tables in M10K (+3 blocks, -4 MLAB LABs)
     parameter bit ENG_TM10K = ENG_M10K,   // ... the VC and VOC tables alone (0: MLAB, -2 M10K; STK_M10K stays with ENG_M10K: gpu3d_gxeng's DICT needs it)
     parameter bit GX_PRE = 1'b0,       // 1: io_wpre is gpu3d_gxpre(io_wdata), registered with it (nds_gpu3d); 0: decoded here
@@ -121,7 +124,7 @@ module gpu3d_geom #(
     logic        e_avail, e_pop, e_more;
     logic        f_wack, f_rack, f_rvalid, f_wdrained;
     logic [31:0] f_rdata;
-    gpu3d_gxfront #(.CHEAP(GX_CHEAP), .PRE(1'b1), .SPILL(SPILL), .SP_ON(SP_ON), .GATH16(GATH16), .SP_AW(SP_AW)) u_front (
+    gpu3d_gxfront #(.GAT_FE(GAT_FE), .CHEAP(GX_CHEAP), .PRE(1'b1), .SPILL(SPILL), .SP_ON(SP_ON), .GATH16(GATH16), .SP_AW(SP_AW)) u_front (
         .clk, .rst, .tick, .geom_en, .vblank,
         .wr_req, .wr_be(io_be), .wr_addr(io_addr), .wr_data(io_wdata), .wr_pre, .wr_wait(io_wait),
         .gxstat, .zerodot, .flush_req, .irq(irq_gxfifo), .dma_low(dma_gx_low), .gx_stall,
@@ -198,8 +201,17 @@ module gpu3d_geom #(
     // ---- swap: VBlank with a flush pending, until the engine has swapped
     // swaps the model has taken at a VBlank and the engine has not yet done: counted, since the model can
     // run up to 511 entries ahead of the engine (GX_CHEAP) and so past a second SWAP and VBlank
+    // swap_n counts to its real bound instead of saturating: every taken swap's SWAP_BUFFERS entry is one the model
+    // executed and the engine has not finished, so at most the entries the engine trails (on chip 512, SPILL's ring
+    // 2^SP_AW more) plus the one it waits on at SWAPGO. A 4-bit counter saturated at 15 and dropped the take: the
+    // engine then waited a VBlank for a take that never came, once per lost take (a slow engine with short lists)
+    localparam int SNW = $clog2((SPILL ? (1 << SP_AW) : 0) + 512 + 2);
     logic swap_go, swap_ack;
-    logic [3:0] swap_n;
+`ifdef GEOM_SWAPN_MUT
+    logic [3:0] swap_n;                                        // (mutant: the old saturating counter)
+`else
+    logic [SNW-1:0] swap_n;
+`endif
     wire  swap_in_v = vblank && geom_en && flush_req;
     assign sw_take = swap_in_v;
     wire  swap_in;
@@ -219,10 +231,22 @@ module gpu3d_geom #(
     assign swap_in = swap_in_v;
 `endif
     always_ff @(posedge clk) begin
-        if (rst) swap_n <= 4'd0;
+        if (rst) swap_n <= '0;
+`ifdef GEOM_SWAPN_MUT
         else swap_n <= swap_n + ((swap_in && swap_n != 4'd15) ? 4'd1 : 4'd0) - (swap_ack ? 4'd1 : 4'd0);
+`else
+        else swap_n <= swap_n + SNW'(swap_in) - SNW'(swap_ack);
+`endif
     end
-    assign swap_go = swap_n != 4'd0;
+    assign swap_go = swap_n != '0;
+`ifndef ALTERA_RESERVED_QIS
+    // synthesis translate_off
+    always_ff @(posedge clk) if (!rst) begin
+        if (swap_in && !swap_ack && &swap_n) $error("gpu3d_geom: swap_n wraps (%0d swaps owed)", swap_n);
+        if (swap_ack && swap_n == '0) $error("gpu3d_geom: a swap acknowledged with none taken");
+    end
+    // synthesis translate_on
+`endif
     // sw_busy: from the VBlank that takes a swap until its sort output ends (swap_ack starts the engine's swap:
     // its prefix sums, the late-swap wait, the walk); nds_gpu3d holds the frame start for it
     logic sw_sort;
@@ -231,6 +255,9 @@ module gpu3d_geom #(
 
     // ---- engine
     logic        boxres, test_done, mrd_req, mrd_ack, mrd_cap;
+    logic [31:0]  tst_q;                 // GX_PAR TEST: the engine's result word at tst_ra (an M10K: the clock after the address)
+    logic [2:0]   tst_ra;
+    localparam bit PTEST = FF && GX_PAR >= 2;   // GX_PAR TEST: POS/VEC_TEST reads from the engine's shadow, once tpend is 0
     logic [4:0]  mrd_sel;
     logic [31:0] mrd_data;
     logic [11:0] npoly;
@@ -241,12 +268,12 @@ module gpu3d_geom #(
     logic [11:0] sort_n;
     logic        e_so_we, e_so_done;
     logic [10:0] e_so_pos, e_so_idx;
-    gpu3d_gxeng #(.SMALL(SMALL), .DIV_R4(DIV_R4), .DIV_P2X(DIV_P2X), .DS_STRIPCLIP(DS_STRIPCLIP), .DS_FARREJ(DS_FARREJ), .DS_CLIPRED(DS_CLIPRED), .USORT(USORT), .LUNIT(LUNIT), .VFIN(VFIN), .FF(FF),
+    gpu3d_gxeng #(.SMALL(SMALL), .DIV_R4(DIV_R4), .DIV_P2X(DIV_P2X), .DS_STRIPCLIP(DS_STRIPCLIP), .DS_FARREJ(DS_FARREJ), .DS_CLIPRED(DS_CLIPRED), .USORT(USORT), .LUNIT(LUNIT), .VFIN(VFIN), .FF(FF), .FF_VTX(FF_VTX), .PAR(GX_PAR),
                   .VC_M10K(ENG_TM10K), .STK_M10K(ENG_M10K), .VOC_M10K(ENG_TM10K)) u_eng (
         .clk, .clk_2x, .rst, .e_addr, .e_data, .mx, .e_avail, .e_pop, .e_more, .dp, .zerodot,
         .swap_go, .swap_ack, .oc_valid, .oc_rej, .oc_quad,
         .boxres, .test_done, .npoly, .nvert, .ovf_set,
-        .mrd_req, .mrd_sel, .mrd_ack, .mrd_data, .mrd_cap,
+        .mrd_req, .mrd_sel, .mrd_ack, .mrd_data, .mrd_cap, .tst_ra, .tst_q,
         .po_valid, .po_ready, .s_draw, .po_type, .po_data, .po_index, .po_wv, .po_wk, .po_wd,
         .ks_we, .ks_idx, .ks_key, .sort_go, .sort_manual, .sort_n, .sort_busy,
         .so_we(e_so_we), .so_pos(e_so_pos), .so_idx(e_so_idx), .so_done(e_so_done),
@@ -308,15 +335,36 @@ module gpu3d_geom #(
         else                                    mrd_sel = 5'd29 + 5'(ra[2]);         // VEC_TEST
     end
     wire is_mrd = ra >= 10'h220 && ra < 10'h2A4 && !(ra >= 10'h238 && ra < 10'h240);
-    assign mrd_req = mrd_pend;
+    logic      mrd_tst;                 // PTEST: the pending read is a test result's
+    assign mrd_req = mrd_pend && !(PTEST && mrd_tst);
+    assign tst_ra  = 3'(mrd_sel - 5'd25);
+`ifndef SYNTHESIS
+    // synthesis translate_off
+    // a3: the word taken from the engine's MLAB equals the 192-bit shadow it replaced (gpu3d_gxeng g_tres)
+    generate if (PTEST) begin : g_tchk
+        int tst_n = 0;
+        always_ff @(posedge clk)
+            if (!rst && mrd_pend && mrd_tst && tpend == 4'd0) begin
+                tst_n <= tst_n + 1;
+                if (tst_q != u_eng.g_tres.tst_old) $error("gpu3d_geom a3: test word %0d %08x, registers %08x", tst_ra, tst_q, u_eng.g_tres.tst_old);
+            end
+        final if (tst_n != 0) $display("gpu3d_geom a3: %0d test-result reads checked", tst_n);
+    end endgenerate
+    // synthesis translate_on
+`endif
     always_ff @(posedge clk) begin
         io_ack <= 1'b0;
         if (rst) mrd_pend <= 1'b0;
-        else if (mrd_pend) begin
+        else if (mrd_pend && PTEST && mrd_tst) begin
+            if (tpend == 4'd0) begin
+                io_rdata <= tst_q;
+                mrd_pend <= 1'b0; io_ack <= 1'b1;
+            end
+        end else if (mrd_pend) begin
             if (mrd_cap) io_rdata <= mrd_data;      // the engine's result, a clock before its ack
             if (mrd_ack) begin mrd_pend <= 1'b0; io_ack <= 1'b1; end
         end else if (rd_req) begin
-            if (geom_en && is_mrd) mrd_pend <= 1'b1;
+            if (geom_en && is_mrd) begin mrd_pend <= 1'b1; mrd_tst <= mrd_sel >= 5'd25; end
             else begin
                 io_ack <= 1'b1;
                 case (ra)
@@ -327,4 +375,10 @@ module gpu3d_geom #(
             end
         end else if (io_req && io_we && !io_wait) io_ack <= 1'b1;
     end
+`ifdef GX_A123_EQ
+    // synthesis translate_off
+    // a1-a3 lockstep against the steps before (sim/gpu3d/a123_eq; docs/gx-area-map.md)
+    `include "lock.svh"
+    // synthesis translate_on
+`endif
 endmodule

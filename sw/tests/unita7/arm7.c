@@ -1,6 +1,6 @@
 /* unita7.nds, ARM7: the hwref arm7time kernels (docs/hw-reference.md
    "arm7time"; DS values in run 30, arm7time.csv) for the core's scorecard
-   (docs/unit-scorecard.md). Waits for MB->cmd == 1 (the ARM9 has mapped VRAM
+   (docs/archive/unit-scorecard.md). Waits for MB->cmd == 1 (the ARM9 has mapped VRAM
    C to the ARM7), runs every kernel, writes ARM7 cycles per op x 100 to
    MB->val[], then sets IPCSYNC output to 1 (the ARM9 polls IPCSYNC, an I/O
    register, so it stays off main RAM while the ARM7 measures). Kernels run

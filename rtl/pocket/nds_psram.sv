@@ -28,7 +28,11 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     parameter integer STREAM = 0,
     // 1: a block read starts at its first word (s_addr[2:0], the ARM9's missed word: nds_fabric A9_CWF), and the
     // chips burst 8 words wrapping at the 32-byte line (BCR wrap on, length 8): critical word first
-    parameter integer CWF = 0) (
+    parameter integer CWF = 0,
+    // B8's two 8x16 burst buffers in M10K (core_top_ds RAM_MOVE 32), read on clk_sys's falling edge: written on
+    // clk_mem long before they are read (STREAM: the Gray count crosses after the write; else before done_t flips),
+    // so the word is the same as the MLABs' read without a clock; s_rdata takes it at the next rising edge
+    parameter integer FE_RD = 0) (
     input wire clk_sys, clk_mem, reset_sys, reset_mem,
     output reg initialized = 0,
     // clk_sys: s_req held until s_ack (one pulse); s_req drops the cycle after
@@ -160,28 +164,28 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     // copies here). The address pins follow b_word while the chips aren't selected.
     wire [21:0] chip_addr = {1'b0, b_word[20:3], req_n8w ? wi : b_word[2:0]};
     wire [15:0] wdata0 = req_n8w ? bwd[wi][15:0] : b_wdata[15:0], wdata1 = req_n8w ? bwd[wi][31:16] : b_wdata[31:16];
-    wire [1:0] be0 = b_be[1:0], be1 = b_be[3:2];
-    wire we0 = be0 != 2'd0, we1 = be1 != 2'd0;
     wire [1:0] avail, cbusy;
     wire [15:0] rdata0, rdata1;
-    psx_pq_psram #(.CLOCK_SPEED(CLOCK_MHZ), .LATCH_DATA(0), .EARLY(B8 != 0)) chip0 (.clk(clk_mem), .bank_sel(bank), .addr(chip_addr),
-        .write_en(write_en && we0), .data_in(wdata0), .write_high_byte(be0[1]), .write_low_byte(be0[0]),
-        .read_en(1'b0), .sync_burst_en(burst_en), .sync_burst_len(req_n8 ? 6'd7 : 6'd3),
-        .config_en(config_en), .config_data(BCR_Q),
-        .read_avail(avail[0]), .data_out(rdata0), .busy(cbusy[0]),
-        .dbg_wait_seen(), .dbg_wait_cycles(), .dbg_burst_count(), .dbg_stale_count(),
-        .cram_a(cram0_a), .cram_dq(cram0_dq), .cram_wait(cram0_wait), .cram_clk(),
-        .cram_adv_n(cram0_adv_n), .cram_cre(cram0_cre), .cram_ce0_n(cram0_ce0_n), .cram_ce1_n(cram0_ce1_n),
-        .cram_oe_n(cram0_oe_n), .cram_we_n(cram0_we_n), .cram_ub_n(cram0_ub_n), .cram_lb_n(cram0_lb_n));
-    psx_pq_psram #(.CLOCK_SPEED(CLOCK_MHZ), .LATCH_DATA(0), .EARLY(B8 != 0)) chip1 (.clk(clk_mem), .bank_sel(bank), .addr(chip_addr),
-        .write_en(write_en && we1), .data_in(wdata1), .write_high_byte(be1[1]), .write_low_byte(be1[0]),
-        .read_en(1'b0), .sync_burst_en(burst_en), .sync_burst_len(req_n8 ? 6'd7 : 6'd3),
-        .config_en(config_en), .config_data(BCR_Q),
-        .read_avail(avail[1]), .data_out(rdata1), .busy(cbusy[1]),
-        .dbg_wait_seen(), .dbg_wait_cycles(), .dbg_burst_count(), .dbg_stale_count(),
-        .cram_a(cram1_a), .cram_dq(cram1_dq), .cram_wait(cram1_wait), .cram_clk(),
-        .cram_adv_n(cram1_adv_n), .cram_cre(cram1_cre), .cram_ce0_n(cram1_ce0_n), .cram_ce1_n(cram1_ce1_n),
-        .cram_oe_n(cram1_oe_n), .cram_we_n(cram1_we_n), .cram_ub_n(cram1_ub_n), .cram_lb_n(cram1_lb_n));
+    // (one sequencer for both chips, nds_pq_psram2 below: psx_pq_psram's pins on each, clock for clock)
+    wire [1:0] c_adv, c_cre, c_ce0, c_ce1, c_oe, c_we, c_ub, c_lb;
+    // (the pins' input capture registers keep psx_pq_psram's names, psram|chipN|cram_dq_r and cram_wait_r: the SDC's
+    // multicycle from the chip clock, build_ds.sh)
+    wire [15:0] dq_r0, dq_r1;
+    wire [1:0] wait_r;
+    nds_pq_cap chip0 (.clk(clk_mem), .dq(cram0_dq), .wt(cram0_wait), .cram_dq_r(dq_r0), .cram_wait_r(wait_r[0]));
+    nds_pq_cap chip1 (.clk(clk_mem), .dq(cram1_dq), .wt(cram1_wait), .cram_dq_r(dq_r1), .cram_wait_r(wait_r[1]));
+    nds_pq_psram2 #(.CLOCK_SPEED(CLOCK_MHZ), .EARLY(B8 != 0)) chips (.dq_r0(dq_r0), .dq_r1(dq_r1), .wait_r(wait_r),
+        .clk(clk_mem), .bank_sel(bank), .addr(chip_addr),
+        .write_en(write_en), .data_in0(wdata0), .data_in1(wdata1), .be(b_be),
+        .sync_burst_en(burst_en), .sync_burst_len(req_n8 ? 6'd7 : 6'd3), .config_en(config_en), .config_data(BCR_Q),
+        .read_avail(avail), .data_out0(rdata0), .data_out1(rdata1), .busy(cbusy),
+        .cram0_a(cram0_a), .cram1_a(cram1_a), .cram0_dq(cram0_dq), .cram1_dq(cram1_dq),
+        .cram_adv_n(c_adv), .cram_cre(c_cre), .cram_ce0_n(c_ce0), .cram_ce1_n(c_ce1), .cram_oe_n(c_oe), .cram_we_n(c_we),
+        .cram_ub_n(c_ub), .cram_lb_n(c_lb));
+    assign {cram1_adv_n, cram0_adv_n} = c_adv; assign {cram1_cre, cram0_cre} = c_cre;
+    assign {cram1_ce0_n, cram0_ce0_n} = c_ce0; assign {cram1_ce1_n, cram0_ce1_n} = c_ce1;
+    assign {cram1_oe_n, cram0_oe_n} = c_oe; assign {cram1_we_n, cram0_we_n} = c_we;
+    assign {cram1_ub_n, cram0_ub_n} = c_ub; assign {cram1_lb_n, cram0_lb_n} = c_lb;
 
     // ---------------- sequencer (psx_psram_pair's states, DS packets only) ----------------
     localparam [3:0] INIT = 0, CFG0 = 1, CFG_WAIT = 2, IDLE = 3, WR = 4, WR_WAIT = 5, RD = 6, RD_DATA = 7, RSP = 8, SETTLE = 9;
@@ -203,14 +207,31 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
     // by clk_sys at out_k without a clock: final before done_t flips, held
     // until the next read), not 256 flops and an 8-way read mux
     generate if (B8 != 0) begin : g_raw8
-        (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] m0 [0:7];
-        (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] m1 [0:7];
-        always @(posedge clk_mem) begin
-            if (state == RD_DATA && avail[0]) m0[n0[2:0]] <= rdata0;
-            if (state == RD_DATA && avail[1]) m1[n1[2:0]] <= rdata1;
+        wire [2:0] g_ra = strm ? tot[2:0] : out_k;
+        if (FE_RD != 0) begin : g_fe
+            (* ramstyle = "M10K, no_rw_check" *) reg [15:0] m0 [0:7];
+            (* ramstyle = "M10K, no_rw_check" *) reg [15:0] m1 [0:7];
+            reg [15:0] q0, q1;
+            always @(posedge clk_mem) begin
+                if (state == RD_DATA && avail[0]) m0[n0[2:0]] <= rdata0;
+                if (state == RD_DATA && avail[1]) m1[n1[2:0]] <= rdata1;
+            end
+            always @(negedge clk_sys) begin q0 <= m0[g_ra]; q1 <= m1[g_ra]; end
+`ifdef PSRAM_FE_MUT
+            assign g0_q = q1; assign g1_q = q0;   // deliberate bug: the chips' halves swapped
+`else
+            assign g0_q = q0; assign g1_q = q1;
+`endif
+        end else begin : g_ml
+            (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] m0 [0:7];
+            (* ramstyle = "MLAB, no_rw_check" *) reg [15:0] m1 [0:7];
+            always @(posedge clk_mem) begin
+                if (state == RD_DATA && avail[0]) m0[n0[2:0]] <= rdata0;
+                if (state == RD_DATA && avail[1]) m1[n1[2:0]] <= rdata1;
+            end
+            assign g0_q = m0[g_ra];
+            assign g1_q = m1[g_ra];
         end
-        assign g0_q = m0[strm ? tot[2:0] : out_k];
-        assign g1_q = m1[strm ? tot[2:0] : out_k];
         assign rsp_raw = 256'd0;
     end else begin : g_raw4
         assign g0_q = 16'd0; assign g1_q = 16'd0;
@@ -262,5 +283,234 @@ module nds_psram #(parameter real CLOCK_MHZ = 100.541946, parameter integer T_IN
             default: state <= INIT;
         endcase
     end
+endmodule
+
+// Both chips' psx_pq_psram with one sequencer (docs/psram-ds.md, docs/space-io.md). The two controllers ran in
+// lockstep but for a write's chips (a write to one chip leaves the other idle: on) and each chip's sync burst data
+// phase, which follows its own WAIT (dp: data, en: the end state, bc: the halfwords left). The state counter, its
+// decode and the latency count are shared; each chip's pins come from its view of the state (st), with
+// psx_pq_psram's assignments in its order, so every pin is as before, clock for clock. Only what nds_psram uses:
+// no async reads, LATCH_DATA 0, no debug counters.
+module nds_pq_psram2 #(parameter CLOCK_SPEED = 48.0, parameter SYNC_LATENCY = 4, parameter EARLY = 0) (
+    input wire clk,
+    input wire bank_sel,
+    input wire [21:0] addr,
+    input wire write_en,
+    input wire [15:0] data_in0, data_in1,
+    input wire [3:0] be,                    // {chip 1 high, low, chip 0 high, low}: a chip writes with either set
+    input wire sync_burst_en,
+    input wire [5:0] sync_burst_len,
+    input wire config_en,
+    input wire [15:0] config_data,
+    output wire [1:0] read_avail,
+    output wire [15:0] data_out0, data_out1,
+    output wire [1:0] busy,
+    output wire [21:16] cram0_a, cram1_a,
+    inout wire [15:0] cram0_dq, cram1_dq,
+    input wire [15:0] dq_r0, dq_r1,         // the pins' capture registers (nds_pq_cap): DQ and WAIT a clock late
+    input wire [1:0] wait_r,
+    output wire [1:0] cram_adv_n, cram_cre, cram_ce0_n, cram_ce1_n, cram_oe_n, cram_we_n, cram_ub_n, cram_lb_n
+);
+    // psx_pq_psram's cycle counts (its CEIL: the integer conversion rounds, so an exact multiple gets one more)
+    // (psx_pq_psram's form: Quartus takes no real-typed function argument, so the conversion is the call's)
+    localparam PERIOD = 1000.0 / CLOCK_SPEED;
+    function automatic integer pq_rtoi(input integer x);
+        pq_rtoi = x;
+    endfunction
+`define PQ_CEIL(x) ((pq_rtoi(x) > (x)) ? pq_rtoi(x) : pq_rtoi(x) + 1)
+    function automatic integer pq_max(input integer a, input integer b);
+        pq_max = a > b ? a : b;
+    endfunction
+    localparam integer ADV_CYCLE_COUNT = pq_max(pq_max(`PQ_CEIL(5 / PERIOD), `PQ_CEIL((5 + 2) / PERIOD)), `PQ_CEIL(7 / PERIOD));
+    localparam integer ADDR_HOLD_AFTER_ADV_CYCLE_COUNT = `PQ_CEIL(2 / PERIOD);
+    localparam integer DATA_AFTER_ADDR_UNLATCH_CYCLE_COUNT = `PQ_CEIL(8 / PERIOD);
+    localparam integer TOTAL_WRITE_CYCLE_COUNT = `PQ_CEIL(70 / PERIOD);
+    localparam [7:0] STATE_NONE = 0;
+    localparam [7:0] WRITE_INITIAL_COUNT = 1;
+    localparam [7:0] STATE_WRITE_ADV_END = WRITE_INITIAL_COUNT - 1 + ADV_CYCLE_COUNT;
+    localparam [7:0] STATE_WRITE_ADDR_LATCH_END = STATE_WRITE_ADV_END + ADDR_HOLD_AFTER_ADV_CYCLE_COUNT;
+    localparam [7:0] STATE_WRITE_DATA_START = STATE_WRITE_ADDR_LATCH_END + DATA_AFTER_ADDR_UNLATCH_CYCLE_COUNT;
+    localparam [7:0] STATE_WRITE_DATA_END = WRITE_INITIAL_COUNT + TOTAL_WRITE_CYCLE_COUNT;
+    localparam [7:0] STATE_CONFIG_CRE_WAIT = 48, STATE_CONFIG_CRE_SETUP = 49, STATE_CONFIG_START = 50;
+    localparam [7:0] STATE_CONFIG_ADV_END = STATE_CONFIG_START + ADV_CYCLE_COUNT - 1;
+    localparam [7:0] STATE_CONFIG_HOLD_END = STATE_CONFIG_START + TOTAL_WRITE_CYCLE_COUNT;
+    localparam [7:0] STATE_SYNC_CE_SETUP = 59, STATE_SYNC_SETUP = 60, STATE_SYNC_WAIT = 61, STATE_SYNC_DATA = 62, STATE_SYNC_END = 63;
+
+    wire [1:0] we_c = {be[3:2] != 2'd0, be[1:0] != 2'd0};
+
+    // A chip's view of the shared state: its own data phase in the burst's (data, then STATE_SYNC_END, then idle),
+    // idle through a write it has no part in (the write states are 1-19: psx_pq_psram's async reads, never used
+    // here, start at 20). The shared state never holds STATE_SYNC_END.
+
+    // ---------------- the shared sequencer
+    reg [7:0] state = STATE_NONE;
+    reg [7:0] sn;
+    reg [5:0] latency_counter;
+    reg [1:0] dp = 2'b00, en = 2'b00, on = 2'b00;
+    reg [1:0] dp_n, en_n, on_n;
+    reg [5:0] bc0, bc1;
+    reg [1:0] wait_r2 = 2'b00;
+    always @(posedge clk) wait_r2 <= wait_r;
+    // the next state (combinational: the chips' cram_data flags take it, as psx_pq_psram's take its sn)
+    always @* begin
+        sn = state; dp_n = dp; en_n = en; on_n = on;
+        if (state != STATE_NONE) sn = state + 8'd1;
+        case (state)
+            STATE_NONE:
+                if (write_en && we_c != 2'b00) begin sn = WRITE_INITIAL_COUNT; on_n = we_c; end
+                else if (config_en) sn = STATE_CONFIG_CRE_WAIT;
+                else if (sync_burst_en) sn = STATE_SYNC_CE_SETUP;
+            STATE_WRITE_DATA_END: sn = STATE_NONE;
+            STATE_CONFIG_HOLD_END: sn = STATE_NONE;
+            STATE_SYNC_CE_SETUP: sn = STATE_SYNC_SETUP;
+            STATE_SYNC_SETUP: sn = STATE_SYNC_WAIT;
+            STATE_SYNC_WAIT:
+                if (latency_counter == 6'd0) begin sn = STATE_SYNC_DATA; dp_n = 2'b11; en_n = 2'b00; end
+                else sn = STATE_SYNC_WAIT;
+            STATE_SYNC_DATA: begin
+                en_n = 2'b00;
+                if (dp[0] && !wait_r2[0] && bc0 == 6'd0) begin dp_n[0] = 1'b0; en_n[0] = 1'b1; end
+                if (dp[1] && !wait_r2[1] && bc1 == 6'd0) begin dp_n[1] = 1'b0; en_n[1] = 1'b1; end
+                sn = (dp_n != 2'b00 || en_n != 2'b00) ? STATE_SYNC_DATA : STATE_NONE;
+            end
+            default: ;
+        endcase
+    end
+    always @(posedge clk) begin
+        state <= sn; dp <= dp_n; en <= en_n; on <= on_n;
+        if (state == STATE_NONE && !(write_en && we_c != 2'b00) && !config_en && sync_burst_en) begin
+            latency_counter <= SYNC_LATENCY[5:0];
+            bc0 <= sync_burst_len; bc1 <= sync_burst_len;
+        end
+        if (state == STATE_SYNC_SETUP || (state == STATE_SYNC_WAIT && latency_counter != 6'd0)) latency_counter <= latency_counter - 6'd1;
+        if (state == STATE_SYNC_DATA && dp[0] && !wait_r2[0] && bc0 != 6'd0) bc0 <= bc0 - 6'd1;
+        if (state == STATE_SYNC_DATA && dp[1] && !wait_r2[1] && bc1 != 6'd0) bc1 <= bc1 - 6'd1;
+    end
+    // synthesis translate_off
+    always @(posedge clk)
+        if ((dp != 2'b00 || en != 2'b00) && state != STATE_SYNC_DATA)
+            $display("nds_pq_psram2: ERROR: a chip's data phase outside the burst at %0t", $time);
+    // synthesis translate_on
+
+    // ---------------- each chip's pins: psx_pq_psram's assignments, on the chip's view of the state
+    wire [21:16] ca0, ca1;
+    wire [15:0] cd0, cd1, do0, do1;
+    wire [1:0] doe;
+    assign cram0_a = ca0; assign cram1_a = ca1;
+    assign cram0_dq = doe[0] ? cd0 : 16'hZZZZ;
+    assign cram1_dq = doe[1] ? cd1 : 16'hZZZZ;
+    assign data_out0 = do0; assign data_out1 = do1;
+    // the shared state's decode, once for both chips (eff above, as flags: a write state counts for a chip in it
+    // (on), the burst's data state for a chip in its data phase (dp) or end state (en); else the chip is idle)
+    wire s_none = state == STATE_NONE, s_wr = state != STATE_NONE && state < 8'd20;
+    wire s_wadv = state == STATE_WRITE_ADV_END, s_wlat = state == STATE_WRITE_ADDR_LATCH_END;
+    wire s_wdst = state == STATE_WRITE_DATA_START, s_wend = state == STATE_WRITE_DATA_END;
+    wire s_ccs = state == STATE_CONFIG_CRE_SETUP, s_cadv = state == STATE_CONFIG_ADV_END, s_chold = state == STATE_CONFIG_HOLD_END;
+    wire s_sce = state == STATE_SYNC_CE_SETUP, s_ssu = state == STATE_SYNC_SETUP, s_sdata = state == STATE_SYNC_DATA;
+    wire n_none = sn == STATE_NONE, n_wr = sn != STATE_NONE && sn < 8'd20, n_wdst = sn == STATE_WRITE_DATA_START;
+    wire n_ccs = sn == STATE_CONFIG_CRE_SETUP, n_sdata = sn == STATE_SYNC_DATA;
+    genvar c;
+    generate for (c = 0; c < 2; c = c + 1) begin : g_chip
+        // The pin registers' decode, retimed (the clk_mem fix: the shared state's decode to both chips' pins, far
+        // apart, failed clk_mem in 9 of 11 fits, #1761-#1771): each chip registers its own copy of every flag it
+        // uses, from the next state (sn) and the next per-chip flags (on_n, dp_n, en_n), so a flag here equals the
+        // decode of state the release used, clock for clock, and the long route ends in a flag beside the chip's
+        // pins instead of crossing the pin logic. (st_none, below, was already this form: f_none's copy.)
+        reg r_wadv = 0, r_wlat = 0, r_wdst = 0, r_wend = 0, r_ccs = 0, r_cadv = 0, r_chold = 0, r_sce = 0, r_ssu = 0;
+        reg r_data = 0, r_end = 0;
+        always @(posedge clk) begin
+            r_wadv <= sn == STATE_WRITE_ADV_END && on_n[c]; r_wlat <= sn == STATE_WRITE_ADDR_LATCH_END && on_n[c];
+            r_wdst <= sn == STATE_WRITE_DATA_START && on_n[c]; r_wend <= sn == STATE_WRITE_DATA_END && on_n[c];
+            r_ccs <= sn == STATE_CONFIG_CRE_SETUP; r_cadv <= sn == STATE_CONFIG_ADV_END; r_chold <= sn == STATE_CONFIG_HOLD_END;
+            r_sce <= sn == STATE_SYNC_CE_SETUP; r_ssu <= sn == STATE_SYNC_SETUP;
+            r_data <= sn == STATE_SYNC_DATA && dp_n[c]; r_end <= sn == STATE_SYNC_DATA && en_n[c];
+        end
+        wire f_none, f_data = r_data, f_end = r_end;
+        wire nx_none = n_none || (n_wr && !on_n[c]) || (n_sdata && !dp_n[c] && !en_n[c]);
+        wire [15:0] din = c == 0 ? data_in0 : data_in1;
+        wire [15:0] dqi = c == 0 ? dq_r0 : dq_r1;
+        wire [1:0] cbe = c == 0 ? be[1:0] : be[3:2];
+        wire wen = write_en && we_c[c];
+        reg [21:16] cram_a;
+        reg adv_n = 1, cre = 0, ce0_n = 1, ce1_n = 1, oe_n = 1, we_n = 1, ub_n = 1, lb_n = 1, bsy = 0;
+        reg data_out_en = 0;
+        reg [15:0] cram_data;
+        reg [15:0] dq_r2;
+        reg read_avail_r = 0;
+        reg [15:0] data_out_r;
+        reg st_none = 1, st_wdata = 0, st_cfg = 0;
+        assign f_none = st_none;
+        // synthesis translate_off
+        always @(posedge clk)
+            if (f_none != (s_none || (s_wr && !on[c]) || (s_sdata && !dp[c] && !en[c])) || r_data != (s_sdata && dp[c]) ||
+                r_end != (s_sdata && en[c]) || r_wadv != (s_wadv && on[c]) || r_wlat != (s_wlat && on[c]) ||
+                r_wdst != (s_wdst && on[c]) || r_wend != (s_wend && on[c]) || r_ccs != s_ccs || r_cadv != s_cadv ||
+                r_chold != s_chold || r_sce != s_sce || r_ssu != s_ssu)
+                $display("nds_pq_psram2: ERROR: chip %0d's retimed pin decode differs from the state's at %0t", c, $time);
+        // synthesis translate_on
+        always @(posedge clk) dq_r2 <= dqi;
+        always @(posedge clk) begin
+            bsy <= !f_none;
+            read_avail_r <= 0;
+            // (psx_pq_psram's case on its state, in its order; the states are distinct values)
+            if (f_none) begin
+                    cram_a <= addr[21:16];
+                    adv_n <= 1; cre <= 0; ce0_n <= 1; ce1_n <= 1; oe_n <= 1; we_n <= 1; ub_n <= 1; lb_n <= 1;
+                    if (wen) begin
+                        if (bank_sel) ce1_n <= 0; else ce0_n <= 0;
+                        data_out_en <= 1;
+                        we_n <= 0; adv_n <= 0;
+                        if (cbe[1]) ub_n <= 0;
+                        if (cbe[0]) lb_n <= 0;
+                        bsy <= 1;
+                    end else if (config_en) begin
+                        cre <= 1; bsy <= 1;
+                    end else if (sync_burst_en) begin
+                        if (bank_sel) ce1_n <= 0; else ce0_n <= 0;
+                        data_out_en <= 1;
+                        ub_n <= 0; lb_n <= 0;
+                        bsy <= 1;
+                    end
+            end else if (r_wadv) adv_n <= 1;
+            else if (r_wlat) data_out_en <= 0;
+            else if (r_wdst) data_out_en <= 1;
+            else if (r_wend) begin
+                    data_out_en <= 0; we_n <= 1; ce0_n <= 1; ce1_n <= 1; ub_n <= 1; lb_n <= 1; bsy <= 0;
+            end else if (r_ccs) begin
+                    if (bank_sel) ce1_n <= 0; else ce0_n <= 0;
+                    cram_a <= {2'b00, 2'b10, 2'b00};       // A[19]: the BCR (64 Mbit die)
+                    data_out_en <= 1; we_n <= 0; adv_n <= 0;
+            end else if (r_cadv) adv_n <= 1;
+            else if (r_chold) begin
+                    data_out_en <= 0; we_n <= 1; cre <= 0; ce0_n <= 1; ce1_n <= 1; bsy <= 0;
+            end else if (r_sce) adv_n <= 0;
+            else if (r_ssu) begin adv_n <= 1; data_out_en <= 0; oe_n <= 0; end
+            else if (f_data) begin if (!wait_r2[c]) begin read_avail_r <= 1; data_out_r <= dq_r2; end end
+            else if (f_end) begin ce0_n <= 1; ce1_n <= 1; oe_n <= 1; ub_n <= 1; lb_n <= 1; bsy <= 0; end
+            // (cram_data from flags registered with the next state, as psx_pq_psram's: its IOE timing)
+            st_none  <= nx_none;
+            st_wdata <= n_wdst && on_n[c];
+            st_cfg   <= n_ccs;
+            if (st_none) cram_data <= addr[15:0];
+            else if (st_wdata) cram_data <= din;
+            else if (st_cfg) cram_data <= config_data;
+        end
+        if (c == 0) begin : g_o0
+            assign ca0 = cram_a; assign cd0 = cram_data; assign do0 = EARLY != 0 ? dq_r2 : data_out_r;
+        end else begin : g_o1
+            assign ca1 = cram_a; assign cd1 = cram_data; assign do1 = EARLY != 0 ? dq_r2 : data_out_r;
+        end
+        assign doe[c] = data_out_en;
+        assign cram_adv_n[c] = adv_n; assign cram_cre[c] = cre; assign cram_ce0_n[c] = ce0_n; assign cram_ce1_n[c] = ce1_n;
+        assign cram_oe_n[c] = oe_n; assign cram_we_n[c] = we_n; assign cram_ub_n[c] = ub_n; assign cram_lb_n[c] = lb_n;
+        assign busy[c] = bsy;
+        assign read_avail[c] = EARLY != 0 ? f_data && !wait_r2[c] : read_avail_r;
+    end endgenerate
+`undef PQ_CEIL
+endmodule
+
+// a PSRAM chip's DQ and WAIT input registers (psx_pq_psram's, by its names)
+module nds_pq_cap (input wire clk, input wire [15:0] dq, input wire wt, output reg [15:0] cram_dq_r, output reg cram_wait_r);
+    always @(posedge clk) begin cram_dq_r <= dq; cram_wait_r <= wt; end
 endmodule
 `default_nettype wire

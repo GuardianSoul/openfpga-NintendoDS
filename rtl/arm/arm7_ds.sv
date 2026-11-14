@@ -9,7 +9,9 @@
 //
 // Ports as arm_cpu's ARM7 side: a request is answered (data, ok) at the next clock edge; ok = 0 asks for it again.
 // Halt: an accepted store of 0x80 to HALTCNT (0x04000301) stops it until wake or fiq.
-module arm7_ds import arm_pkg::*; (
+module arm7_ds import arm_pkg::*; #(
+  parameter bit SP_M10K = 1'b1   // 1: the SPSRs in an M10K, read a clock late (docs/rc8-packing.md row 13; every SPSR user starts clocks after a mode change or SPSR write)
+) (
   input  logic        clk,
   input  logic        rst,
   input  logic        run,
@@ -48,7 +50,7 @@ module arm7_ds import arm_pkg::*; (
 
   // ---------------------------------------------------------------- state
   (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rf [0:31];   // physical registers (arm_pkg::phys_reg)
-  (* ramstyle = "MLAB, no_rw_check" *) logic [12:0] spsr [0:4];  // (not reset: only an SPSR read before any write can tell)
+  (* ramstyle = "M10K, no_rw_check" *) logic [12:0] spsr [0:4];  // (not reset: only an SPSR read before any write can tell; SP_M10K 0: read without a clock, so not an M10K)
   logic [31:1] pc_f;                       // the fetch address; r15 as E reads it
   logic [12:0] cpsr;                       // psr13: N Z C V Q I F T mode
   logic        ph;
@@ -79,7 +81,12 @@ module arm7_ds import arm_pkg::*; (
   wire  [3:0]  nzcv = cpsr[12:9];
   wire  [2:0]  sidx = spsr_idx(mode);
   wire         has_spsr = (sidx != 3'd7);
-  wire  [12:0] spsr_m = spsr[has_spsr ? sidx : 3'd0];
+  // SP_M10K: read at every edge with the mode before it. A mode change or an SPSR write (an exception's entry, SWI/UND,
+  // MSR, MOVS pc / LDM^ with pc) empties E, so the next instruction that reads the SPSR is in E 4 clocks later at the
+  // earliest: by then the registered read has the new mode's and the written value (sim check SPQ, below).
+  logic [12:0] spsr_q;
+  always_ff @(posedge clk) spsr_q <= spsr[has_spsr ? sidx : 3'd0];
+  wire  [12:0] spsr_m = SP_M10K ? spsr_q : spsr[has_spsr ? sidx : 3'd0];
   wire  [31:0] r15 = {pc_f, 1'b0};
   wire         z_d = rf_wd == 32'h0 && zq;
   wire         z_now = z_en ? z_d : cpsr[11];      // (for an MRS, read in the ph 0 that Z lands in)
@@ -548,6 +555,9 @@ module arm7_ds import arm_pkg::*; (
   // synthesis translate_off
   always_ff @(posedge clk) if (!rst && es == ES_MEM && e_blk && !is_load && ra_br != phys_reg(br, bmode))
     $error("arm7_ds RABR: %0d, not %0d", ra_br, phys_reg(br, bmode));
+  always_ff @(posedge clk) if (SP_M10K && !rst && e_v && (k == K_MRS || k == K_MSR || k == K_DP || (k == K_BLK && es != ES_LAST && es != ES_REFILL))
+                                && spsr_q != spsr[has_spsr ? sidx : 3'd0])
+    $error("arm7_ds SPQ: SPSR read %h, the SPSR's %h (mode %h)", spsr_q, spsr[has_spsr ? sidx : 3'd0], mode);
   // synthesis translate_on
 
   // halt: a store of 0x80 to HALTCNT, accepted (d_ok) the cycle after

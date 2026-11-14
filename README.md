@@ -5,7 +5,7 @@ itself (both CPUs, the memory system, the 2D and 3D engines, sound and the
 other hardware) was written from scratch for this core, against
 measurements of a real DS.
 
-> **Status (0.5.2, 2026-11-08): experimental.** Several big 3D games boot
+> **Status (0.5.3, 2026-11-14): experimental.** Several big 3D games boot
 > and play, with sound and saves. Some 3D effects are switched off to fit
 > the chip, the heaviest 3D scenes can run a little below full speed, and
 > some 3D scenes show line glitches. See [Pocket limitations](#pocket-limitations),
@@ -108,15 +108,15 @@ The Pocket lacks some of the DS's hardware, so these can't work:
 
 ## Known issues
 
-As of 0.5.2 (2026-11-08):
+As of 0.5.3 (2026-11-14):
 
 - **3D effects are switched off** to fit the chip: shadow polygons, toon and
   highlight shading, fog, edge marking and anti-aliasing. Games draw without
   them. The 2D mosaic effect is off too. These are temporary: the source
   can build them all, and they come back as room is found.
 - **The heaviest 3D scenes can still run a little below full speed.**
-- **Line glitches:** some busy 3D scenes show black lines, and some models
-  show glitching vertices.
+- **Line glitches:** the busiest 3D scenes can draw too slowly, which shows
+  as grey, black or missing lines.
 - **Loading stutter:** a short stutter can remain when a game loads a lot of
   new data at once.
 - **No sleep mode, save states or firmware menu.** Games start directly.
@@ -126,12 +126,13 @@ As of 0.5.2 (2026-11-08):
 
 The core's rules come from measurements on a real DS. Where the Pocket's
 memory or chip budget forces a difference, it is recorded. The main ones as
-of 0.5.2:
+of 0.5.3:
 
-- The ARM9's caches are larger than the DS's: 16 KiB instruction and
-  16 KiB data, 2-way, instead of 8 and 4 KiB, 4-way. This makes up for the
-  Pocket's slower external memory. Cache replacement is per set instead of
-  the DS's global counter. Games can't see the difference, only its timing.
+- The ARM9's caches are larger than the DS's: 16 KiB instruction (4-way,
+  as on the DS) and 8 KiB data (2-way), instead of 8 KiB and 4 KiB, both
+  4-way. This makes up for the Pocket's slower external memory. Cache
+  replacement is per set instead of the DS's global counter. Games can't
+  see the difference, only its timing.
 - The lean ARM7 differs in a detail of its saved status register (SPSR),
   a temporary trade for room.
 - Some memory access costs differ from the DS by a cycle or a few: ARM9 I/O
@@ -223,6 +224,10 @@ and the core must run at 67 MHz.
   OpenGateware: Pocket platform glue, audio output and PSRAM access.
 - [pret](https://github.com/pret)'s Pokémon Platinum and HeartGold
   decompilations: which hardware features those games use.
+- Jello: the exact square-root fix, held cartridge memory requests, the
+  clock's 12-hour mode and date checks, an affine-DMA test fix, and the
+  math and clock test programs that were run on a real DS (pull requests 7
+  and 8).
 - Other FPGA cores, studied to size the design. None of their code is in
   this core:
   - [GBA_MiSTer](https://github.com/MiSTer-devel/GBA_MiSTer) by Robert Peip

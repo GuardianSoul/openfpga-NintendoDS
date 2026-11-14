@@ -56,7 +56,7 @@ pkw2-intro  pkw2.nds       pkw2-intro.mln   16     -      -      known
 pkw2-city   pkw2.nds       pkw2-city.mln    64     -      -      known  hold=UP
 pkw2-cityw  pkw2.nds       pkw2-cityw.mln   48     -      -      known  hold=UP
 pkw2-city2w pkw2.nds       pkw2-city2w.mln  48     -      -      known  hold=LEFT
-# scenes from main (merge of the play line, docs/merge-play-main.md)
+# scenes from main (merge of the play line, docs/archive/merge-play-main.md)
 # acww-title (the maintainer #822: "slow performance in 3D scenes" right after the first splash): Animal Crossing Wild World title screen, 3D town scene, no input; made from boot (census, frame 750)
 acww-title   acww.nds       acww-title.mln   64     -      -      known
 # tomodachi-island: Tomodachi Collection (English patch) after the clock setup (touch Yes/Done/Yes) and the first island dialogue; frame 4000 from boot
@@ -75,3 +75,29 @@ pkw2-load   pkw2.nds       pkw2-load.mln    32     -      -      known  hold=DOW
 # 381 polygons / 1,363 vertices on line 96), burnout-forest 900 frames on (forest road, 118 mph)
 burnout-race   burnout.nds  burnout-race.mln   16  -  -  known  hold=A
 burnout-forest burnout.nds  burnout-forest.mln 16  -  -  known  hold=A
+gsdd-battle   gsdd.nds       exports/gsdd-battle-clean 10 0    15398
+# burnout-city (2026-11-11): burnout-race.mln with A held 210 frames (census --save-state-at 210): the city section at 98 mph, rivals and traffic ahead, the race camera
+burnout-city   burnout.nds  burnout-city.mln   16  -  -  known  hold=A
+burnout-race0  burnout.nds  burnout-race0.mln  16  -  -  known  hold=A
+# burnout-carsel (RC8 on the Pocket: the top screen bottom half black at car select): World Tour > Compact > Interstate > Race from build/census/burnout/mainmenu.mln (A at 60, 150, 240, 330, 420), state at frame 600, the car model in the garage
+burnout-carsel burnout.nds  burnout-carsel.mln 16  -  -  known
+# ff4-opening (RC3 and RC8 on the Pocket: the bottom half black, flicker, at the very start of the opening cutscene): boot with START/A through the title (build/ff4cut/boot.txt), state at census frame 1500, the white fade just before the airship cutscene (its first 3D frame ~1510-1530)
+ff4-opening ff4.nds        ff4-opening.mln  120    -      -      known
+mkds-heavy41   mkds.nds  mkds-heavy41.mln  16  -  -  known
+mkds-heavy-w52 mkds.nds  mkds-heavy-w52.mln  16  -  -  known
+mkds-heavy-w64 mkds.nds  mkds-heavy-w64.mln  16  -  -  known
+mkds-heavy-w76 mkds.nds  mkds-heavy-w76.mln  16  -  -  known
+# kh-kill (the maintainer: RC8 lags briefly when the first Heartless dies in the heavy scene, RC7 does not): kh-tester-heavy.mln with A pressed every 12 frames from 10 (build/khkill/attack.txt) to census frame 685, then A at 694 and 706; state at 707 (the killing press latched). No input after it: the hit lands at state frame ~9 (CHAIN!, the name bar gone), the death burst ~14-40, hearts ~40
+kh-kill      kh358.nds      kh-kill.mln      30     -      -      known
+# Castlevania: Dawn of Sorrow (RC8 on the Pocket: the third enemy, a big golem boss, appears and the whole screen goes black, music plays on). States from melonDS-census-state (real BIOS/firmware, JIT off): dos-pre just before the golem (it appears ~frame 90 in melonDS after a white flash), dos-golem with it on screen
+dos-pre      dos.nds        dos-pre.mln      200    -      -      known
+dos-golem    dos.nds        dos-golem.mln    60     -      -      known
+# Metroid Prime Pinball (EU; the maintainer, RC8: slowdown, corrupted graphics, late lines; 3D on both screens through display capture). States from melonDS-census-state: mpp-map the Multi Mission map screen before a game (glitches on the Pocket), mpp-game in play (line garbling on the TOP screen)
+mpp-map      mpp.nds        mpp-map.mln      30     -      -      known
+mpp-game     mpp.nds        mpp-game.mln     30     -      -      known
+dos-spawn    dos.nds        dos-spawn.mln    130    -      -      known
+ff4-load     ff4.nds        ff4-load.mln     60     -      -      known
+burnout-menu   burnout.nds  ../burnout/mainmenu.mln 16  -  -  known
+# the maintainer 2026-11-14 (RC12): the new-game intro background flickers on the Pocket (castle cutscene, in-engine; census nsmb.txt frames 900 / 1240)
+nsmb-newgame  nsmb.nds       nsmb-newgame-900.mln  30   189    0
+nsmb-newgame2 nsmb.nds       nsmb-newgame-1240.mln 30   -      -

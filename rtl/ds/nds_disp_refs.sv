@@ -21,7 +21,11 @@
 // the sequencer starts at the first HBlank, 3,216 clocks in).
 module nds_disp_refs #(
     parameter int QD = 4,               // queued CPU writes
-    parameter bit FE = 1'b0             // the copies in M10K, read on the falling edge (RC3: 0, the chip is at 308 M10K)
+    parameter bit FE = 1'b0,            // the CPU port's copy (mem_c) in M10K, read on the falling edge (RC3: 0, the chip is at 308 M10K)
+    // FE_S: the sequencer's copy (mem_s) the same way. Off on the card (RC11): its read feeds the reference step's
+    // adder into the copies' write data, a half-cycle path that failed #2436/#2438 (-0.94 ns, 63 endpoints from
+    // mem_s; mem_c's own paths +0.06)
+    parameter bit FE_S = FE
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -68,14 +72,20 @@ module nds_disp_refs #(
     wire [31:0] wd = z_we ? 32'd0 : p_we ? p_wd : qd[dk];
     generate if (FE) begin : g_fe
         (* ramstyle = "M10K, no_rw_check" *) logic [31:0] mem_c [0:15];
-        (* ramstyle = "M10K, no_rw_check" *) logic [31:0] mem_s [0:15];
-        always_ff @(posedge clk) if (we) begin mem_c[wa] <= wd; mem_s[wa] <= wd; end
-        always_ff @(negedge clk) begin mc_q <= mem_c[{1'b0, c_a}]; ms_q <= mem_s[s_a]; end
+        always_ff @(posedge clk) if (we) mem_c[wa] <= wd;
+        always_ff @(negedge clk) mc_q <= mem_c[{1'b0, c_a}];
     end else begin : g_ml
         (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] mem_c [0:15];
-        (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] mem_s [0:15];
-        always_ff @(posedge clk) if (we) begin mem_c[wa] <= wd; mem_s[wa] <= wd; end
+        always_ff @(posedge clk) if (we) mem_c[wa] <= wd;
         assign mc_q = mem_c[{1'b0, c_a}];
+    end endgenerate
+    generate if (FE_S) begin : g_fes
+        (* ramstyle = "M10K, no_rw_check" *) logic [31:0] mem_s [0:15];
+        always_ff @(posedge clk) if (we) mem_s[wa] <= wd;
+        always_ff @(negedge clk) ms_q <= mem_s[s_a];
+    end else begin : g_mls
+        (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] mem_s [0:15];
+        always_ff @(posedge clk) if (we) mem_s[wa] <= wd;
         assign ms_q = mem_s[s_a];
     end endgenerate
 

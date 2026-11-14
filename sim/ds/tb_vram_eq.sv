@@ -8,6 +8,9 @@
 // 2D blocks, capture halfwords, save accesses, FIFO acks and drains.
 //   +seed=S +cycles=N
 `timescale 1ns/1ps
+`ifndef EQ_RBM
+`define EQ_RBM 0
+`endif
 module tb_vram_eq;
     import gpu2d_pkg::*;
     reg clk = 0; always #1 clk = !clk;
@@ -55,7 +58,7 @@ module tb_vram_eq;
     localparam P = 1;
     nds_vram_old #(.CAP_CHAIN(P), .VR_POST(P), .VR_RDB(P), .VR_PASS(P), .VR_WB(P), .VR_CWF(P), .VR_HIT(0), .VR_YIELD(P), .VR_PDRAIN(P))
         u_old (`VRAM_PORTS(o_));
-    nds_vram #(.CAP_CHAIN(P), .VR_POST(P), .VR_RDB(P), .VR_PASS(P), .VR_WB(P), .VR_CWF(P), .VR_HIT(0), .VR_YIELD(P), .VR_PDRAIN(P), .VR_PF(0))
+    nds_vram #(.CAP_CHAIN(P), .VR_POST(P), .VR_RDB(P), .VR_PASS(P), .VR_WB(P), .VR_CWF(P), .VR_HIT(0), .VR_YIELD(P), .VR_PDRAIN(P), .VR_PF(0), .RB_M10K(`EQ_RBM))
         u_new (`VRAM_PORTS(n_), .c_dma);
 
     wire [255:0] o_all = {o_c_ack, o_c_rdata, o_g_ack, o_g_rvalid, o_g_rdata, o_cap_ready, o_cw_valid, o_cw_addr, o_cw_data,

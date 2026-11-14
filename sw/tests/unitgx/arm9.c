@@ -1,7 +1,7 @@
 /* unitgx.nds (sw/tests build, no calico): geometry-engine cost per command
    body, the bodies of hwref gxtime (docs/hw-reference.md "gxtime"; DS values
    in run 8, gxtime_summary.csv) for the core's scorecard
-   (docs/unit-scorecard.md). Values: system cycles per body x 100.
+   (docs/archive/unit-scorecard.md). Values: system cycles per body x 100.
    v3: n bodies, packed four commands a header, go to GXFIFO by DMA3
    (immediate, destination fixed); D(n) = from the DMA start to its end.
    n is 1,200 and 2,400 FIFO entries' worth, far past the FIFO (256) and the

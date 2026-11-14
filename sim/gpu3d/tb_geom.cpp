@@ -67,6 +67,8 @@ extern bool g_prof;
 u64 g_rfw = 0;
 int g_prof_from = 0, g_prof_to = 1 << 30, g_cur_frame = 0;
 bool g_fstat = false;
+FILE* g_podump = nullptr;         // --podump FILE: every polygon record (header, beats) and sort output in order, no cycles
+
 u64 g_div_hist[100][128];
 extern std::vector<u64> g_prof_hist;
 extern u64 g_cmd_n[64], g_cmd_cyc[64];
@@ -132,6 +134,12 @@ struct Rtl
         // outputs valid in this cycle (transfers happen at the edge)
         if (m->po_valid && m->po_ready)
         {
+            if (g_podump)
+            {
+                fprintf(g_podump, "%c %03x", m->po_type == 0 ? 'H' : 'V', m->po_type == 0 ? (unsigned)m->po_index : 0u);
+                for (int i = 0; i < 4; i++) fprintf(g_podump, " %08x", (unsigned)m->po_data[i]);
+                fputc('\n', g_podump);
+            }
             if (m->po_type == 0)
             {
                 cur = m->po_index;
@@ -205,6 +213,7 @@ struct Rtl
                    SORT_ST(m->rootp));
         if (m->so_we)
         {
+            if (g_podump) fprintf(g_podump, "S %03x %03x\n", (unsigned)m->so_pos, (unsigned)m->so_idx);
             if ((int)order.size() <= m->so_pos) order.resize(m->so_pos + 1, -1);
             order[m->so_pos] = m->so_idx;
         }
@@ -1093,13 +1102,16 @@ int run_synth(int nframes, u32 seed, bool verbose)
                 if (!check_tests(gd, rtl, c, writes)) bad++;
             {
                 auto* rr = rtl.m->rootp;
+                // CurCommand: the packed word shifted to its current command's byte (gxfront a2's pointer form)
+                const unsigned pk_p = rr->gpu3d_geom__DOT__u_front__DOT__pk_p;
+                const u32 pk_cur = pk_p >= 4 ? 0u : (u32)rr->gpu3d_geom__DOT__u_front__DOT__pk_w >> (8 * pk_p);
                 if (rr->gpu3d_geom__DOT__u_front__DOT__pk_nc != gd.g->NumCommands ||
-                    (gd.g->NumCommands && (rr->gpu3d_geom__DOT__u_front__DOT__pk_cur != gd.g->CurCommand ||
+                    (gd.g->NumCommands && (pk_cur != gd.g->CurCommand ||
                                            rr->gpu3d_geom__DOT__u_front__DOT__pk_pc != gd.g->ParamCount)))
                 {
                     printf("write %llu (%08X = %08X): packer melonDS %u %08X %u RTL %u %08X %u\n", (unsigned long long)writes, a, v,
                            gd.g->NumCommands, gd.g->CurCommand, gd.g->ParamCount, rr->gpu3d_geom__DOT__u_front__DOT__pk_nc,
-                           rr->gpu3d_geom__DOT__u_front__DOT__pk_cur, rr->gpu3d_geom__DOT__u_front__DOT__pk_pc);
+                           pk_cur, rr->gpu3d_geom__DOT__u_front__DOT__pk_pc);
                     return 2;
                 }
             }
@@ -1485,6 +1497,119 @@ int run_gxcost()
     return bad ? 1 : 0;
 }
 
+
+// --swaprace: a SWAP_BUFFERS executed by the DS model in the VBlank clock itself (gpu3d_gxfront flush: the VBlank's
+// clear and the SWAP's set in one clock). For each offset d in 0..3 the VBlank comes d clocks after the clock the
+// model executes the SWAP (d = 0: the same clock, found from do_exec before the edge). Each executed SWAP must be
+// taken (sw_take) and the engine must acknowledge it (swap_ack) within 2 VBlanks. Mutant GXFRONT_FLUSH_MUT: lost.
+int run_swaprace()
+{
+    Rtl rtl;
+    auto* r = rtl.m->rootp;
+    u64 n_ex = 0, n_take = 0, n_ack = 0, hits = 0;
+    int bad = 0;
+    // one clock: vb raises vblank for it; returns whether the model executed an entry in it
+    auto step = [&](bool vb) {
+        rtl.m->vblank = vb;
+        rtl.m->tick = rtl.cyc & 1; rtl.m->clk = 0; rtl.m->clk_2x = 0; rtl.m->eval();
+        bool ex = r->gpu3d_geom__DOT__u_front__DOT__do_exec;
+        if (ex) n_ex++;
+        if (rtl.m->sw_take) n_take++;
+        if (r->gpu3d_geom__DOT__swap_ack) n_ack++;
+        rtl.cycle();
+        rtl.m->vblank = 0;
+        return ex;
+    };
+    auto idle = [&](int n) { for (int i = 0; i < n; i++) step(false); };
+    const int FR = 20000;                       // clocks between VBlanks (the engine's sort of an empty list fits)
+    for (int rep = 0; rep < 4; rep++)
+    for (int d = 0; d <= 3; d++)
+    {
+        // the SWAP: written, then the clock the model executes it located
+        rtl.m->io_req = 1; rtl.m->io_we = 1; rtl.m->io_be = 0xF; rtl.m->io_addr = ((0x04000540u) >> 2) & 0xFF;
+        rtl.m->io_wdata = 0;
+        std::vector<bool> hist;
+        bool wrote = false;
+        int t_ex = -1;
+        for (int t = 0; t < 2000 && t_ex < 0; t++)
+        {
+            rtl.m->tick = rtl.cyc & 1; rtl.m->clk = 0; rtl.m->clk_2x = 0; rtl.m->eval();
+            bool ex = r->gpu3d_geom__DOT__u_front__DOT__do_exec;
+            bool vb = ex && d == 0;
+            if (vb) { rtl.m->vblank = 1; rtl.m->eval(); hits++; }
+            if (ex) { n_ex++; t_ex = t; }
+            if (rtl.m->sw_take) n_take++;
+            if (r->gpu3d_geom__DOT__swap_ack) n_ack++;
+            bool w = rtl.m->io_req && !rtl.m->io_wait;
+            rtl.cycle();
+            rtl.m->vblank = 0;
+            if (w) { wrote = true; rtl.m->io_req = 0; rtl.m->io_we = 0; }
+        }
+        rtl.m->io_req = 0; rtl.m->io_we = 0;
+        if (!wrote || t_ex < 0) { printf("swaprace d %+d: the SWAP was not executed\n", d); return 2; }
+        if (d > 0) { idle(d - 1); step(true); }
+        // two VBlanks: the SWAP must be taken by the first VBlank at or after it and acknowledged by the engine
+        idle(FR); step(true); idle(FR); step(true); idle(FR);
+        bool ok = n_take == n_ex && n_ack == n_ex;
+        printf("swaprace rep %d d %+d: executed %llu taken %llu acknowledged %llu (swap_n %u) %s\n", rep, d,
+               (unsigned long long)n_ex, (unsigned long long)n_take, (unsigned long long)n_ack,
+               (unsigned)r->gpu3d_geom__DOT__swap_n, ok ? "ok" : "LOST");
+        if (!ok) { bad++; break; }
+    }
+    printf("swaprace: %llu same-clock hits, %s\n", (unsigned long long)hits, bad ? "FAIL" : "PASS");
+    return bad ? 1 : 0;
+}
+
+// --swapmany N: N one-entry lists (SWAP_BUFFERS alone), one a VBlank, while the engine is held at the sort's SDRAW
+// wait (s_draw high, the store still drawing): the takes pile up in swap_n past 15. Then s_draw drops and no VBlank
+// comes; every take must be acknowledged (no take dropped). Mutant GEOM_SWAPN_MUT: the 4-bit saturating counter.
+int run_swapmany(int n)
+{
+    Rtl rtl;
+    auto* r = rtl.m->rootp;
+    u64 n_ex = 0, n_take = 0, n_ack = 0, n_sod = 0;
+    u32 peak = 0;
+    auto step = [&](bool vb) {
+        rtl.m->vblank = vb;
+        rtl.m->tick = rtl.cyc & 1; rtl.m->clk = 0; rtl.m->clk_2x = 0; rtl.m->eval();
+        if (r->gpu3d_geom__DOT__u_front__DOT__do_exec) n_ex++;
+        if (rtl.m->sw_take) n_take++;
+        if (r->gpu3d_geom__DOT__swap_ack) n_ack++;
+        if (rtl.m->so_done) n_sod++;
+        if (r->gpu3d_geom__DOT__swap_n > peak) peak = r->gpu3d_geom__DOT__swap_n;
+        rtl.cycle();
+        rtl.m->vblank = 0;
+    };
+    rtl.m->s_draw = 1;
+    for (int f = 0; f < n; f++)
+    {
+        rtl.m->io_req = 1; rtl.m->io_we = 1; rtl.m->io_be = 0xF; rtl.m->io_addr = ((0x04000540u) >> 2) & 0xFF;
+        rtl.m->io_wdata = 0;
+        for (int t = 0; t < 2000; t++)
+        {
+            rtl.m->tick = rtl.cyc & 1; rtl.m->clk = 0; rtl.m->clk_2x = 0; rtl.m->eval();
+            bool w = !rtl.m->io_wait;
+            step(false);
+            if (w) break;
+        }
+        rtl.m->io_req = 0; rtl.m->io_we = 0;
+        for (int t = 0; t < 4000; t++) step(false);
+        step(true);
+        if (getenv("SWAPMANY_V")) printf("  list %d: executed %llu taken %llu swap_n %u\n", f, (unsigned long long)n_ex,
+                                         (unsigned long long)n_take, (unsigned)r->gpu3d_geom__DOT__swap_n);
+    }
+    printf("swapmany: %d lists, executed %llu taken %llu, engine held: acknowledged %llu, swap_n %u (peak %u)\n", n,
+           (unsigned long long)n_ex, (unsigned long long)n_take, (unsigned long long)n_ack,
+           (unsigned)r->gpu3d_geom__DOT__swap_n, peak);
+    rtl.m->s_draw = 0;
+    for (long t = 0; t < (long)n * 20000 && n_ack < n_take; t++) step(false);
+    for (int t = 0; t < 20000; t++) step(false);
+    bool ok = n_take == (u64)n && n_ex == (u64)n && n_ack == n_take && n_sod == n_take && r->gpu3d_geom__DOT__swap_n == 0;
+    printf("swapmany: released: acknowledged %llu, sorts %llu, swap_n %u: %s\n", (unsigned long long)n_ack,
+           (unsigned long long)n_sod, (unsigned)r->gpu3d_geom__DOT__swap_n, ok ? "PASS" : "FAIL (a take lost)");
+    return ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -1518,6 +1643,7 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[a], "--pct") && a + 1 < argc) { g_prof = true; g_pct = argv[++a]; }
         else if (!strcmp(argv[a], "--prof-frames") && a + 2 < argc) { g_prof = true; g_prof_from = atoi(argv[++a]); g_prof_to = atoi(argv[++a]); }
         else if (!strcmp(argv[a], "--fstat")) g_fstat = true;
+        else if (!strcmp(argv[a], "--podump") && a + 1 < argc) g_podump = fopen(argv[++a], "w");
         else if (!strcmp(argv[a], "--rfw") && a + 1 < argc) g_rfw = atoll(argv[++a]);
         else if (!strcmp(argv[a], "--trc") && a + 2 < argc) { g_tr_from = atoll(argv[++a]); g_tr_to = atoll(argv[++a]); }
         else if (!strcmp(argv[a], "--debug") && a + 1 < argc) g_debug = atoi(argv[++a]);
@@ -1536,6 +1662,8 @@ int main(int argc, char** argv)
         else if (!strcmp(argv[a], "--seed") && a + 1 < argc) seed = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--timing") && a + 1 < argc) g_timing = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--gxcost")) return run_gxcost();
+        else if (!strcmp(argv[a], "--swaprace")) return run_swaprace();
+        else if (!strcmp(argv[a], "--swapmany") && a + 1 < argc) return run_swapmany(atoi(argv[++a]));
         else if (!strcmp(argv[a], "--wild")) g_wild = true;
         else if (!strcmp(argv[a], "--edge")) g_edge = true;
         else if (!strcmp(argv[a], "--counts")) g_counts = true;

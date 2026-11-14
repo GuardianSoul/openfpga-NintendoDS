@@ -15,7 +15,7 @@ and89outputs are mandatory byte-equality gates before accepting the epoch.
 `SOUND_EPOCH_WRONG_BOUNDARY` defers only supplemental observation to the
 actual next ARM7 retirement. Its actual execution is rejected while the
 original20+89files remain exact. The first unpinned15-byte FAT-time failure
-is retained separately. See [qualified results](../../../docs/sound-epoch-c19.md)
+is retained separately. See [qualified results](../../../docs/archive/sound-epoch-c19.md)
 for exact source/binary/epoch identities, commands and limits.
 
 Compilation/emulation requires an allocated worker lease; source preparation
@@ -32,4 +32,4 @@ accepted epoch byte-for-byte, using the same external FAT input.
 `check_window.py` checks bounded coverage; `compare_window.py` matches
 the actual257-PC prefix of the existing native39 observer. Neither
 estimates a timestamp offset. See
-[bounded results](../../../docs/sound-window-c19.md).
+[bounded results](../../../docs/archive/sound-window-c19.md).

@@ -26,12 +26,17 @@ module sys_equiv #(
     logic        n_munit, o_munit, n_more, o_more;
     logic [1:0]  n_busy, o_busy;
     logic        n_i9, o_i9, n_i7, o_i7, n_w7, o_w7;
-    nds_sys #(.PUMP(PUMP), .DMA_FAST(FAST)) u_new (.clk, .clk2, .rst, .tick, .io_req, .tmr_oh(tmr_oh), .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
+    // io_tmr: the fabric's registered io_pre && timer address, equal to it in the request's own cycle
+    // (and, as the fabric's register, !rst of the clock before: the timers' reset walk sees no access)
+    logic rst_d;
+    always_ff @(posedge clk) rst_d <= rst;
+    wire io_tmr = io_req && !rst_d && io_addr[20:12] == 9'd0 && io_addr[11:4] == 8'h10;
+    nds_sys #(.PUMP(PUMP), .DMA_FAST(FAST)) u_new (.clk, .clk2, .rst, .tick, .io_req, .io_pre(io_req), .io_tmr, .tmr_oh(tmr_oh), .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
         .io_rdata(new_rdata), .io_hit(n_hit), .dma_trig9, .dma_gx_low, .dma_stop9, .dma_trig7,
         .m_req(n_mreq), .m_we(n_mwe), .m_cpu(n_mcpu), .m_size32(n_m32), .m_addr(n_maddr),
         .m_wdata(n_mwd), .m_unit(n_munit), .m_dst(n_mdst), .m_more(n_more), .m_ack, .m_rdata, .dma_busy(n_busy), .irq_ext9, .irq_ext7,
         .irq9(n_i9), .irq7(n_i7), .wake7(n_w7), .math_late(), .dbg_dma_run(), .dma_lat_lost());
-    old_nds_sys #(.DMA_FAST(FAST)) u_old (.clk, .rst, .tick, .io_req, .tmr_oh(tmr_oh), .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
+    old_nds_sys #(.DMA_FAST(FAST)) u_old (.clk, .rst, .tick, .io_req, .io_pre(io_req), .tmr_oh(tmr_oh), .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
         .io_rdata(old_rdata), .io_hit(o_hit), .dma_trig9, .dma_gx_low, .dma_stop9, .dma_trig7,
         .m_req(o_mreq), .m_we(o_mwe), .m_cpu(o_mcpu), .m_size32(o_m32), .m_addr(o_maddr),
         .m_wdata(o_mwd), .m_unit(o_munit), .m_dst(o_mdst), .m_more(o_more), .m_ack, .m_rdata, .dma_busy(o_busy), .irq_ext9, .irq_ext7,

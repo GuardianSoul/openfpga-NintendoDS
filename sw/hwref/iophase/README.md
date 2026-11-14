@@ -4,7 +4,7 @@ Explicit standalone producer, absent from historical/all/speed-trip menus.
 Build `make -C sw/hwref /absolute/worktree/build/hwref/iophase.nds -j1`.
 Results are source/code-bound per-case files in `/hwref/iophase-v2`; preserve every raw row even if
 all finite timing models fail. Software qualification and the exact leaf are
-in [the evidence note](../../../docs/iophase-v2.md).
+in [the evidence note](../../../docs/archive/iophase-v2.md).
 
 The reviewed four cases are prefixNOP0/1 × gapNOP0/1, sixteen repetitions.
 Every NOP slot is explicit independent `MOV r8,r8`, never literal ARMv5

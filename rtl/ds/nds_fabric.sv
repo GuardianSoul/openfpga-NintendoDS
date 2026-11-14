@@ -65,7 +65,35 @@ module nds_fabric #(
     // waited ~4.3 clk for mr_ack; docs DMA route overheads)
     parameter integer DMA_PW = 0,
     // 1: a palette or OAM write ends in S_DONE straight from S_GO (pal_we/oam_we are S_GO's); S_RAM is for reads
-    parameter integer PO_WD = 0
+    parameter integer PO_WD = 0,
+    // DMA_IOF bit 0: a DMA unit's I/O write is acked (dm_ack) with io_ack in S_WAIT and goes back to S_IDLE, without
+    // S_DONE; bit 1: a DMA unit's posted GX-port write (DMA_GX) the same with dx_ready in S_GO. main->I/O units took
+    // 6 clk_sys (3.00 system cycles, the DS's 2.07; GX command port 3.00 vs 2.08). io_ack is nds_io's register
+    parameter integer DMA_IOF = 0,
+    // GX_REL: an ARM9 access waiting on the geometry engine gives the bus to another master that asks, so only the
+    // ARM9 waits (GBATEK: a full GX FIFO pauses the ARM9; melonDS stalls only the CPU; ds-rules R395, GBATEK-derived,
+    // unmeasured). Two waits:
+    //  - in S_GO: its posted GX-port write while the engine's port is not ready, or a 3D-register access held by
+    //    gx_hold behind a posted word (nothing sent yet: back to S_IDLE, the ARM9 granted again later);
+    //  - in S_WAIT: its read of the engine's register file (0x620-0x6A3: test results, clip and vector matrices),
+    //    which waits until the engine has run every entry the timing model executed (gpu3d_geom; 63-90K clk at the
+    //    start of NSMB's new-game intro frames, which kept DMA1's HBlank scroll table ~17 lines late). The read is
+    //    parked (pk): the machine goes on, nds_io keeps the answer apart from io_ack (gx_park, gxp_done) and the
+    //    ARM9 gets it with a9_ack in whatever state the machine is; until then the ARM9 is not granted and any other
+    //    access to the 3D block (0x320-0x7FF) waits in S_GO.
+    // 0: the machine holds the bus for the whole wait (as before)
+    parameter integer GX_REL = 1,
+    // SN_FIRST: the sound unit's memory access is granted before every other master's, DMA included. On the DS the
+    // SPU fetches on the ARM7 bus ahead of the CPU (R280: +3.9 % on the ARM7's own accesses) and an ARM9 DMA never
+    // holds it; here one fabric serves every master, and a DMA was granted before sound: Golden Sun's title DMA
+    // from LCDC VRAM to main RAM (0x0686xxxx -> 0x0218xxxx) kept one sound read waiting > 65K clk, 30+ steps of
+    // 2,048, so steps went late and the output buzzed (CAP50). Sound asks one word at a time, a few hundred
+    // thousand words a second at most, so the others lose little. 0: DMA first (as before)
+    parameter integer SN_FIRST = 1,
+    // DMA_PMM (clk_sys, 0 off, <= 63): a DMA's main->main read is granted no sooner than DMA_PMM clocks after the
+    // last one (the DS's 18 system cycles a word, unitmem DMAMM: 36; the core took 7.62). Only that read waits;
+    // its write and the other masters are not held, and the DMA's own CPU stays out as in DMA_PACE's gap
+    parameter integer DMA_PMM = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -149,6 +177,7 @@ module nds_fabric #(
     // I/O hub: one-cycle request, ack (with data) one or more cycles later
     output logic        io_req,
     output logic        io_pre,     // io_req without the GX hold: for what only reads (the timers' visit), off g_busy's path
+    output logic        io_tmr,     // io_pre on a timer (0x100-0x10F), from a register: the timers' visit (RC11 #2438: st.S_GO -> the timer RAM -1.68)
     output logic        io_cpu,
     output logic        io_we,
     output logic [3:0]  io_be,
@@ -156,6 +185,10 @@ module nds_fabric #(
     output logic [31:0] io_wdata,
     input  logic        io_ack,
     input  logic [31:0] io_rdata,
+    // GX_REL: the parked ARM9 read of the geometry engine's register file (nds_io)
+    output logic        gx_park,    // a read is parked, or parks this clock: nds_io answers it on gxp_done, not io_ack
+    input  logic        gxp_done,   // its answer (one clock), with gxp_rdata
+    input  logic [31:0] gxp_rdata,
     // VRAM controller CPU port: request held until ack
     output logic        vr_req,
     output logic        vr_cpu,
@@ -339,14 +372,17 @@ module nds_fabric #(
     // eighths carried over (52: 6, 7, 6, 7 ...)
     logic [3:0] pg, plim;
     logic [2:0] pfr;
-    wire  pc_hold = DMA_PACE != 0 && pg < plim;
+    wire  pc_hold0 = DMA_PACE != 0 && pg < plim;
+    logic [5:0] mg;                 // DMA_PMM: clocks since the last main->main read was granted (saturating)
+    wire  mm_rd = !dm_cpu && !dm_we && dm_addr[31:24] == 8'h02 && dm_dst[31:24] == 8'h02;   // (ARM9 DMA: run 35)
+    wire  pc_hold = pc_hold0 || (DMA_PMM != 0 && mm_rd && mg < 6'(DMA_PMM));
     typedef enum logic [1:0] { SD_IDLE, SD_MAIN, SD_FILL, SD_ACK } sd_t;
     sd_t         sd_st;
     logic [1:0]  sd_fw;
     logic [31:0] sd_rdata;
     // DMA_PACE gap (dm_req held off by the pace): the DMA's own CPU stays out
     wire pc_gap = dm_req && pc_hold;
-    wire a9_g = a9_req && !(pc_gap && !dm_cpu);
+    wire a9_g = a9_req && !(pc_gap && !dm_cpu) && !pk;
     wire a7_g = a7_req && !(pc_gap && dm_cpu);
     wire a7_first = A7_FIRST != 0 && a7_req && a9_req && a7_addr[31:24] == 8'h02 && a9_addr[31:24] == 8'h02;
     always_comb begin
@@ -355,6 +391,12 @@ module nds_fabric #(
         // DMA_RA: during a read-ahead only a DMA read that hits a line goes
         // (it needs the line buffer, not the main-RAM port)
         else if (ra_busy) begin if (dm_req && dm_hit) grant[0] = !pc_hold; end
+        // SN_FIRST (above): sound before DMA and both CPUs
+`ifdef SN_FIRST_MUT
+        else if (1'b0) ;                // mutant: sound waits behind DMA again
+`else
+        else if (SN_FIRST != 0 && sn_req) grant[3] = 1'b1;
+`endif
         else if (A7_IO != 0 && a7_req && !(dm_req && dm_cpu)) grant[2] = 1'b1;
         // DMA_PACE: the gap between units delays only the DMA and its own CPU
         // (which waits for the whole DMA on the DS, ds-rules); sound and the
@@ -410,6 +452,24 @@ module nds_fabric #(
     logic io_sent;
     logic mr_sent;
     tgt_t tgt_q;
+    // DMA_IOF: a DMA unit's I/O write answered in S_WAIT (with io_ack), its GX-port write in S_GO (with dx_ready)
+    wire  iof_io = (DMA_IOF & 1) != 0 && st == S_WAIT && tgt_q == T_IO && io_ack && mst == 2'd0 && we;
+    wire  iof_gx = (DMA_IOF & 2) != 0 && st == S_GO && tgt == T_IO && ugw && mst == 2'd0;
+    // GX_REL (above): another master that would be granted, the ARM9's waits, the parked read
+    logic pk;
+    wire  g3_blk = addr[27:24] == 4'h4 && addr[23:12] == 12'h000 && addr[11:0] >= 12'h320;   // nds_io D_GX
+    wire  g3_rf  = g3_blk && addr[11:0] >= 12'h620 && addr[11:0] < 12'h6A4;                  // the register-file reads
+    wire  rel_other = (dm_req && !pc_hold) || a7_req || sn_req;
+    wire  gx_wait = st == S_GO && mst == 2'd1 && tgt == T_IO && (ugw ? !dx_ready : gx_hold);
+`ifdef GX_REL_MUT
+    wire  pk_go = 1'b0;                         // mutant: the register-file read keeps the bus (the S_GO release stays)
+`else
+    wire  pk_go = GX_REL != 0 && st == S_WAIT && tgt_q == T_IO && mst == 2'd1 && !we && g3_rf && !io_ack && rel_other;
+`endif
+    wire  gx_rel = GX_REL != 0 && gx_wait && rel_other;
+    wire  pk_hold = pk && !cpu && g3_blk;       // another access to the 3D block waits while a read is parked
+    assign gx_park = pk || pk_go;
+    always_ff @(posedge clk) pk <= !rst && (pk ? !gxp_done : pk_go);   // GX_REL: the parked read
     // a block read outside main RAM: its words one by one, through S_DONE
     wire  bl_word = blk && !we && tgt_q != T_MAIN;
     wire  bl_more = bl_word && addr[4:2] != 3'd7;
@@ -473,7 +533,8 @@ module nds_fabric #(
             end
             S_GO: begin
                 tgt_q <= tgt;   // (held while waiting for port B)
-                unique case (tgt)
+                if (gx_rel) st <= S_IDLE;  // GX_REL: the bus to the master asking; the ARM9 is granted again later
+                else unique case (tgt)
                     T_MAIN: if (DMA_PW != 0 && pw_v) ;            // after the posted word
                     else if (pw_take) begin
                         for (int c = 0; c < 4; c++) if (t_eq[c]) lb_v[c] <= 1'b0;
@@ -504,8 +565,8 @@ module nds_fabric #(
                             else if (!pb_busy) st <= S_RAM;
                     T_PAL: st <= PO_WD != 0 && we ? S_DONE : S_RAM;
                     T_OAM: if (OAM_SHARE == 0 || we || oam_cgnt) st <= PO_WD != 0 && we ? S_DONE : S_RAM;
-                    T_IO: if (ugw) begin if (dx_ready) st <= S_DONE; end     // DMA_GX: posted
-                          else if (!gx_hold && io_go2) st <= S_WAIT;
+                    T_IO: if (ugw) begin if (dx_ready) st <= iof_gx ? S_IDLE : S_DONE; end     // DMA_GX: posted
+                          else if (!gx_hold && !pk_hold && io_go2) st <= S_WAIT;
                     T_VRAM: st <= drop_w9 ? S_DONE : S_WAIT;
                     // the empty slot reads all ones, whichever CPU EXMEMCNT gives it (docs/ds-rules.md)
                     T_GBA: begin rdata <= 32'hFFFF_FFFF; st <= S_DONE; end
@@ -545,7 +606,8 @@ module nds_fabric #(
             end
             S_WAIT: begin
                 if (tgt_q == T_IO) begin
-                    if (io_ack) begin rdata <= io_rdata; st <= S_DONE; end
+                    if (pk_go) st <= S_IDLE;       // GX_REL: parked; nds_io answers it on gxp_done
+                    else if (io_ack) begin rdata <= io_rdata; st <= iof_io ? S_IDLE : S_DONE; end
                 end else if (vr_ack) begin rdata <= vr_rdata; st <= S_DONE; end
             end
             S_FR: if (fx_done) begin rdata <= fx_rdata; st <= S_DONE; end
@@ -644,6 +706,10 @@ module nds_fabric #(
     wire [6:0] pace = dm_dst[31:24] == 8'h04 ? (dm_dst[23:6] == 18'h00010 ? 7'(DMA_PACE_GX) : 7'd34)   // 0x04000400-43F: the GX FIFO
                     : dm_dst[31:24] == 8'h06 ? 7'd51 : 7'd52;
     always_ff @(posedge clk)
+        if (rst || DMA_PMM == 0) mg <= 6'd63;     // (DMA_PMM)
+        else if (st == S_IDLE && grant[0] && mm_rd) mg <= 6'd1;
+        else if (mg != 6'd63) mg <= mg + 6'd1;
+    always_ff @(posedge clk)
         if (rst || DMA_PACE == 0) begin pg <= 4'd15; plim <= 4'd0; pfr <= 3'd0; end
         else if (st == S_IDLE && grant[0] && dm_unit) begin
             pg <= 4'd1;
@@ -655,6 +721,17 @@ module nds_fabric #(
     // (pocket-now: the second clock of S_GO, so addr, be, wdata -> the I/O registers are 2-clock paths in the SDC;
     // #1322/#1323 addr -> sys_timers, rtc, powcnt1 -0.43 ns; known difference: an I/O access +1 clock)
     assign io_pre   = st == S_GO && tgt == T_IO && !ugw && io_go2;
+    // io_tmr: io_pre && the timers' address (nds_sys d_tmr), registered a clock early. io_pre holds from S_GO's second clock
+    // until it leaves to S_WAIT (!gx_hold && io_go2); u, ugw and the request don't change in S_GO. The register is here,
+    // not in nds_sys, so the fabric's 2-clock request multicycle (build_ds.sh) doesn't cover its one-clock path.
+    always_ff @(posedge clk)
+        io_tmr <= !rst && st == S_GO && !u && tgt == T_IO && !ugw && !(io_go2 && !gx_hold)
+                  && addr[20:12] == 9'd0 && addr[11:4] == 8'h10;
+    // synthesis translate_off
+    always @(posedge clk)
+        if (!rst && io_tmr != (io_pre && addr[20:12] == 9'd0 && addr[11:4] == 8'h10))
+            $display("nds_fabric: ERROR: io_tmr %b differs from io_pre and the timer address at %0t", io_tmr, $time);
+    // synthesis translate_on
 `ifndef SYNTHESIS
     // the SDC's fabric multicycle (scripts/build_ds.sh): an I/O request a clock after addr, be, wdata, we or cpu changed
     logic [31:0] mc_addr, mc_wd;
@@ -667,7 +744,7 @@ module nds_fabric #(
                    addr, mc_addr, wdata, mc_wd);
     end
 `endif
-    assign io_req   = io_pre && !gx_hold;
+    assign io_req   = io_pre && !gx_hold && !pk_hold;
     assign dx_valid = st == S_GO && ugw && dx_ready;
     assign io_cpu   = cpu;
     assign io_we    = we;
@@ -696,12 +773,12 @@ module nds_fabric #(
     assign a9_rvalid = rv9 || (done && bl_word);
 
     // answers
-    assign done     = st == S_DONE;
+    assign done     = st == S_DONE || iof_io || (iof_gx && dx_ready);
     wire [31:0] hw  = addr[1] ? {16'd0, rdata[31:16]} : {16'd0, rdata[15:0]};
     assign dm_ack   = done && mst == 2'd0;
     assign dm_rdata = be == 4'hF ? rdata : hw;
-    assign a9_ack   = done && mst == 2'd1 && !bl_more;
-    assign a9_rdata = rdata;
+    assign a9_ack   = (done && mst == 2'd1 && !bl_more) || (pk && gxp_done);
+    assign a9_rdata = pk && gxp_done ? gxp_rdata : rdata;
     assign a7_ack   = done && mst == 2'd2;
     assign a7_rdata = rdata;
     assign sn_ack   = (done && mst == 2'd3) || sd_st == SD_ACK;

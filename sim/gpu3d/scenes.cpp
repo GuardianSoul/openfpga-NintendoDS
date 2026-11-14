@@ -1,5 +1,5 @@
 // Synthetic renderer scenes, one or more per renderer feature, until census
-// captures (docs/plan.md 0.1) replace them. Every scene is deterministic.
+// captures (docs/archive/plan.md 0.1) replace them. Every scene is deterministic.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -547,6 +547,132 @@ std::vector<Scene> builtin_scenes()
         v.push_back(random_scene("pokemon_mix", 101, 1 | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 7) | (5 << 8), 300, f));
     }
     for (uint32_t seed = 0; seed < 16; seed++) v.push_back(random_mix_scene(seed));
+    return v;
+}
+
+// Extreme-value scenes for the pixel-stage rule hunt (docs/pixel-rules.md,
+// `tb_gpu3d --pixrules`): the cases a near-camera model (White 2's trees) can
+// reach and the built-in random scenes don't. W is normalised per polygon as
+// GPU3D.cpp does (the largest in 0x1000..0xFFFF, the others anything below it,
+// 0 when shifted out); s, t over the whole s16 range; tall and wide polygons.
+// AA and edge marking stay off: the card fills right/bottom edges from the raw
+// DISP3DCNT (fill_all) while its FEAT_AA/EDGE are 0, which --feat-off's golden
+// does not model.
+namespace
+{
+struct XFeat
+{
+    int wmode = 0;        // 0 random ratio, 1 one vertex max and the rest tiny, 2 all near max, 3 shifted-out zeros
+    bool wbuffer = false;
+    bool stbig = false;   // s, t anywhere in s16
+    bool tall = false;    // vertices spread over the whole screen height
+    bool lin = false;     // equal w with low bits clear (linear path)
+    bool zbig = false;    // z over the whole 24-bit range per polygon
+    int maxv = 4;
+};
+
+Poly xpoly(Rng& r, const XFeat& f)
+{
+    Poly p;
+    int n = r.chance(50) ? 3 : r.chance(70) ? 4 : r.range(5, f.maxv < 5 ? 5 : f.maxv);
+    double cx = r.range(-20, 280), cy = f.tall ? r.range(60, 130) : r.range(-10, 200);
+    double rad = f.tall ? r.range(80, 200) : r.chance(30) ? r.range(2, 20) : r.range(20, 160);
+    double sx = r.range(30, 170) / 100.0, sy = r.range(30, 170) / 100.0;
+    std::vector<double> ang(n);
+    for (auto& a : ang) a = r.range(0, 35999) / 18000.0 * M_PI;
+    std::sort(ang.begin(), ang.end());
+    if (r.chance(50)) std::reverse(ang.begin(), ang.end());
+    uint32_t wmax = r.chance(50) ? r.range(0x8000, 0xFFFF) : r.range(0x1000, 0x7FFF);
+    if (f.lin) wmax = (uint32_t)r.range(0x20, 0x1FF) << 7;
+    int big = r.range(0, n - 1);
+    uint32_t zbase = r.bits(24), zspan = f.zbig ? 0xFFFFFF : r.bits(22);
+    int sbase = r.range(-32768, 32767), tbase = r.range(-32768, 32767);
+    int sspan = f.stbig ? 65535 : r.range(16, 8192), tspan = f.stbig ? 65535 : r.range(16, 8192);
+    for (int i = 0; i < n; i++)
+    {
+        Vtx v;
+        v.x = std::clamp((int)std::lround(cx + rad * sx * std::cos(ang[i])), 0, 255);
+        v.y = std::clamp((int)std::lround(cy + rad * sy * std::sin(ang[i])), 0, 192);
+        uint32_t w;
+        switch (f.lin ? -1 : f.wmode)
+        {
+        case -1: w = wmax; break;
+        case 1:  w = i == big ? wmax : (uint32_t)(r.chance(50) ? r.range(1, 0x3F) : r.range(0x40, 0x3FF)); break;
+        case 2:  w = i == big ? wmax : wmax - (uint32_t)r.range(0, 0x40) ; break;
+        case 3:  w = i == big ? wmax : r.chance(50) ? 0 : (uint32_t)r.range(1, 0xF); break;
+        default: w = i == big ? wmax : (uint32_t)r.range(1, (int)wmax); break;
+        }
+        v.w = w;
+        v.z = f.zbig ? (r.chance(50) ? r.bits(24) : (r.chance(50) ? 0 : 0xFFFFFF)) : std::min<uint32_t>(zbase + r.bits(24) % (zspan + 1), 0xFFFFFF);
+        if (f.wbuffer && r.chance(70)) v.z = std::min<uint32_t>(v.w << r.range(0, 8), 0xFFFFFF);
+        v.r = r.bits(9); v.g = r.bits(9); v.b = r.bits(9);
+        int s = sbase + (int)(r.bits(16) % (uint32_t)(sspan + 1)) - sspan / 2;
+        int t = tbase + (int)(r.bits(16) % (uint32_t)(tspan + 1)) - tspan / 2;
+        v.s = (int16_t)std::clamp(s, -32768, 32767);
+        v.t = (int16_t)std::clamp(t, -32768, 32767);
+        p.v.push_back(v);
+    }
+    double area = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const Vtx &a = p.v[i], &b = p.v[(i + 1) % n];
+        area += (double)a.x * b.y - (double)b.x * a.y;
+    }
+    p.facing = area < 0;
+    uint32_t alpha = r.chance(25) ? r.range(1, 30) : 31;
+    uint32_t mode = r.range(0, 1);
+    p.attr = (mode << 4) | (alpha << 16) | (r.bits(6) << 24) | (1u << 11);
+    if (r.chance(5)) p.attr |= 1 << 14;
+    if (r.chance(85))
+    {
+        uint32_t fmt = r.range(1, 7);
+        uint32_t ss = r.range(0, 7), ts = r.range(0, 7);
+        p.texparam = r.bits(16) | (r.bits(4) << 16) | (ss << 20) | (ts << 23) | (fmt << 26) | (r.bits(1) << 29);
+        p.texpal = r.bits(13);
+    }
+    p.wbuffer = f.wbuffer;
+    p.w_shifted_out = f.wmode == 3;
+    return p;
+}
+
+Scene xscene(const std::string& name, uint32_t seed, int npolys, const XFeat& f)
+{
+    Scene sc;
+    sc.name = name;
+    Rng r(seed);
+    fill_vram(sc, r);
+    random_tables(sc, r);
+    sc.dispcnt = 1 | (1 << 3);
+    sc.clear_attr1 = r.bits(15) | (31 << 16) | (r.bits(6) << 24);
+    sc.clear_attr2 = 0x7FFF;
+    for (int i = 0; i < npolys; i++) sc.polys.push_back(xpoly(r, f));
+    ysort(sc);
+    return sc;
+}
+} // namespace
+
+std::vector<Scene> pixrules_scenes(int reps)
+{
+    std::vector<Scene> v;
+    const char* wn[] = {"wrand", "wtiny", "wnear", "wzero"};
+    for (int k = 0; k < reps; k++)
+        for (int wb = 0; wb < 2; wb++)
+            for (int wm = 0; wm < 4; wm++)
+                for (int va = 0; va < 4; va++)
+                {
+                    XFeat f; f.wmode = wm; f.wbuffer = wb;
+                    f.stbig = va & 1; f.tall = va & 2; f.zbig = va == 3; f.maxv = 6;
+                    char nm[64];
+                    snprintf(nm, sizeof nm, "x_%s%s%s%s_%d", wn[wm], wb ? "_wb" : "", f.stbig ? "_st" : "", f.tall ? "_tall" : "", k);
+                    v.push_back(xscene(nm, 9000 + k * 64 + wb * 32 + wm * 4 + va, 40, f));
+                }
+    for (int k = 0; k < reps; k++)
+        for (int wb = 0; wb < 2; wb++)
+        {
+            XFeat f; f.lin = true; f.wbuffer = wb; f.stbig = true; f.tall = k & 1;
+            char nm[64]; snprintf(nm, sizeof nm, "x_lin%s_%d", wb ? "_wb" : "", k);
+            v.push_back(xscene(nm, 9500 + k * 2 + wb, 40, f));
+        }
     return v;
 }
 

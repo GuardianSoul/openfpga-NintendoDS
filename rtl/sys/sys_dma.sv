@@ -35,7 +35,12 @@ module sys_dma #(
     // main RAM to I/O (not the timers), palette, VRAM or OAM is one request
     // (m_unit, with m_dst): the fabric reads and writes in one grant and acks
     // once. 0: every unit as a read and a write, as before
-    parameter bit FAST = 0
+    parameter bit FAST = 0,
+    // FILL1: a run whose fixed source is a DMA fill word (0x040000E0..EF) reads it once and then only writes:
+    // nothing can change the word during the run (the CPU's bus waits for its whole DMA, R129), so each unit's
+    // read gave the same value. A preempted run reads it again when it resumes. (Burnout's menu clears 2 x 48 KiB
+    // of BG with 16-bit fills every VBlank: a read and a write request a unit, 7.2 system cycles against ~2)
+    parameter bit FILL1 = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -107,6 +112,7 @@ module sys_dma #(
     logic [6:0]  e_chunk;
     logic        e_res;             // the loaded channel resumes a preempted run
     logic [1:0]  e_why;             // save reason: 0 preempt, 1 GX chunk end, 2 finished
+    logic        e_fv;              // FILL1: e_data holds the run's fill word
     logic [1:0]  rtag;              // engine read in flight: 1 CNT and work, 3 SAD/DAD
 
     // priority pick: ARM9 0..3, then ARM7 0..3
@@ -158,7 +164,16 @@ module sys_dma #(
     wire [1:0]  actl    = est == E_MWR || unit ? dctl[ek] : sctl[ek];
     wire [27:0] astep   = actl == 2'd2 ? 28'd0 : actl == 2'd1 ? (sz32 ? -28'd4 : -28'd2) : (sz32 ? 28'd4 : 28'd2);
     wire [27:0] anext   = (unit ? e_dst[27:0] : m_addr[27:0]) + astep;
-    wire [20:0] rem_dec = (e_rem - 21'd1) & cmask;
+    // the count less one (21 bits): its low 18 bits in a DSP block (nds_dsp_add; D1: blocks freed in gpu2d_bg), the
+    // high 3 less the low part's borrow (no carry out of e_rem[17:0] + 0x3FFFF exactly when e_rem[17:0] is 0)
+    logic [18:0] rd_s;
+    nds_dsp_add #(.W(18)) u_rd (.clk, .a(e_rem[17:0]), .b(18'h3FFFF), .s(rd_s));
+`ifdef DMA_D1_MUT
+    wire [20:0] rem_m1  = {e_rem[20:18] - {2'd0, rd_s[18]}, rd_s[17:0]};   // (mutant: the borrow inverted)
+`else
+    wire [20:0] rem_m1  = {e_rem[20:18] - {2'd0, !rd_s[18]}, rd_s[17:0]};
+`endif
+    wire [20:0] rem_dec = rem_m1 & cmask;
     wire [6:0]  chk_dec = e_chunk - 7'd1;
 
     assign m_unit   = est == E_MRD && unit;
@@ -223,6 +238,7 @@ module sys_dma #(
                 E_RSD:   if (eng_rgo) est <= E_SETUP;
                 E_SETUP: if (rtag == 2'd0) begin
                     resume[ek] <= 1'b0;
+                    e_fv <= 1'b0;
                     est <= E_MRD;
                 end
                 E_MRD: if (m_ack && unit) begin
@@ -233,14 +249,17 @@ module sys_dma #(
                     if (rem_dec == 21'd0)            begin e_why <= 2'd2; est <= E_SAVE; end
                     else if (gx && chk_dec == 7'd0)  begin e_why <= 2'd1; est <= E_SAVE; end
                     else if (higher)                 begin e_why <= 2'd0; est <= E_SAVE; end
-                end else if (m_ack) begin e_data <= m_rdata; e_src <= {4'd0, anext}; est <= E_MWR; end
+                end else if (m_ack) begin
+                    e_data <= m_rdata; e_src <= {4'd0, anext}; est <= E_MWR;
+                    e_fv <= FILL1 && sctl[ek] == 2'd2 && e_src[27:4] == 24'h40000E;
+                end
                 E_MWR: if (m_ack) begin
                     e_dst <= {4'd0, anext};
                     e_rem <= rem_dec; e_chunk <= chk_dec;
                     if (rem_dec == 21'd0)            begin e_why <= 2'd2; est <= E_SAVE; end
                     else if (gx && chk_dec == 7'd0)  begin e_why <= 2'd1; est <= E_SAVE; end
                     else if (higher)                 begin e_why <= 2'd0; est <= E_SAVE; end
-                    else est <= E_MRD;
+                    else est <= FILL1 && e_fv ? E_MWR : E_MRD;
                 end
                 E_SAVE: if (save_go) begin
                     case (e_why)

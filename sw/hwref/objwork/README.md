@@ -1,8 +1,8 @@
 # Standalone OBJ work discriminator
 
 Eight finite cases and three preserved controls, described in
-[the plan](../../../docs/objwork-probe-plan.md) and
-[software qualification](../../../docs/objwork-v1.md). This reuses OBJv2's
+[the plan](../../../docs/archive/objwork-probe-plan.md) and
+[software qualification](../../../docs/archive/objwork-v1.md). This reuses OBJv2's
 known capture/BG state; the original producer and staged batch are unchanged.
 Explicit standalone build only; not in the historical or speed-trip menus.
 Output is `/hwref/objwork-v1` on a future hardware run.

@@ -10,7 +10,9 @@ the way openfpga-PlayStation's scripts/package_release.py does for the PlayStati
   public metadata and info text;
 - the boot ROM moves to Assets/nds/GuardianSoul.NintendoDS/;
 - the platform, its image, the core icon, the GPL-3 text and every licence
-  the bitstream needs go in.
+  the bitstream needs go in;
+- Cores/GuardianSoul.NintendoDS/updaters.json declares the AI tools used
+  (Analogue's "declare_ai" list).
 
 It refuses a build whose result.txt doesn't say timing PASS, a diagnostics
 core, a missing save or boot ROM slot, or any workspace name left in the
@@ -64,6 +66,9 @@ PRIVATE = re.compile('|'.join([*(re.escape(c.split('.')[0]) for c in SOURCE_CORE
                                r'/(?:home|run/media|tmp)/']), re.I)
 
 
+AI_TOOLS = ['Claude', 'Codex']     # the agents that wrote this core (AGENTS.md); README states the same
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('package', type=Path, help='tools/ds/package.py output folder (holds SD/)')
@@ -104,6 +109,8 @@ def main():
         description='A Nintendo DS core for the Analogue Pocket', author=AUTHOR, url=REPO,
         version=args.version, date_release=args.date)
     write('core.json', meta)
+    # Analogue's AI-use declaration: Cores/<core id>/updaters.json lists the AI tools the core was made with
+    write('updaters.json', {'declare_ai': AI_TOOLS})
     (core/'info.txt').write_text(INFO.format(author=AUTHOR, repo=REPO))
 
     shutil.copyfile(ROOT/'LICENSE', core/'LICENSE.txt')

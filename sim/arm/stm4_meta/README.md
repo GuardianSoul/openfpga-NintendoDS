@@ -1,7 +1,7 @@
 # Narrow ARM7 STM4 metadata prototype
 
 This adapts the existing request/accepted-DATA expressions and P7 posted
-owner from the [source proposal](../../../docs/cpu-arm7-stm4-interface-20261102.md).
+owner from the [source proposal](../../../docs/archive/cpu-arm7-stm4-interface-20261102.md).
 It introduces no memory service, timing charge, CPU stall/ACK control,
 payload queue or physical packet change. The402-bit execution observer
 remains disabled. cpu_domain forwards the narrow ports on the CPU clock;
@@ -48,7 +48,7 @@ before the metadata checker rejects them. The CPU controller reuses retained
 test inputs, runs25DENSE/tb_arm against the exact current-before CPU, and
 keeps the inherited bpred7 result explicit. It never enables EXEC_META.
 
-The sealed result is described in docs/cpu-arm7-stm4-metadata-20261102.md.
+The sealed result is described in docs/archive/cpu-arm7-stm4-metadata-20261102.md.
 The offline replay accepts the result packet directory as its argument;
 it verifies archived source, complete streams, mutations and retained gold
 states without executing a simulator. No standalone fit, native baseline,

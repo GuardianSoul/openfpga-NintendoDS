@@ -8,6 +8,7 @@ module arm_cpu import arm_pkg::*; #(
   // ARM9 cache ways (arm9_mem WAYS): 2, the cheaper caches the DS build uses
   // for the fit (2026-10-24); 4 is the ARM946E-S and stays tested
   parameter int          ARM9_WAYS   = 2,
+  parameter int          ARM9_IWAYS  = 0,      // the I-cache's ways (0: ARM9_WAYS's)
   parameter bit          ARM9_EVB    = 1'b0,   // arm9_mem EVB: the eviction buffer
   parameter bit          ARM9_EARLYD = 1'b0,   // arm9_mem EARLYD
   parameter int          A9_XD       = 0,      // arm9_mem XD / XI: extra set bits of the D / I cache
@@ -18,10 +19,15 @@ module arm_cpu import arm_pkg::*; #(
   parameter bit          A9_ONLY     = 1'b0,   // tb: the shared pipeline is the ARM9's alone (the ARM7 elsewhere)
   parameter bit          A7_DS       = 1'b0,   // the ARM7 is rtl/arm/arm7_ds.sv (DS-timed), the shared pipeline is the ARM9's alone
   parameter bit          A9_SOLO     = 1'b0,   // arm_core A9_SOLO: the ARM9 alone while the ARM7 is halted
-  parameter bit          SLOW        = 1'b0    // the CPUs at clk_sys (67 MHz): smaller forms (arm_core/arm9_mem SLOW)
+  parameter bit          A9_CORE     = 1'b0,   // 1: the ARM9 is arm9_core (stall pipeline, docs/arm9-stall.md; needs A7_DS), 0: arm_core
+  parameter              A9_RF       = "M10K", // arm9_core's register file (M10K or MLAB)
+  parameter bit          SLOW        = 1'b0,   // the CPUs at clk_sys (67 MHz): smaller forms (arm_core/arm9_mem SLOW)
+  parameter bit          SEP_RST     = 1'b0    // 1: arm9_core takes rst9 and arm7_ds rst7 (copies of rst on the same edge, placed by each core)
 ) (
   input  logic        clk,
   input  logic        rst,
+  input  logic        rst9,
+  input  logic        rst7,
   input  logic [1:0]  run,
   input  logic [31:0] reset_pc0,
   input  logic [31:0] reset_pc1,
@@ -76,6 +82,8 @@ module arm_cpu import arm_pkg::*; #(
 );
   logic        i_req, i_tid, i_priv, i_ok, i_abort;
   logic [31:0] i_addr, i_rdata;
+  logic        i_hsel;                  // arm9_core: the answer's halfword (f1_pc[1]); i_rhw that halfword
+  logic [15:0] i_rhw, m_i_rhw;
   logic        d_req, d_tid, d_priv, d_we, d_ok, d_abort, m9_kill;
   logic [1:0]  d_size;
   logic [3:0]  d_be;
@@ -92,28 +100,47 @@ module arm_cpu import arm_pkg::*; #(
   logic [5:0]  c_dbg_wa;
   logic [31:0] c_dbg_wd, c_dbg_pc, c_dbg_cpsr;
   logic [1:0]  c_dbg_halt;
+  logic [31:0] i_addr_s, i_addr_r;      // arm9_core: i_addr's candidates and the redirect select (arm9_mem's ITCM match)
+  logic        i_rdr;
+  generate if (A9_CORE) begin : g_a9c
+  arm9_core #(.RF_STYLE(A9_RF)) u_core9 (
+      .clk(clk), .rst(SEP_RST ? rst9 : rst), .run((A7_DS || A9_ONLY) ? {1'b0, run[0]} : run), .reset_pc0(reset_pc0), .reset_pc1(reset_pc1),
+      .hivecs({hivecs7, m_hivecs}), .irq(irq), .fiq(fiq),
+      .halt_req({halt7, 1'b0}), .wake({wake7, irq[0]}),
+      .i_req(i_req), .i_tid(i_tid), .i_priv(i_priv), .i_addr(i_addr), .i_addr_s(i_addr_s), .i_addr_r(i_addr_r), .i_rdr(i_rdr), .i_rdata(i_rdata),
+      .i_hsel(i_hsel), .i_rhw(i_rhw), .i_ok(i_ok), .i_abort(i_abort),
+      .d_req(d_req), .d_tid(d_tid), .d_priv(d_priv), .d_we(d_we), .d_size(d_size), .d_be(d_be),
+      .d_addr(d_addr), .d_wdata(d_wdata), .d_rdata(d_rdata), .d_ok(d_ok), .d_abort(d_abort),
+      .d_wait({1'b0, m_d_wait}), .d_kill(m9_kill),
+      .cp_req(cp_req), .cp_we(cp_we), .cp_op(cp_op), .cp_wdata(cp_wdata),
+      .dbg_wen(c_dbg_wen), .dbg_wa(c_dbg_wa), .dbg_wd(c_dbg_wd), .dbg_retire(c_dbg_retire),
+      .dbg_tid(c_dbg_tid), .dbg_pc(c_dbg_pc), .dbg_cpsr(c_dbg_cpsr), .dbg_halt(c_dbg_halt));
+  end else begin : g_a9b
+  assign i_addr_s = i_addr; assign i_addr_r = i_addr; assign i_rdr = 1'b0;
+  assign i_hsel = 1'b0;
   arm_core #(.V5(2'b01), .RF_STYLE(RF_STYLE), .A9_SOLO(A9_SOLO), .SOLO_ONLY(A7_DS || A9_ONLY), .A9_OPT(A9_OPT), .SLOW(SLOW)) u_core (
-    .clk(clk), .rst(rst), .run((A7_DS || A9_ONLY) ? {1'b0, run[0]} : run), .reset_pc0(reset_pc0), .reset_pc1(reset_pc1),
-    .hivecs({hivecs7, m_hivecs}), .irq(irq), .fiq(fiq),
-    .halt_req({halt7, 1'b0}), .wake({wake7, irq[0]}),
-    .i_req(i_req), .i_tid(i_tid), .i_priv(i_priv), .i_addr(i_addr), .i_rdata(i_rdata),
-    .i_ok(i_ok), .i_abort(i_abort),
-    .d_req(d_req), .d_tid(d_tid), .d_priv(d_priv), .d_we(d_we), .d_size(d_size), .d_be(d_be),
-    .d_addr(d_addr), .d_wdata(d_wdata), .d_rdata(d_rdata), .d_ok(d_ok), .d_abort(d_abort),
-    .d_wait({1'b0, m_d_wait}), .d_kill(m9_kill),
-    .cp_req(cp_req), .cp_we(cp_we), .cp_op(cp_op), .cp_wdata(cp_wdata),
-    .dbg_wen(c_dbg_wen), .dbg_wa(c_dbg_wa), .dbg_wd(c_dbg_wd), .dbg_retire(c_dbg_retire),
-    .dbg_tid(c_dbg_tid), .dbg_pc(c_dbg_pc), .dbg_cpsr(c_dbg_cpsr), .dbg_halt(c_dbg_halt));
+      .clk(clk), .rst(rst), .run((A7_DS || A9_ONLY) ? {1'b0, run[0]} : run), .reset_pc0(reset_pc0), .reset_pc1(reset_pc1),
+      .hivecs({hivecs7, m_hivecs}), .irq(irq), .fiq(fiq),
+      .halt_req({halt7, 1'b0}), .wake({wake7, irq[0]}),
+      .i_req(i_req), .i_tid(i_tid), .i_priv(i_priv), .i_addr(i_addr), .i_rdata(i_rdata),
+      .i_ok(i_ok), .i_abort(i_abort),
+      .d_req(d_req), .d_tid(d_tid), .d_priv(d_priv), .d_we(d_we), .d_size(d_size), .d_be(d_be),
+      .d_addr(d_addr), .d_wdata(d_wdata), .d_rdata(d_rdata), .d_ok(d_ok), .d_abort(d_abort),
+      .d_wait({1'b0, m_d_wait}), .d_kill(m9_kill),
+      .cp_req(cp_req), .cp_we(cp_we), .cp_op(cp_op), .cp_wdata(cp_wdata),
+      .dbg_wen(c_dbg_wen), .dbg_wa(c_dbg_wa), .dbg_wd(c_dbg_wd), .dbg_retire(c_dbg_retire),
+      .dbg_tid(c_dbg_tid), .dbg_pc(c_dbg_pc), .dbg_cpsr(c_dbg_cpsr), .dbg_halt(c_dbg_halt));
+  end endgenerate
 
   logic m9_ireq, m9_dreq, m9_cpreq;
   assign m9_ireq  = i_req && !i_tid;
   assign m9_dreq  = d_req && !d_tid;
   assign m9_cpreq = cp_req && !d_tid;
 
-  arm9_mem #(.RESET_CTRL(RESET_CTRL9), .WAYS(ARM9_WAYS), .BURST(ARM9_BURST), .SLOW(SLOW), .EVB(ARM9_EVB), .EVBW(ARM9_EVBW), .EARLYD(ARM9_EARLYD), .OPT(A9_OPT), .XD(A9_XD), .XI(A9_XI)) u_mem9 (
+  arm9_mem #(.RESET_CTRL(RESET_CTRL9), .WAYS(ARM9_WAYS), .IWAYS(ARM9_IWAYS != 0 ? ARM9_IWAYS : ARM9_WAYS), .BURST(ARM9_BURST), .SLOW(SLOW), .EVB(ARM9_EVB), .EVBW(ARM9_EVBW), .EARLYD(ARM9_EARLYD), .OPT(A9_OPT), .XD(A9_XD), .XI(A9_XI)) u_mem9 (
     .clk(clk), .rst(rst),
-    .i_req(m9_ireq), .i_priv(i_priv), .i_addr(i_addr),
-    .i_rdata(m_i_rdata), .i_ok(m_i_ok), .i_abort(m_i_abort),
+    .i_req(m9_ireq), .i_priv(i_priv), .i_addr(i_addr), .i_addr_s(i_addr_s), .i_addr_r(i_addr_r), .i_rdr(i_rdr),
+    .i_rdata(m_i_rdata), .i_hsel(i_hsel), .i_rhw(m_i_rhw), .i_ok(m_i_ok), .i_abort(m_i_abort),
     .d_req(m9_dreq), .d_kill(m9_kill), .d_we(d_we), .d_priv(d_priv), .d_be(d_be), .d_addr(d_addr),
     .d_wdata(d_wdata), .cp_req(m9_cpreq), .cp_we(cp_we), .cp_op(cp_op), .cp_wdata(cp_wdata),
     .d_rdata_f(m_d_rdata), .d_ok(m_d_ok), .d_abort(m_d_abort), .d_wait(m_d_wait),
@@ -126,7 +153,7 @@ module arm_cpu import arm_pkg::*; #(
     logic [4:0]  l_wa;
     logic [31:0] l_wd, l_pc, l_cpsr;
     arm7_ds u_a7 (
-      .clk(clk), .rst(rst), .run(run[1]), .reset_pc(reset_pc1), .hivecs(hivecs7), .irq(irq[1]), .fiq(fiq[1]),
+      .clk(clk), .rst(SEP_RST ? rst7 : rst), .run(run[1]), .reset_pc(reset_pc1), .hivecs(hivecs7), .irq(irq[1]), .fiq(fiq[1]),
       .wake(wake7),
       .i_req(a7_i_req), .i_addr(a7_i_addr), .i_rdata(a7_i_rdata), .i_ok(a7_i_ok),
       .d_req(a7_d_req), .d_we(a7_d_we), .d_be(a7_d_be), .d_addr(a7_d_addr), .d_wdata(a7_d_wdata),
@@ -164,6 +191,7 @@ module arm_cpu import arm_pkg::*; #(
   end
 
   assign i_rdata = f2_tid ? a7_i_rdata : m_i_rdata;
+  assign i_rhw   = f2_tid ? (i_hsel ? a7_i_rdata[31:16] : a7_i_rdata[15:0]) : m_i_rhw;
   assign i_ok    = f2_tid ? a7_i_ok : m_i_ok;
   assign i_abort = f2_tid ? 1'b0 : m_i_abort;
   assign d_rdata = wb_tid ? a7_d_rdata : m_d_rdata;

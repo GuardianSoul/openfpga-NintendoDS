@@ -1,0 +1,74 @@
+{
+  "origin": "actual2172map_negative_fixture_not_STA",
+  "source": "c5ae8d39a142d6be1414ac77ec126f46c81e6717",
+  "report_sha256": "a6289bc7cb1f68801a74d7e29462cb6e3d94df097678e8e58e01c058d8f4f5a3",
+  "report": "/home/user/Git/NDS_Pocket/build/coordinator/fit2172/apf_top.map.rpt",
+  "FSM_encoding": "One-Hot",
+  "envelope_retained_nodes": [
+    "core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope.000",
+    "core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope.001",
+    "core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope.010",
+    "core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope.100"
+  ],
+  "lost_envelope": "core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope.011",
+  "lane_merged_source": "core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_lane[0]",
+  "lane_merged_target": "core_top:ic|nds_top:ds|nds_disp:u_disp|gpu2d:u_gpu2d|oam_ch",
+  "primary_merge_line": 4531,
+  "primary_lost_line": 4927,
+  "known_SDC_metadata_count": 2,
+  "known_SDC_RAM_count": 180,
+  "primary_lines": [
+    {
+      "line": 21,
+      "text": " 13. State Machine - |apf_top|core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope"
+    },
+    {
+      "line": 2302,
+      "text": "; State Machine - |apf_top|core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope                     ;"
+    },
+    {
+      "line": 2304,
+      "text": "; Name               ; route_envelope.011 ; route_envelope.010 ; route_envelope.001 ; route_envelope.000 ; route_envelope.100 ;"
+    },
+    {
+      "line": 2306,
+      "text": "; route_envelope.000 ; 0                  ; 0                  ; 0                  ; 0                  ; 0                  ;"
+    },
+    {
+      "line": 2307,
+      "text": "; route_envelope.001 ; 0                  ; 0                  ; 1                  ; 1                  ; 0                  ;"
+    },
+    {
+      "line": 2308,
+      "text": "; route_envelope.010 ; 0                  ; 1                  ; 0                  ; 1                  ; 0                  ;"
+    },
+    {
+      "line": 2309,
+      "text": "; route_envelope.011 ; 1                  ; 0                  ; 0                  ; 1                  ; 0                  ;"
+    },
+    {
+      "line": 2310,
+      "text": "; route_envelope.100 ; 0                  ; 0                  ; 0                  ; 1                  ; 1                  ;"
+    },
+    {
+      "line": 4531,
+      "text": "; core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_lane[0]                                                         ; Merged with core_top:ic|nds_top:ds|nds_disp:u_disp|gpu2d:u_gpu2d|oam_ch                                                                    ;"
+    },
+    {
+      "line": 4927,
+      "text": "; core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope.011                                                    ; Lost fanout                                                                                                                                ;"
+    },
+    {
+      "line": 4946,
+      "text": "; core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope~2                                                      ; Lost fanout                                                                                                                                ;"
+    },
+    {
+      "line": 4947,
+      "text": "; core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope~3                                                      ; Lost fanout                                                                                                                                ;"
+    },
+    {
+      "line": 6292,
+      "text": "; 4:1                ; 2 bits    ; 4 LEs         ; 4 LEs                ; 0 LEs                  ; No         ; |apf_top|core_top:ic|nds_top:ds|nds_io:u_io|nds_io_route:g_route.u_route|route_envelope                                                 ;"
+    }
+  ]
+}

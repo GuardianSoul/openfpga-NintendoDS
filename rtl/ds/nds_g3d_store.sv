@@ -5,9 +5,16 @@
 // (po_*, so_*) and gpu3d_raster's per-line stream (ps_*).
 //
 // PSRAM (p_*: main-RAM word addresses through nds_mr_arb), double-buffered:
-//   0x400000 + bank * 0x20000   headers, 16 bytes per polygon index
-//   0x408000 + bank * 0x20000   vertices, 16 bytes each, in arrival order
-// A header keeps its polygon's first vertex number in bits 127:115.
+//   0x400000 + bank * 0x100000  headers, 16 bytes per polygon index (2,048)
+//   0x408000 + bank * 0x100000  vertex records, 16 bytes each, in arrival order
+// A header keeps its polygon's first vertex record number in bits 127:114.
+// Each polygon's vertices are written as its own records (a strip's shared
+// vertices again for every polygon), so a frame within the DS's limits
+// (2,048 polygons, 6,144 vertices counted once) writes up to NV + 2 NP =
+// 10,240 vertex records: the bank is sized for 2,048 + 10,240 = 12,288
+// records (192 KiB; checked below). Before (FF4's opening, 2026-11-11) the
+// record number and its address were 13 bits: record 6,144 + k wrapped onto
+// header k (docs/geometry-engine.md "Store vertex records").
 //
 // On chip, for the bank being drawn:
 //   - Y table {skip, ytop, ybot} per polygon index, written with each
@@ -91,7 +98,8 @@ module nds_g3d_store #(
     output logic         ps_valid,
     input  logic         ps_ready,
     output logic [1:0]   ps_type,
-    output logic [127:0] ps_data,
+    output logic [127:0] ps_data,        // a header beat's data (type 0)
+    output logic [127:0] ps_vdata,       // a vertex beat's data (type 1): its own port, so no 128-bit header/vertex mux
     // PSRAM: request held until ack; a read returns 4 words (rvalid)
     output logic         p_req,
     output logic         p_we,
@@ -104,7 +112,7 @@ module nds_g3d_store #(
 );
     // ================================================================ write side
     logic        wb;                     // bank geom writes
-    logic [12:0] vptr;
+    logic [13:0] vptr;                   // vertex records written this bank: at most NV + 2 NP = 10,240 (header above)
     logic        building;
     logic [146:0] wh;                    // the queue's oldest entry {byte address [22:4], record}
     localparam int QA = WORDS && WQ_M10K && WQ_PACK ? WQ_AW : 2;
@@ -116,8 +124,8 @@ module nds_g3d_store #(
     logic        p_busy;
     assign po_ready = wq_n < QN'((1 << QA) - 2) && !building;
     wire         po_go = po_valid && po_ready;
-    wire [22:4]  h_a = {2'b10, wb, 5'd0, po_index};                        // 0x400000 + wb*0x20000 + idx*16
-    wire [22:4]  v_a = {2'b10, wb, 16'd0} + {6'd0, 13'h0800 + vptr};      // + 0x8000 + v*16
+    wire [22:4]  h_a = {2'b10, wb, 5'd0, po_index};                        // 0x400000 + wb*0x100000 + idx*16
+    wire [22:4]  v_a = {2'b10, wb, 16'd0} + {3'd0, 16'h0800 + {2'd0, vptr}};      // + 0x8000 + v*16
     wire         w_done = p_busy && !p_own_l && p_ack && wk == 2'd3;
     // WQ_PACK: the writer's word and entry after this edge (wk, wq_rp's next values)
     wire  [1:0]  wk_n  = rst ? 2'd0 : wk + 2'(p_busy && !p_own_l && p_ack);
@@ -126,15 +134,15 @@ module nds_g3d_store #(
     logic [31:0] wq_d;                   // ... and word wk of its record, as the writer sends it
     always_ff @(posedge clk) begin
         if (rst) begin
-            wb <= 1'b0; vptr <= 13'd0; wq_rp <= '0; wq_wp <= '0; wq_n <= '0;
+            wb <= 1'b0; vptr <= 14'd0; wq_rp <= '0; wq_wp <= '0; wq_n <= '0;
         end else begin
             if (po_go) begin
                 wq_wp <= WORDS ? wq_wp + QA'(1) : QA'(!wq_wp[0]);
-                if (po_type) vptr <= vptr + 13'd1;
+                if (po_type) vptr <= vptr + 14'd1;
             end
             wq_n <= wq_n + QN'(po_go) - QN'(w_done);
             if (w_done) wq_rp <= WORDS ? wq_rp + QA'(1) : QA'(!wq_rp[0]);
-            if (so_done) begin wb <= !wb; vptr <= 13'd0; end
+            if (so_done) begin wb <= !wb; vptr <= 14'd0; end
         end
     end
 
@@ -147,7 +155,7 @@ module nds_g3d_store #(
     // wait: hence 4 entries, so the one being filled is never one that waits
     logic [31:0] wq_lane [4];
     logic        wq_type;
-    logic [12:0] wq_vptr;
+    logic [13:0] wq_vptr;
     logic [22:4] wq_addr;
     generate if (WORDS) begin : g_wqw
         genvar wl;
@@ -156,26 +164,26 @@ module nds_g3d_store #(
             logic [31:0] wq_w;
             gpu3d_ram #(.W(32), .AW(QA + 2), .STYLE("M10K")) u_wl (.clk, .we(po_wv), .waddr({po_wk, wq_wp}),
                 .wdata(po_wd), .raddr({wk_n[1], wk_n[1] ^ wk_n[0], wrp_n}), .rdata(wq_w));
-            gpu3d_ram #(.W(33), .AW(QA), .STYLE("M10K")) u_wa (.clk, .we(po_go), .waddr(wq_wp),
+            gpu3d_ram #(.W(34), .AW(QA), .STYLE("M10K")) u_wa (.clk, .we(po_go), .waddr(wq_wp),
                 .wdata({po_type, po_type ? v_a : h_a, vptr}), .raddr(wq_rp), .rdata({wq_type, wq_addr, wq_vptr}));
             for (wl = 0; wl < 4; wl = wl + 1) begin : g_l
                 assign wq_lane[wl] = wq_w;   // (wh: only its address bits are used)
             end
             // lane 3 is word 2
-            assign wq_d = (wk == 2'd2 && !wq_type) ? {wq_vptr, 7'd0, wq_w[11:0]} : wq_w;
+            assign wq_d = (wk == 2'd2 && !wq_type) ? {wq_vptr, 6'd0, wq_w[11:0]} : wq_w;
         end else if (WQ_M10K) begin : g_m
             for (wl = 0; wl < 4; wl = wl + 1) begin : g_l
                 gpu3d_ram #(.W(32), .AW(2), .STYLE("M10K")) u_wl (.clk, .we(po_wv && po_wk == 2'(wl)), .waddr(wq_wp),
                     .wdata(po_wd), .raddr(wq_rp), .rdata(wq_lane[wl]));
             end
-            gpu3d_ram #(.W(33), .AW(2), .STYLE("M10K")) u_wa (.clk, .we(po_go), .waddr(wq_wp),
+            gpu3d_ram #(.W(34), .AW(2), .STYLE("M10K")) u_wa (.clk, .we(po_go), .waddr(wq_wp),
                 .wdata({po_type, po_type ? v_a : h_a, vptr}), .raddr(wq_rp), .rdata({wq_type, wq_addr, wq_vptr}));
         end else begin : g_ml
             for (wl = 0; wl < 4; wl = wl + 1) begin : g_l
                 gpu3d_lram #(.W(32), .AW(2)) u_wl (.clk, .we(po_wv && po_wk == 2'(wl)), .waddr(wq_wp), .wdata(po_wd),
                     .raddr(wq_rp), .rdata(wq_lane[wl]));
             end
-            gpu3d_lram #(.W(33), .AW(2)) u_wa (.clk, .we(po_go), .waddr(wq_wp),
+            gpu3d_lram #(.W(34), .AW(2)) u_wa (.clk, .we(po_go), .waddr(wq_wp),
                 .wdata({po_type, po_type ? v_a : h_a, vptr}), .raddr(wq_rp), .rdata({wq_type, wq_addr, wq_vptr}));
         end
 `ifndef ALTERA_RESERVED_QIS
@@ -183,14 +191,14 @@ module nds_g3d_store #(
         // WQ_M10K: the MLAB queue beside it; the writer must see the same entry on every clock it uses wh
         if (WQ_M10K) begin : g_chk
             logic [31:0] cl [4];
-            logic [32:0] ca;
+            logic [33:0] ca;
             for (wl = 0; wl < 4; wl = wl + 1) begin : g_l
                 gpu3d_lram #(.W(32), .AW(QA)) u_cl (.clk, .we(po_wv && po_wk == 2'(wl)), .waddr(wq_wp), .wdata(po_wd),
                     .raddr(wq_rp), .rdata(cl[wl]));
             end
-            gpu3d_lram #(.W(33), .AW(QA)) u_ca (.clk, .we(po_go), .waddr(wq_wp),
+            gpu3d_lram #(.W(34), .AW(QA)) u_ca (.clk, .we(po_go), .waddr(wq_wp),
                 .wdata({po_type, po_type ? v_a : h_a, vptr}), .raddr(wq_rp), .rdata(ca));
-            wire [146:0] wh_ref = {ca[31:13], ca[32] ? cl[3] : {ca[12:0], 7'd0, cl[3][11:0]}, cl[2], cl[1], cl[0]};
+            wire [146:0] wh_ref = {ca[32:14], ca[33] ? cl[3] : {ca[13:0], 6'd0, cl[3][11:0]}, cl[2], cl[1], cl[0]};
             // what the writer sends: its address and word (WQ_PACK: all wh holds that is used)
             wire [31:0]  wd_ref = wh_ref[{wk[1], wk[1] ^ wk[0]}*32 +: 32];
             always_ff @(posedge clk)
@@ -200,13 +208,13 @@ module nds_g3d_store #(
         end
         // synthesis translate_on
 `endif
-        assign wh = {wq_addr, wq_type ? wq_lane[3] : {wq_vptr, 7'd0, wq_lane[3][11:0]}, wq_lane[2], wq_lane[1], wq_lane[0]};
+        assign wh = {wq_addr, wq_type ? wq_lane[3] : {wq_vptr, 6'd0, wq_lane[3][11:0]}, wq_lane[2], wq_lane[1], wq_lane[0]};
         if (!(WQ_M10K && WQ_PACK)) begin : g_wd
             assign wq_d = wh[{wk[1], wk[1] ^ wk[0]}*32 +: 32];
         end
     end else begin : g_wqr
         gpu3d_lram #(.W(147), .AW(1)) u_wq (.clk, .we(po_go), .waddr(wq_wp[0]),
-            .wdata(po_type ? {v_a, po_data} : {h_a, vptr, 7'd0, po_data[107:0]}), .raddr(wq_rp[0]), .rdata(wh));
+            .wdata(po_type ? {v_a, po_data} : {h_a, vptr, 6'd0, po_data[107:0]}), .raddr(wq_rp[0]), .rdata(wh));
         assign wq_d = wh[{wk[1], wk[1] ^ wk[0]}*32 +: 32];
     end endgenerate
     assign wq_ha = wh[146:128];
@@ -292,6 +300,7 @@ module nds_g3d_store #(
 
     // ================================================================ pool
     logic          fs_pop, fs_push, fs_ok, fc_pop, fc_push, fc_ok;
+    logic          fs_busy, fc_busy;     // a free list refilling after reset / a clear, or settling (DROP waits then)
     logic [SL-1:0] fs_pd, fs_q;
     logic [CL-1:0] fc_pd, fc_q;
     logic [SL:0]   fs_n;
@@ -345,8 +354,8 @@ module nds_g3d_store #(
     logic          l_drop;            // DROP: the loader drops the arrival it can't place (the fetcher waits for it)
     logic          f_drop;            // DROP: the fetcher's position is a dropped one
     assign drawing = f_live;
-    nds_g3d_fl #(.W(SL)) u_fs (.clk, .rst, .clr(f_clr_go), .pop(fs_pop), .push(fs_push), .pd(fs_pd), .q(fs_q), .ok(fs_ok), .n(fs_n));
-    nds_g3d_fl #(.W(CL)) u_fc (.clk, .rst, .clr(f_clr_go), .pop(fc_pop), .push(fc_push), .pd(fc_pd), .q(fc_q), .ok(fc_ok), .n(fc_n));
+    nds_g3d_fl #(.W(SL)) u_fs (.clk, .rst, .clr(f_clr_go), .pop(fs_pop), .push(fs_push), .pd(fs_pd), .q(fs_q), .ok(fs_ok), .n(fs_n), .busy(fs_busy));
+    nds_g3d_fl #(.W(CL)) u_fc (.clk, .rst, .clr(f_clr_go), .pop(fc_pop), .push(fc_push), .pd(fc_pd), .q(fc_q), .ok(fc_ok), .n(fc_n), .busy(fc_busy));
 
     // ================================================================ loader
     typedef enum logic [3:0] { L_IDLE, L_LINE, L_LINE2, L_POS, L_POS2, L_HREQ, L_HDAT, L_ROOM,
@@ -380,7 +389,7 @@ module nds_g3d_store #(
     logic [10:0]   lpos, ltail, lidx;
     logic [10:0]   lh3;                  // header bits 106:96
     logic [3:0]    lnv, lk;
-    logic [12:0]   lv;
+    logic [13:0]   lv;
     logic [1:0]    lw;
     // beat lw brings word lw_w: a record's words 2 and 3 are swapped in PSRAM (p_wdata below)
     wire  [1:0]    lw_w = {lw[1], lw[1] ^ lw[0]};
@@ -418,7 +427,7 @@ module nds_g3d_store #(
                 if (l_ack) l_req <= 1'b0;
                 if (l_beat) begin
                     lw <= lw + 2'd1;
-                    if (lw_w == 2'd3) begin lv <= p_rdata[31:19]; lh3 <= p_rdata[10:0]; end
+                    if (lw_w == 2'd3) begin lv <= p_rdata[31:18]; lh3 <= p_rdata[10:0]; end
                     if (lw_w == 2'd2) begin lnv <= p_rdata[16:13]; lst <= L_ROOM; end   // header bits 80:77
                 end
             end
@@ -428,7 +437,7 @@ module nds_g3d_store #(
                 else if (l_drop) begin sp_we <= 1'b1; sp_wa <= lpos; sp_wd <= (SL + DROP)'(1) << SL; lst <= L_LINK; end
             end
             L_VREQ: if (fc_ok) begin
-                l_req <= 1'b1; l_addr <= {2'b10, rb, 18'd0} + {6'd0, 13'h0800 + lv, 2'b00}; lw <= 2'd0;
+                l_req <= 1'b1; l_addr <= {2'b10, rb, 18'd0} + {3'd0, 16'h0800 + {2'd0, lv}, 2'b00}; lw <= 2'd0;
                 lst <= L_VDAT;
             end
             L_VDAT: begin
@@ -439,7 +448,7 @@ module nds_g3d_store #(
                         if (lk == 4'd0) lc_first <= fc_q;
                         else begin cn_we <= 1'b1; cn_wa <= lc_prev; cn_wd <= fc_q; end
                         lc_prev <= fc_q;
-                        lk <= lk + 4'd1; lv <= lv + 13'd1;
+                        lk <= lk + 4'd1; lv <= lv + 14'd1;
                         lst <= lk + 4'd1 == lnv ? L_SLOT : L_VREQ;
                     end
                 end
@@ -547,7 +556,9 @@ module nds_g3d_store #(
     wire           f_take = fst == F_PICK && (ha_v || hr_v) && !(ha_v && (!hr_v || ha_p < hr_p)) && f_got;
     // DROP: the fetcher waits for the loader's line's next arrival (nothing of it in the pool to take) while the loader
     // waits for room for that arrival (L_HREQ, L_ROOM below): nothing can move until the next swap
-    assign l_drop = DROP && fst == F_PICK && hr_v && !(ha_v && ha_p < hr_p) && !f_got && f_lyeq && lgo;
+    // (a free list still refilling after a clear, f_clr_go, is not a full pool: the loader waits for it. Without this,
+    // after a raster restart the next frame's first arrivals were dropped while the lists refilled, 2^SL / 2^CL clocks)
+    assign l_drop = DROP && fst == F_PICK && hr_v && !(ha_v && ha_p < hr_p) && !f_got && f_lyeq && lgo && !fs_busy && !fc_busy;
 `ifndef ALTERA_RESERVED_QIS
     int dr_n = 0;            // DROP: polygons dropped (the first ones are logged)
     always_ff @(posedge clk)
@@ -580,7 +591,10 @@ module nds_g3d_store #(
     assign fs_pd   = f_slot;
     assign fc_push = fst == F_VOUT && (out_free || fquiet) && !f_keep;
     assign ch_re   = PSREG || !(ps_valid && !ps_ready && ps_type == 2'd1);
-    assign ps_data = PSREG ? ps_data_r : ps_type == 2'd1 ? {12'd0, ch_q} : {21'd0, sh_q[106:0]};
+    // the raster takes a header's fields from ps_data on type 0 beats and a vertex's from ps_vdata on type 1 beats
+    // (gpu3d_front), so each port carries its own lanes: no mux between them (docs/g3d-storage-map.md, store trims)
+    assign ps_data  = PSREG ? ps_data_r : {21'd0, sh_q[106:0]};
+    assign ps_vdata = PSREG ? ps_data_r : {12'd0, ch_q};
     assign fc_pd   = f_c;
     wire  [7:0]    f_ybot = sh_q[104:97];
     always_ff @(posedge clk) begin
@@ -663,6 +677,12 @@ module nds_g3d_store #(
         endcase
     end
 `ifndef ALTERA_RESERVED_QIS
+    // vertex records: at most NV + 2 NP = 10,240 a bank (the DS's 6,144 / 2,048 limits), each inside the bank's
+    // 12,288 records (above the 2,048 headers): a frame past it would overwrite headers or the next region
+    always_ff @(posedge clk)
+        if (!rst && po_go && po_type && (vptr >= 14'd10240 || 32'(v_a - {2'b10, wb, 16'd0}) >= 12288))
+            $error("nds_g3d_store: vertex record %0d of this bank (bound 10,240) at record %0d (capacity 12,288)",
+                   vptr, v_a - {2'b10, wb, 16'd0});
     // the build files each position under its own polygon's ytop
     always_ff @(posedge clk)
         if (!rst && bst == B_LINK && yt_q != u_ytab.mem[u_ord.mem[bpos[10:0]]])
@@ -696,7 +716,7 @@ module nds_g3d_store #(
         if (po_go) $display("G3T in  %s idx %0d vptr %0d wb %0d data %h", po_type ? "V" : "H", po_index, vptr, wb, po_data);
         if (so_done) $display("G3T swap count %0d", so_count);
         if (p_req && p_ack) $display("G3T psram %s %06x %08x", p_we ? "W" : "R", {p_addr, 2'b00}, p_wdata);
-        if (ps_valid && ps_ready) $display("G3T out t%0d line %0d %h", ps_type, fy, ps_data);
+        if (ps_valid && ps_ready) $display("G3T out t%0d line %0d %h", ps_type, fy, ps_type == 2'd1 ? ps_vdata : ps_data);
         if (p_rvalid) $display("G3T rd %08x", p_rdata);
         if (fst == F_HEADS) $display("G3T line %0d ready %0d lgo %0d ly %0d fa %0d fa_n %0d fb_n %0d quiet %0d", fy, ready, lgo, ly, fa, fa_n, fb_n, fquiet);
         if (fst == F_PICK) $display("G3T pick ha %0d p %0d s %0d | hr %0d p %0d t %0d", ha_v, ha_p, ha_s, hr_v, hr_p, hr_t);
@@ -770,6 +790,7 @@ module nds_g3d_fl #(
     input  logic [W-1:0] pd,
     output logic [W-1:0] q,
     output logic         ok,
+    output logic         busy,           // refilling after reset / clr, or settling: ok may be 0 with entries
     output logic [W:0]   n
 );
     logic [W-1:0] rp, wp, ic;
@@ -790,6 +811,7 @@ module nds_g3d_fl #(
         end
     end
     assign ok = !init && !settle && n != '0;
+    assign busy = init || settle;
 `ifndef ALTERA_RESERVED_QIS
     // every index is in the list once: a push into a full list is a double free
     always_ff @(posedge clk)

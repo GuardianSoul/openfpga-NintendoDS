@@ -15,11 +15,14 @@
 module gpu2d_obj
     import gpu2d_pkg::*;
 #(
+    parameter bit ER       = 0,   // gpu2d_cache ER (nds_top G2D_ER)
     parameter bit PERSIST  = 0,
     parameter int TEX_IDXW = 6,
     parameter int EXT_IDXW = 6,
     parameter bit MOSAIC   = 1,
-    parameter bit EXT_TAG_MLAB = 0   // ext-palette cache tags in its data words (gpu2d_cache TAG_DATA)
+    parameter bit EXT_TAG_MLAB = 0,  // ext-palette cache tags in its data words (gpu2d_cache TAG_DATA)
+    parameter int OHASH = 0,         // the texel cache's index (gpu2d_cache HASH; 1: the block's upper bits, the engine with them, folded in)
+    parameter int AMF = 0            // gpu2d_bg AMF, for OBJ-view writes and the texel cache
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -31,13 +34,17 @@ module gpu2d_obj
     output logic        done,
     input  eng_state_t  st,
     input  logic        vram_wr,
+    input  logic        vw_v,
+    input  blk_t        vw_blk,
     // fills: 0 texel, 1 ext palette
     output logic [2:0]  fill_req,    // [2]: texel prefetch, never stalls
     output blk_t [2:0]  fill_blk,
+    output logic [2:0][1:0] fill_word,  // the needed 64-bit word (pair) of each miss's block (CWF; the prefetch's 0)
     input  logic        pf_ack,
     input  logic [1:0]  fill_we,
     input  blk_t        fill_fblk,
     input  logic [1:0]  fill_beat,
+    input  logic        fill_first,
     input  logic        fill_last,
     input  logic [63:0] fill_data,
     output logic [7:0]  oam_raddr,   // {engine, entry}
@@ -108,6 +115,28 @@ module gpu2d_obj
         e_skip = !e_win && a0[11:10] == 2'd3 && (a2[15:12] == 4'd0 || (st.dispcnt[6] && st.dispcnt[5]));
     end
 
+    // DS runs38--40: logical OBJ work, independent of our cache/clock stalls.
+    // Normal fields cost their full width, even beyond the right edge;
+    // explicit disabled entries cost2. Y misses retain the existing skip.
+    // Only bit23=0 was measured. Keep the previous unlimited bit23=1 path.
+    // Affine uses the inspected upstream10+2*field-width continuation;
+    // the measured identity64 total138 alone does not identify that formula.
+    logic        work_limit;
+    logic [11:0] work_left;
+    logic [8:0]  e_work;
+    logic [7:0]  e_allow, e_end;
+    logic [11:0] e_pixels;
+    always_comb begin
+        e_work = e_type[0] ? 9'd10 + {e_bw, 1'b0} : {2'd0, e_w};
+        e_pixels = e_type[0] ? (work_left > 12'd10 ? (work_left - 12'd10) >> 1 : 12'd0) : work_left;
+        e_allow = !work_limit || e_pixels >= {4'd0, e_bw} ? e_bw : e_pixels[7:0];
+        // (e_bw is e_w except for double size; xpos + bw > 256: the bits at and
+        // above bw all ones, and some below them set)
+        e_end = e_xpos >= 0 && (e_xpos[7:0] | e_bwm) == 8'hFF && (e_xpos[7:0] & e_bwm) != 8'd0
+              ? 8'(-e_xpos[7:0]) : e_bw;
+        if (e_allow < e_end) e_end = e_allow;
+    end
+
     // ---------------------------------------------------------------- per-OBJ registers
     logic        o_aff, o_win, o_bmp, o_bpp8, o_ext, o_xflip;
     logic [1:0]  o_prio;
@@ -173,10 +202,15 @@ module gpu2d_obj
 
     // ---------------------------------------------------------------- caches
     logic dirty, cclear;
+    logic w_big, w_on, w_inv;
+    blk_t w_blk;
+    gpu2d_wrange #(.SP(SP_OBJ), .ENG2(AMF >= 2), .SWMAX(AMF >= 2 ? 256 : 64)) u_wr (.clk, .rst, .vw_v(AMF != 0 && vw_v), .vw_blk,
+        .take(os == O_IDLE && start && st.enabled && (clr || st.obj_enable)), .ok(!fill_we[0]), .big(w_big), .sw_on(w_on), .sw_blk(w_blk));
+    assign w_inv = w_on && !fill_we[0];
     assign cclear = os == O_INIT && (!PERSIST || dirty);
     always_ff @(posedge clk)
         if (rst) dirty <= 1'b1;
-        else if (vram_wr) dirty <= 1'b1;
+        else if (vram_wr || w_big) dirty <= 1'b1;
         else if (cclear) dirty <= 1'b0;
     blk_t        t_ablk, e_ablk;
     logic [1:0]  t_aword, e_aword, t_aword_h;
@@ -193,14 +227,14 @@ module gpu2d_obj
     logic           c_scrub_v;
     gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub),
         .scrub_q(c_scrub_q), .scrub_v(c_scrub_v));
-    gpu2d_cache #(.IDXW(TEX_IDXW), .HALF(1)) u_tc (.clk, .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub[TEX_IDXW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(TEX_IDXW), .HASH(OHASH), .HALF(1)) u_tc (.clk, .idle(os == O_IDLE), .gen(c_gen), .lgen(c_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[TEX_IDXW-1:0]),
         .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword), .a_half(t_aword_h),
         .q(t_q), .hit(t_hit), .cur_blk(t_cur), .cur_word(t_curw),
-        .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
-    gpu2d_cache #(.IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .VLO(8)) u_ec (.clk, .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub[ESW-1:0]),
+        .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
+    gpu2d_cache #(.ER(ER), .IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .VLO(8)) u_ec (.clk, .idle(os == O_IDLE), .gen(c_gen), .lgen(c_gen), .inv_v(1'b0), .inv_blk('0), .scrub(c_scrub[ESW-1:0]),
         .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword), .a_half(2'd0),
         .q(e_q), .hit(e_hit), .cur_blk(e_cur), .cur_word(e_curw),
-        .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
+        .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
 
     typedef struct packed {
         logic        v;
@@ -222,6 +256,7 @@ module gpu2d_obj
     assign fill_req[1] = p2.v && p2_need && !e_hit;
     assign fill_blk[0] = t_cur;
     assign fill_blk[1] = e_cur;
+    assign fill_word = {2'd0, e_curw, t_curw};
     assign stall = |fill_req[1:0];
 
     // texel prefetch: a first OAM scan queues the row blocks of every normal
@@ -415,7 +450,10 @@ module gpu2d_obj
                         else begin os <= O_IDLE; done <= 1'b1; end
                     end
                 end
-                O_INIT: begin n <= 7'd0; pk <= 4'd0; os <= O_PREQ; end
+                O_INIT: if (!w_on) begin
+                    n <= 7'd0; pk <= 4'd0; os <= O_PREQ;
+                    work_limit <= !st.dispcnt[23]; work_left <= 12'd2124;
+                end
                 O_PREQ: os <= O_PSCAN;
                 O_PSCAN: begin
                     pk <= 4'd0; p_idx <= n;
@@ -439,7 +477,9 @@ module gpu2d_obj
                 end
                 O_REQ: os <= O_SCAN;
                 O_SCAN: begin
-                    if (e_on && !e_skip) begin
+                    if (work_limit && work_left == 12'd0) os <= O_DRAIN;
+                    else if (e_on && !e_skip) begin
+                        if (work_limit) work_left <= work_left > {3'd0, e_work} ? work_left - {3'd0, e_work} : 12'd0;
                         o_aff <= e_type[0];
                         o_win <= e_win;
                         o_bmp <= !e_win && a0[11:10] == 2'd3;
@@ -455,14 +495,10 @@ module gpu2d_obj
                         o_mask <= j_eng ? 18'h1FFFF : 18'h3FFFF;
                         if (e_xpos >= 0) begin
                             o_xo <= 8'd0; o_sx <= e_xpos[7:0];
-                            // (e_bw is e_w except for double size; xpos + bw > 256: the
-                            // bits at and above bw all ones, and some below them set)
-                            o_xend <= ((e_xpos[7:0] | e_bwm) == 8'hFF && (e_xpos[7:0] & e_bwm) != 8'd0)
-                                    ? 8'(-e_xpos[7:0]) : e_bw;
                         end else begin
                             o_xo <= 8'(-e_xpos); o_sx <= 8'd0;
-                            o_xend <= e_bw;
                         end
+                        o_xend <= e_end;
                         // sprite base address
                         if (!e_type[0]) begin
                             os <= O_BASE;
@@ -483,8 +519,12 @@ module gpu2d_obj
                             o_ry <= $signed({13'd0, e_h, 7'd0});
                             os <= O_AFF;
                         end
-                    end else if (n == 7'd127) os <= O_DRAIN;
-                    else n <= n + 7'd1;
+                    end else begin
+                        if (work_limit && e_type == 2'd2)
+                            work_left <= work_left > 12'd2 ? work_left - 12'd2 : 12'd0;
+                        if (n == 7'd127) os <= O_DRAIN;
+                        else n <= n + 7'd1;
+                    end
                 end
                 O_BASE: begin o_base <= e_base; os <= O_DRAW; end
                 O_AFF: begin
@@ -504,7 +544,7 @@ module gpu2d_obj
                     end else os <= O_DRAIN;
                 end
                 O_DRAIN: if (pipe_empty) begin
-                    if (n == 7'd127) begin os <= O_IDLE; done <= 1'b1; end
+                    if (n == 7'd127 || (work_limit && work_left == 12'd0)) begin os <= O_IDLE; done <= 1'b1; end
                     else begin n <= n + 7'd1; os <= O_REQ; end
                 end
                 default: os <= O_IDLE;

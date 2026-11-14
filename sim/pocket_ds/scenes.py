@@ -145,6 +145,16 @@ def diff(a, b):
                if max(abs(a[i] - b[i]), abs(a[i + 1] - b[i + 1]), abs(a[i + 2] - b[i + 2])) > 8)
 
 
+SLACK_PP = 2.0                                                         # ARM9 slack points a scene may lose
+SLACK_F = ROOT / 'sim/pocket_ds/a9slack.txt'                           # the previous card's ARM9 slack per scene
+
+
+def read_slack():
+    if not SLACK_F.exists():
+        return {}
+    return {l.split()[0]: float(l.split()[1]) for l in SLACK_F.read_text().splitlines() if l.strip() and not l.startswith('#')}
+
+
 PACE_MIN = 30                                                          # melonDS swaps for a resolved pace
 OPT = {'tag': '', 'core_param': [], 'plus': [], 'diag': False}         # --tag, --core-param (a variant's runs beside the baseline's)
 
@@ -272,6 +282,22 @@ def compare(s, d, shots, update, log_p):
               f'3D: {skipped} frame starts skipped, {late} late lines; 2D: {late2d} late lines; stale ring rows {stale}'
               + (f'; pace {pace[0]}/{pace[1]} swaps in {pace[2]} frames ({100 * pace[0] / pace[1]:.0f}% of melonDS, '
                  f'+-{100 / pace[1]:.0f}%{"" if pace[1] >= PACE_MIN else ", not resolved: --frames 64"})' if pace else pace_note))
+    # ARM9 slack: the share of clk_sys clocks the ARM9 spent halted (waiting for an interrupt) from the 4th frame
+    # after the release on (tb_ds_pocket 'a9 slack'). A scene with a baseline in a9slack.txt (the previous card's
+    # value) fails when it drops by more than SLACK_PP points: a cache or memory change that costs the ARM9 time
+    # shows here even while the pace still reads 100 %
+    sl = [(int(h), int(c)) for h, c, v in re.findall(r'a9 slack: (\d+) of (\d+) clk halted at video frame (\d+)', run)
+          if int(v) >= rel + 4]
+    slack = 100.0 * sum(h for h, _ in sl) / sum(c for _, c in sl) if sl and sum(c for _, c in sl) else None
+    if slack is not None:
+        detail += f'; ARM9 slack {slack:.1f}%'
+        OPT.setdefault('slack', {})[s['name']] = slack
+        base = read_slack().get(s['name'])
+        if base is not None:
+            detail += f' (previous card {base:.1f}%)'
+            if not OPT.get('slack_update') and slack < base - SLACK_PP:
+                s = dict(s, known=False)        # (a known scene still fails on lost ARM9 time)
+                return s, False, detail + f' (ARM9 slack down {base - slack:.1f} points)', worst
     if stale:
         s = dict(s, known=False)                # (a known scene still fails on stale rows)
         return s, False, detail + ' (stale ring rows)', worst
@@ -314,6 +340,7 @@ def main():
                     'scenes.txt\'s (a pace measurement: --frames 64 gives >= 30 swaps at 30 fps; the pixel baselines '
                     'are for the table\'s frames, so they are not checked; needs --tag)')
     ap.add_argument('--tag', default='', help="a variant's name: its runs go to run-TAG/, pocket-TAG/, run-TAG.log")
+    ap.add_argument('--slack-update', action='store_true', help='write the measured ARM9 slack as the baseline (sim/pocket_ds/a9slack.txt: the card this tree is)')
     a = ap.parse_args()
     if a.diag:
         a.core_param += ['DIAG=1', 'DIAG_SEC=8']
@@ -325,6 +352,7 @@ def main():
     if a.update and a.tag:
         sys.exit('--update writes the baseline of the default build: not with --tag')
     OPT['tag'], OPT['core_param'], OPT['plus'], OPT['diag'] = a.tag, a.core_param, a.plus, a.diag
+    OPT['slack_update'] = a.slack_update
     rows = read_table()
     todo = [s for s in rows if not a.only or s['name'] in a.only.split(',')]
     if a.frames:
@@ -338,6 +366,11 @@ def main():
         ok &= verdict(s, passed) in ('PASS', 'KNOWN')
         if a.update and worst is not None:
             s['top'], s['bottom'] = worst
+    if a.slack_update and OPT.get('slack'):
+        cur = read_slack(); cur.update(OPT['slack'])
+        SLACK_F.write_text('# ARM9 slack per scene (% of clk_sys halted from the 4th frame after the release), the card this\n'
+                           '# tree is: scenes.py fails a scene that loses more than SLACK_PP points against it (--slack-update)\n'
+                           + ''.join(f'{k} {v:.2f}\n' for k, v in sorted(cur.items())))
     if a.update:
         lines = []
         for l in TABLE.read_text().splitlines():

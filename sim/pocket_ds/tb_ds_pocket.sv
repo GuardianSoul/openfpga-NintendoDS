@@ -350,6 +350,23 @@ module tb_ds_pocket;
     endtask
     // The APF scaler as openfpga-PlayStation measured it: the first DE line after VS is
     // dropped, and an HS less than 3 clocks after VS is an error
+    longint a9_halt = 0, a9_clk = 0, a9_halt_seen = 0, a9_clk_seen = 0;
+    bit dispregs; initial dispregs = $test$plusargs("dispregs");
+    // +dispregs: the CPU's writes to DISPCNT, MASTER_BRIGHT, DISPCAPCNT (both engines) and POWCNT1 changes, with the
+    // video frame (the display registers live in RAMs in the fit build, so the writes are the record)
+    logic [10:0] dw_a; logic [31:0] dw_d; logic [15:0] pw_q = 16'hFFFF;
+    always @(posedge dut.ds.clk) if (dispregs) begin
+        if (dut.ds.u_disp.io_req && dut.ds.u_disp.io_we &&
+            (dut.ds.u_disp.io_addr == 11'h000 || dut.ds.u_disp.io_addr == 11'h01B || dut.ds.u_disp.io_addr == 11'h019 ||
+             dut.ds.u_disp.io_addr == 11'h400 || dut.ds.u_disp.io_addr == 11'h41B) &&
+            !(dut.ds.u_disp.io_addr == dw_a && dut.ds.u_disp.io_wdata == dw_d)) begin
+            $display("dispwr frame %0d: %h <- %h (be %b, %s)", v_frames, {19'h20000, dut.ds.u_disp.io_addr, 2'b00},
+                     dut.ds.u_disp.io_wdata, dut.ds.u_disp.io_be, dut.ds.u_disp.io_cpu ? "ARM7" : "ARM9");
+            dw_a = dut.ds.u_disp.io_addr; dw_d = dut.ds.u_disp.io_wdata;
+        end
+        if (dut.ds.powcnt1 != pw_q) begin $display("dispwr frame %0d: POWCNT1 = %h", v_frames, dut.ds.powcnt1); pw_q = dut.ds.powcnt1; end
+    end
+    always @(posedge dut.ds.clk) begin a9_clk++; if (dut.ds.dg_halt[0]) a9_halt++; end
     reg drop1 = 0;
     integer since_vs = 99;
     // the APF scaler slot word: the pixel clock after DE falls carries the slot in RGB[23:13] (the last one seen)
@@ -373,6 +390,15 @@ module tb_ds_pocket;
                 if (late2d != late2d_seen) $display("g2d LATE: %0d 2D lines late in the last frame, %0d so far", late2d - late2d_seen, late2d);
                 late2d_seen = late2d;
                 $display("g3d swaps: %0d at video frame %0d", g3swaps, v_frames);
+                // ARM9 slack (the scene gate's CPU check): clk_sys clocks the ARM9 spent halted (waiting for an
+                // interrupt) in this video frame, of all; a cache or memory change that costs the ARM9 time shows as
+                // less halted time even while the game still keeps its pace
+                $display("a9 slack: %0d of %0d clk halted at video frame %0d", a9_halt - a9_halt_seen, a9_clk - a9_clk_seen, v_frames);
+                a9_halt_seen = a9_halt; a9_clk_seen = a9_clk;
+                // +dispregs: the display registers once a frame (a black screen: which one blanks it)
+                if (dispregs) $display("dispregs %0d: DISPCNT A %h B %h, MASTER_BRIGHT A %h B %h, POWCNT1 %h, DISPCAPCNT %h, BLDCNT A %h B %h EVY A %0d B %0d",
+                    v_frames, dut.ds.u_disp.dispcnt[0], dut.ds.u_disp.dispcnt[1], dut.ds.u_disp.mbright[0], dut.ds.u_disp.mbright[1],
+                    dut.ds.powcnt1, dut.ds.u_disp.capcnt, dut.ds.u_disp.bldcnt[0], dut.ds.u_disp.bldcnt[1], dut.ds.u_disp.evy[0], dut.ds.u_disp.evy[1]);
             end
             v_y = 0;
             drop1 = 1;
@@ -423,12 +449,20 @@ module tb_ds_pocket;
         void'($value$plusargs("imp_ov=%h", imp_ov)); void'($value$plusargs("imp_ovn=%h", imp_ovn));
         void'($value$plusargs("imp_blk=%h", imp_blk)); void'($value$plusargs("imp_blkn=%h", imp_blkn));
         void'($value$plusargs("imp_stubn=%h", imp_stubn));   // the stub's words: back once the ARM9 has left them (its return path)
+        // no display capture before the release: the imported DISPCAPCNT may have bit 31 set, and the frames the core
+        // runs before the CPUs start would capture with half-restored state into the exported bank (the DS never runs
+        // them). Held off until the release; a capture then starts at the next frame start, as a write of bit 31 would
+        // (gsdd-battle: bank D held melonDS's next capture at the release without this)
+        force dut.ds.u_disp.cap_enable = 1'b0;
         @(posedge dut.go);
         for (integer w = 0; w < (1 << 20); w++) begin
             cram0.mem[w] = imp_main[w][15:0]; cram1.mem[w] = imp_main[w][31:16];
         end
         for (integer w = 0; w < 32'h29000; w++) sd_poke32(w, imp_vram[w]);
         for (integer w = 0; w < 32'h6000; w++) begin u_sram.mem[2 * w] = imp_sram[w][15:0]; u_sram.mem[2 * w + 1] = imp_sram[w][31:16]; end
+`ifdef RASTER_OBSERVER
+        ro_check_import();
+`endif
         $display("import: memories loaded at %0t; release at line %0d", $time, imp_vc);
         while (!({cram1.peek(imp_ready9), cram0.peek(imp_ready9)} == 1 && {cram1.peek(imp_ready7), cram0.peek(imp_ready7)} == 1))
             @(posedge dut.clk_sys);
@@ -444,6 +478,7 @@ module tb_ds_pocket;
         // +hold=HEX: the scene's held keys (scenes.py hold=: core_top's keys, DS order, pressed = 1) from the release on
         if ($value$plusargs("hold=%h", imp_hold)) force dut.keys = imp_hold[11:0];
         imp_frame = v_frames;
+        release dut.ds.u_disp.cap_enable;
         $display("import: released at %0t, video frame %0d", $time, v_frames);
     end
 `endif
@@ -971,6 +1006,29 @@ module tb_ds_pocket;
                  real'(bp_st[i][j][0]) / bp_n[i][j], real'(bp_st[i][j][1]) / bp_n[i][j], real'(bp_st[i][j][2]) / bp_n[i][j], real'(bp_st[i][j][3]) / bp_n[i][j],
                  real'(bp_st[i][j][4]) / bp_n[i][j], real'(bp_st[i][j][5]) / bp_n[i][j], real'(bp_st[i][j][6]) / bp_n[i][j], real'(bp_st[i][j][7]) / bp_n[i][j]);
 
+`ifdef TB_PROBES   // sim/pocket_ds/run.py: the probes' files (+dmapath, +oamlog) on its include path
+    `include "dma_path.svh"
+    `include "oam_log.svh"
+`endif
+
+`ifdef RASTER_OBSERVER
+    `include "raster_observer.svh"
+`endif
+`ifdef RASTER_CAPTURE_OBSERVER
+    `include "raster_capture_observer.svh"
+`endif
+`ifdef TITLE_PACING_OBSERVER
+    `include "title_pacing_observer.svh"
+`endif
+`ifdef TITLE_WAIT_OBSERVER
+    `include "title_wait_observer.svh"
+`endif
+`ifdef RASTER_LIFETIME_OBSERVER
+    `include "raster_lifetime_observer.svh"
+`endif
+`ifdef RASTER_CONTENTION_OBSERVER
+    `include "raster_contention_observer.svh"
+`endif
     // ---------------- finish ----------------
     integer timeout_ms = 2000, frames = 30;
     function automatic [31:0] ram_word(input integer w);
@@ -1000,9 +1058,10 @@ module tb_ds_pocket;
         vml_print();
         $display("video slot %0d (the scaler slot word of the last line)", v_slot);
         // the RTC chip's state at the end (BCD; set by the boot program from +rtc since 2026-10-28)
-        $display("rtc: 20%h-%h-%h dow %0d %h:%h:%h pm %0d poc %0d s1 %h", dut.ds.u_rtc.yr, dut.ds.u_rtc.mo,
-                 dut.ds.u_rtc.rm[2], dut.ds.u_rtc.rm[3], dut.ds.u_rtc.hr, dut.ds.u_rtc.rm[1], dut.ds.u_rtc.rm[0],
-                 dut.ds.u_rtc.pm, dut.ds.u_rtc.poc, dut.ds.u_rtc.s1);
+        // (the year, month and hour are RAM bytes 7, 11, 15: nds_rtc R_YR, R_MO, R_HR)
+        $display("rtc: 20%h-%h-%h dow %0d %h:%h:%h pm %0d poc %0d s1 %h", dut.ds.u_rtc.rm[7], dut.ds.u_rtc.rm[11][4:0],
+                 dut.ds.u_rtc.rm[2], dut.ds.u_rtc.rm[3], dut.ds.u_rtc.rm[15][5:0], dut.ds.u_rtc.rm[1], dut.ds.u_rtc.rm[0],
+                 dut.ds.u_rtc.rm[15][5:0] >= 6'h12, dut.ds.u_rtc.poc, dut.ds.u_rtc.s1);
         if (sdram_chip.errors || cram0.errors || cram1.errors || v_errors || ovf_seen || cart_errors) $fatal(1, "model, video or FIFO errors");
         if ($value$plusargs("savout=%s", fname)) begin
             string path;
@@ -1029,4 +1088,68 @@ module tb_ds_pocket;
         else $display("FAIL");
         $finish;
     end
+
+    // +texlat: where a 3D texture/palette block's clocks go (docs/plan-full-core.md S2b), per stage, in clk_sys
+    // clocks (clk_mem events by $time): nds_vram accepts it (g_ack) -> its block request is taken (vm_ack) ->
+    // the port's request reaches clk_mem (x_vram m_valid) -> the SDRAM arbiter takes it (m_take) -> its first word
+    // on clk_sys (vm_rvalid) -> its first beat to the 3D engine (g_rvalid). Blocks are served in order; texture
+    // ones are those whose g_blk space is SP_TEX / SP_TPAL at g_ack.
+    bit tl_on;
+    initial tl_on = $test$plusargs("texlat");
+    realtime tl_t [0:15][0:5];
+    bit      tl_tex [0:15];
+    int      tl_w [0:5];               // the next block index for each stage
+    real     tl_sum [0:4], tl_max [0:4];
+    longint  tl_n;
+    bit      tl_mv;
+    bit [31:0] tl_wc, tl_bc;           // block words / beats seen
+    real     tl_per;
+    initial tl_per = 14.92;
+    always @(posedge dut.clk_sys) if (tl_on && !dut.rst_sys) begin
+        if (dut.ds.u_vram.g_ack) begin
+            tl_t[tl_w[0] & 15][0] = $realtime; tl_tex[tl_w[0] & 15] = dut.ds.u_vram.g_blk[17:15] == 3'd5 || dut.ds.u_vram.g_blk[17:15] == 3'd6;
+            tl_w[0]++;
+        end
+        if (dut.vm_req && dut.vm_blk && !dut.vm_we && dut.vm_ack && dut.ds.u_vram.st == dut.ds.u_vram.S_GBLK) begin tl_t[tl_w[1] & 15][1] = $realtime; tl_w[1]++; end
+        // an unmapped block's zero beats (S_GZERO, no port traffic): every stage at once, not counted
+        if (dut.ds.u_vram.st == dut.ds.u_vram.S_GZERO && dut.ds.u_vram.beat == 3'd0) begin
+            for (int j = 1; j <= 4; j++) begin tl_t[tl_w[j] & 15][j] = $realtime; tl_w[j]++; end
+            tl_tex[(tl_w[4] - 1) & 15] = 1'b0;
+        end
+        if (dut.vm_rvalid && dut.ds.u_vram.bw_left != 0) begin
+            if (tl_wc[2:0] == 3'd0 && tl_w[4] < tl_w[1]) begin tl_t[tl_w[4] & 15][4] = $realtime; tl_w[4]++; end
+            tl_wc++;
+        end
+        if (dut.ds.u_vram.g_rvalid && tl_bc[1:0] == 2'd0 && tl_w[5] < tl_w[4]) begin
+            int k; k = tl_w[5] & 15; tl_t[k][5] = $realtime; tl_w[5]++;
+            if (tl_tex[k] && tl_w[5] <= tl_w[3]) begin
+                tl_n++;
+                for (int j = 0; j < 5; j++) begin
+                    real d; d = (tl_t[k][j + 1] - tl_t[k][j]) / tl_per;
+                    tl_sum[j] += d; if (d > tl_max[j]) tl_max[j] = d;
+                end
+            end
+        end
+        if (dut.ds.u_vram.g_rvalid) tl_bc++;
+    end
+    always @(posedge dut.clk_mem) if (tl_on && !dut.rst_sys) begin
+        bit mv; mv = dut.x_vram.m_valid && dut.x_vram.m_n == 4'd8;
+        if (mv && !tl_mv && tl_w[2] < tl_w[1]) begin tl_t[tl_w[2] & 15][2] = $realtime; tl_w[2]++; end
+        if (dut.x_vram.m_take && dut.x_vram.m_n == 4'd8 && tl_w[3] < tl_w[2]) begin tl_t[tl_w[3] & 15][3] = $realtime; tl_w[3]++; end
+        tl_mv = mv && !dut.x_vram.m_take;
+    end
+    final if (tl_on && tl_n != 0)
+        $display("texlat blocks %0d: accept->vm_ack %0.1f (max %0.0f), ->clk_mem request %0.1f (max %0.0f), ->arbiter take %0.1f (max %0.0f), ->first word %0.1f (max %0.0f), ->first beat %0.1f (max %0.0f) clk_sys",
+                 tl_n, tl_sum[0] / tl_n, tl_max[0], tl_sum[1] / tl_n, tl_max[1], tl_sum[2] / tl_n, tl_max[2],
+                 tl_sum[3] / tl_n, tl_max[3], tl_sum[4] / tl_n, tl_max[4]);
+    // simulation monitors (late 2D work, docs/results/late2d-w2-20261112): +g2dwhy=FILE (+g2dall), +buscensus=FILE,
+    // +bustrace=FILE, +dmapath, +ringelide, +blkpath
+`ifdef TB_PROBES   // run.py's include path (prequeue's full-chip lint has none)
+    `include "g2d_why.svh"
+    `include "bus_census.svh"
+    `include "ring_elide.svh"
+    `include "blk_path.svh"
+    `include "wr_path.svh"
+    `include "g2d_reuse.svh"
+`endif
 endmodule

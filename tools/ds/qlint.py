@@ -26,6 +26,12 @@ loop inside `generate ... endgenerate`. Also flags (nds-fit #350):
   not declared under this prefix"): Verilator accepts it, Quartus does not.
   Declare the variable above its first use. (Quartus does take plain forward
   references to signals and localparams, so those are not flagged.)
+- an implicit `.name` (or `.*`) port connection whose port and parent signal
+  widths differ (nds-fit #2076, Error 10897 "can't implicitly connect port
+  ... does not have an equivalent data type"): Verilator only pads the width.
+  Checked across the given files (all of rtl/ by default) where both widths
+  evaluate from literal or parameter-default bounds; connect such a port
+  explicitly or fix the width.
 Exit 1 if anything is flagged.
 """
 import re
@@ -35,6 +41,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 files = [Path(a) for a in sys.argv[1:]] or [p for p in (ROOT / 'rtl').rglob('*.sv') if 'study' not in p.parts]
 KEYWORDS = {'if', 'for', 'while', 'case', 'casez', 'casex', 'foreach', 'repeat', 'return', 'assert'}
+
+
+def module_header_import_errors(source):
+    """Catch the observed Standard rejection, without limiting body imports."""
+    source = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
+                    lambda m: re.sub(r'[^\n]', ' ', m[0]), source, flags=re.S)
+    for match in re.finditer(r'\bmodule\s+(?:(?:automatic|static)\s+)?\w+\s*'
+                             r'(?P<imports>(?:import\s+[^;]+;\s*)+)', source):
+        imports = list(re.finditer(r'\bimport\b', match['imports']))
+        if len(imports) > 1:
+            pos = match.start('imports') + imports[1].start()
+            yield source.count('\n', 0, pos) + 1, 'second module-header import (Quartus Standard Error 10170; move body-only imports into the module body)'
 
 
 def generate_loop_errors(source):
@@ -208,9 +226,103 @@ def use_before_decl_errors(source):
         k += 1
 
 
+# ---- implicit .name / .* connections against the child's port width (across files)
+def strip(src):
+    src = re.sub(r'/\*.*?\*/', lambda m: '\n' * m.group(0).count('\n'), src, flags=re.S)
+    return re.sub(r'//[^\n]*', '', src)
+def ev(expr, env):
+    e = expr.strip()
+    for _ in range(8):
+        e2 = re.sub(r"\b([A-Za-z_]\w*)\b", lambda m: str(env[m.group(1)]) if m.group(1) in env else m.group(0), e)
+        if e2 == e: break
+        e = e2
+    e = re.sub(r"\d+'[sS]?[dD](\d+)", r'\1', e)
+    if not re.fullmatch(r'[\d\s+\-*/()%<>]+', e): return None
+    try: return int(eval(e.replace('/', '//')))
+    except Exception: return None
+def width(rng, env):
+    if not rng: return 1
+    m = re.fullmatch(r'\[\s*(.+?)\s*:\s*(.+?)\s*\]', rng.strip())
+    if not m: return None
+    a, b = ev(m.group(1), env), ev(m.group(2), env)
+    return None if a is None or b is None else abs(a - b) + 1
+DECL = r'(?:input|output|inout)?\s*(?:wire|logic|reg|bit)?\s*(?:signed|unsigned)?\s*(\[[^\]]+\])?\s*'
+def params(body):
+    env = {}
+    for m in re.finditer(r'\b(?:parameter|localparam)\s+(?:int\s+unsigned\s+|int\s+|integer\s+|bit\s+|logic\s+)?(?:\[[^\]]*\]\s*)?(\w+)\s*=\s*([^,;)]+)', body):
+        v = ev(m.group(2), env)
+        if v is not None: env[m.group(1)] = v
+    return env
+def modules(src):
+    out = {}
+    for m in re.finditer(r'\bmodule\s+(\w+)(.*?)\bendmodule\b', src, flags=re.S):
+        name, body = m.group(1), m.group(2)
+        hdr_end = body.find(');')
+        out[name] = (body, hdr_end)
+    return out
+def port_widths(body, hdr_end):
+    env = params(body)
+    hdr = body[:hdr_end + 1]
+    pw = {}
+    for m in re.finditer(r'\b(input|output|inout)\b\s*(?:wire|logic|reg|bit)?\s*(?:signed|unsigned)?\s*(\[[^\]]+\])?\s*((?:\w+\s*,\s*(?!(?:input|output|inout)\b))*\w+)', hdr):
+        for n in re.split(r'\s*,\s*', m.group(3)):
+            if n in ('input', 'output', 'inout', 'wire', 'logic', 'reg'): continue
+            pw[n] = (m.group(2), env)
+    return pw
+def sig_widths(body):
+    env = params(body)
+    sw = {}
+    for m in re.finditer(r'(?:^|[;\n(,])\s*(?:input|output|inout)?\s*(?:wire|logic|reg|bit)\s*(?:signed|unsigned)?\s*(\[[^\]]+\])?\s*((?:\w+\s*(?:\[[^\]]*\]\s*)*(?:=[^,;]*)?,\s*)*\w+)', body):
+        for n in re.split(r'\s*,\s*', m.group(2)):
+            n = re.match(r'\w+', n).group(0)
+            sw.setdefault(n, (m.group(1), env))
+    return sw
+def implicit_port_errors(files):
+    mods, srcs = {}, {}
+    for f in files:
+        s = strip(f.read_text(errors='replace')); srcs[f] = s
+        for k, v in modules(s).items(): mods[k] = v
+    ports = {k: port_widths(*v) for k, v in mods.items()}
+    for f, s in srcs.items():
+        for mname, (body, _) in modules(s).items():
+            sigs = sig_widths(body)
+            for im in re.finditer(r'\b(\w+)\s*(#\s*\()?', body):
+                child = im.group(1)
+                if child not in ports or child == mname: continue
+                k = im.end()
+                if im.group(2):         # skip the parameter list
+                    d = 1
+                    while k < len(body) and d: d += {'(': 1, ')': -1}.get(body[k], 0); k += 1
+                    overr = True
+                else: overr = False
+                m2 = re.match(r'\s*(\w+)\s*(\[[^\]]*\])?\s*\(', body[k:])
+                if not m2: continue
+                k += m2.end(); st = k; d = 1
+                while k < len(body) and d: d += {'(': 1, ')': -1}.get(body[k], 0); k += 1
+                conns = body[st:k - 1]
+                names = set(re.findall(r'\.(\w+)\s*(?=[,)]|$)', conns + ')'))
+                if re.search(r'\.\*', conns):
+                    explicit = set(re.findall(r'\.(\w+)\s*\(', conns))
+                    names |= {p for p in ports[child] if p not in explicit and p in sigs}
+                for n in sorted(names):
+                    if n not in ports[child] or n not in sigs: continue
+                    prng, penv = ports[child][n]
+                    if overr and prng and re.search(r'[A-Za-z_]', prng): continue   # the instance may override that width
+                    wp, ws = width(prng, penv), width(sigs[n][0], sigs[n][1])
+                    if wp is not None and ws is not None and wp != ws:
+                        ln = s.count('\n', 0, s.find(body)) + body.count('\n', 0, st) + 1
+                        yield f, ln, f'implicit .{n} on {child} {m2.group(1)}: port {wp} bits, {mname}\'s {n} {ws} bits (Quartus Error 10897)'
+
+
 bad = 0
+for f, n, message in implicit_port_errors(files):
+    print(f'{f}:{n}: {message}')
+    bad += 1
 for f in files:
     source = f.read_text(errors='replace')
+    for n, message in module_header_import_errors(source):
+        print(f'{f}:{n}: {message}')
+        bad += 1
     for n, message in generate_loop_errors(source):
         print(f'{f}:{n}: {message}')
         bad += 1

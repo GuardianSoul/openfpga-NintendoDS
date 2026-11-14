@@ -19,7 +19,7 @@ ASSETS := local-assets/arm-tests
 B      := build/arm
 
 ARM_RTL := rtl/arm/arm_pkg.sv rtl/arm/arm_regfile.sv rtl/arm/arm_mul.sv \
-           rtl/arm/arm_thumb.sv rtl/arm/arm_core.sv rtl/arm/arm7_ds.sv rtl/arm/arm9_ram.sv \
+           rtl/arm/arm_thumb.sv rtl/arm/arm_core.sv rtl/arm/arm9_core.sv rtl/arm/arm7_ds.sv rtl/arm/arm9_ram.sv \
            rtl/arm/arm9_mem.sv rtl/arm/arm_cpu.sv
 ARM_TB  := sim/arm/tb_arm.sv
 
@@ -152,7 +152,7 @@ arm-images: $(B)/exc.hex $(B)/hazard0.hex $(B)/hazard1.hex $(B)/cache.hex \
             $(B)/bpred7.hex $(B)/bpred9.hex $(B)/halt.hex \
             $(B)/hazard_c.hex $(B)/rockwrestler_c.hex $(B)/jsmolka_thumb9c.hex \
             $(B)/stress_c.hex $(B)/stress1.hex $(B)/jsmolka_arm.hex $(B)/jsmolka_thumb.hex \
-            $(B)/armwrestler.hex $(B)/armwrestler.hooks $(B)/rockwrestler.hex $(B)/lzcopy.hex $(B)/swflush.hex $(B)/evict.hex $(B)/ldruse2.hex $(B)/hum.hex
+            $(B)/armwrestler.hex $(B)/armwrestler.hooks $(B)/rockwrestler.hex $(B)/lzcopy.hex $(B)/swflush.hex $(B)/evict.hex $(B)/hdirty.hex $(B)/ldruse2.hex $(B)/hum.hex $(B)/mrcuse.hex $(B)/ldunc.hex $(B)/dtcmcp.hex $(B)/blxs.hex $(B)/biosic.hex
 
 $(B)/%.o: sim/arm/tests/%.s sim/arm/tests/cp15.inc
 	@mkdir -p $(B)
@@ -254,6 +254,62 @@ $(B)/hum.bin: $(B)/hum.o
 $(B)/hum.hex: $(B)/hum.bin
 	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
 
+$(B)/blxs.o: sim/arm/tests/blxs.s sim/arm/tests/cp15.inc
+	@mkdir -p $(B)
+	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
+
+$(B)/blxs.bin: $(B)/blxs.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/blxs.elf
+	$(OBJCOPY) -O binary $(B)/blxs.elf $@
+
+$(B)/blxs.hex: $(B)/blxs.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
+$(B)/dtcmcp.o: sim/arm/tests/dtcmcp.s sim/arm/tests/cp15.inc
+	@mkdir -p $(B)
+	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
+
+$(B)/dtcmcp.bin: $(B)/dtcmcp.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/dtcmcp.elf
+	$(OBJCOPY) -O binary $(B)/dtcmcp.elf $@
+
+$(B)/dtcmcp.hex: $(B)/dtcmcp.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
+
+$(B)/ldunc.o: sim/arm/tests/ldunc.s sim/arm/tests/cp15.inc
+	@mkdir -p $(B)
+	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
+
+$(B)/ldunc.bin: $(B)/ldunc.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/ldunc.elf
+	$(OBJCOPY) -O binary $(B)/ldunc.elf $@
+
+$(B)/ldunc.hex: $(B)/ldunc.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
+$(B)/biosic.o: sim/arm/tests/biosic.s sim/arm/tests/cp15.inc
+	@mkdir -p $(B)
+	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
+
+$(B)/biosic.bin: $(B)/biosic.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/biosic.elf
+	$(OBJCOPY) -O binary $(B)/biosic.elf $@
+
+$(B)/biosic.hex: $(B)/biosic.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
+$(B)/mrcuse.o: sim/arm/tests/mrcuse.s sim/arm/tests/cp15.inc
+	@mkdir -p $(B)
+	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
+
+$(B)/mrcuse.bin: $(B)/mrcuse.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/mrcuse.elf
+	$(OBJCOPY) -O binary $(B)/mrcuse.elf $@
+
+$(B)/mrcuse.hex: $(B)/mrcuse.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
 $(B)/evict.o: sim/arm/tests/evict.s sim/arm/tests/cp15.inc
 	@mkdir -p $(B)
 	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
@@ -263,6 +319,17 @@ $(B)/evict.bin: $(B)/evict.o
 	$(OBJCOPY) -O binary $(B)/evict.elf $@
 
 $(B)/evict.hex: $(B)/evict.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
+$(B)/hdirty.o: sim/arm/tests/hdirty.s sim/arm/tests/cp15.inc
+	@mkdir -p $(B)
+	$(CLANG) $(ASFLAGS_V5) -Wa,-I,sim/arm/tests $< -o $@
+
+$(B)/hdirty.bin: $(B)/hdirty.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/hdirty.elf
+	$(OBJCOPY) -O binary $(B)/hdirty.elf $@
+
+$(B)/hdirty.hex: $(B)/hdirty.bin
 	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
 
 $(B)/stress1.o: sim/arm/tests/stress.s sim/arm/tests/cp15.inc

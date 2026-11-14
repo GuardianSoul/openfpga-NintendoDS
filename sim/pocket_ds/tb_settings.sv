@@ -224,10 +224,10 @@ module tb_settings;
         check("gestures: cursor", cx * 256 + cy, 90 * 256 + 90);
         press(K_B);                    check("Swipe Right: B held back", ds_keys[K_B], 0);
         check("Swipe Right: no pen before the frame", pen, 0);
-        for (int k = 0; k <= 12; k++) begin
+        for (int k = 0; k <= 6; k++) begin
             frames(1); wait_clk(2);
             check("Swipe Right: pen down", pen, 1);
-            check("Swipe Right: x", px, 90 + 8 * k);
+            check("Swipe Right: x", px, 90 + 16 * k);
             check("Swipe Right: y", py, 90);
             if (k == 2) release_(K_B);
         end
@@ -272,12 +272,33 @@ module tb_settings;
         // a held button doesn't repeat a swipe; Swipe Up clamps at the top
         press(K_UP); frames(8); release_(K_UP);     // y 90 - 8 * 6 = 42
         press(K_Y);
-        for (int k = 0; k <= 12; k++) begin
+        for (int k = 0; k <= 6; k++) begin
             frames(1); wait_clk(2);
-            check("Swipe Up: y", py, 42 - 8 * k < 0 ? 0 : 42 - 8 * k);
+            check("Swipe Up: y", py, 42 - 16 * k < 0 ? 0 : 42 - 16 * k);
         end
         frames(3); wait_clk(2);        check("Swipe Up: no repeat while held", pen, 0);
         release_(K_Y);
+        // The other two swipe directions use the same six-frame travel.
+        setting(SET_A_IN_TOUCH_MODE_IDX, 5);    // Swipe Left, cursor (90,42)
+        press(K_A);
+        for (int k = 0; k <= 6; k++) begin
+            frames(1); wait_clk(2);
+            check("Swipe Left: pen down", pen, 1);
+            check("Swipe Left: x", px, 90 - 16 * k < 0 ? 0 : 90 - 16 * k);
+            check("Swipe Left: y", py, 42);
+        end
+        frames(1); wait_clk(2); check("Swipe Left: pen up", pen, 0);
+        release_(K_A);
+        setting(SET_B_IN_TOUCH_MODE_IDX, 6);    // Swipe Down
+        press(K_B);
+        for (int k = 0; k <= 6; k++) begin
+            frames(1); wait_clk(2);
+            check("Swipe Down: pen down", pen, 1);
+            check("Swipe Down: x", px, 90);
+            check("Swipe Down: y", py, 42 + 16 * k);
+        end
+        frames(1); wait_clk(2); check("Swipe Down: pen up after 96 px", pen, 0);
+        release_(K_B);
         // Button: the button reaches the game in touch mode, no pen
         setting(SET_A_IN_TOUCH_MODE_IDX, 0);
         press(K_A); frames(1); wait_clk(2);

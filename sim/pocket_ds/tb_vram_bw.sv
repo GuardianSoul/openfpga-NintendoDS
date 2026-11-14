@@ -84,7 +84,7 @@ module tb_vram_bw;
     parameter integer OPEN_ROW = 0;
     nds_sdram #(.N(NC), .OPEN_ROW(OPEN_ROW), .OCT(OCT ? 6'b001000 : 6'b0)) sdram (.clk_bus, .clk_mem, .reset(rst_bus), .ready(sdram_ready),
         .c_valid, .c_write, .c_quad, .c_addr, .c_wdata, .c_be, .c_ready, .r_valid, .r_data,
-        .bw_valid(1'b0), .bw_addr(24'd0), .bw_data(32'd0), .bw_read(),
+        .bw_valid(1'b0), .bw_addr(24'd0), .bw_data(32'd0), .bw_he(2'b11), .bw_read(),
         .dram_dq, .dram_a, .dram_ba, .dram_dqm, .dram_clk, .dram_cke, .dram_ras_n, .dram_cas_n, .dram_we_n);
     wire #2.0 chip_clk = dram_clk;
     sdram_chip_model #(.CAS(3), .T_AC(6.0), .T_OH(2.5), .T_RET(2.0), .NAME("sdram")) sdram_chip (

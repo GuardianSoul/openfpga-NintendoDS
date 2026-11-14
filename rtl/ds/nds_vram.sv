@@ -24,6 +24,8 @@ module nds_vram
     // serial VRAM port: a line's 128 writes took ~26 clocks each there under the 3D's traffic and the
     // composite pass waited on them (MKDS intro, docs/2d-engine.md). A lone halfword still uses the port.
     parameter bit CAP_CHAIN = 0,
+    parameter bit CAP_DB = 0,
+    parameter bit G2D_CWF = 0,      // a 2D block's read starts at its first 64-bit word g_word (the SDRAM read wraps in the block)       // the waiting capture word keeps its own address and low half (cap_wa, cap_lo): an even halfword is taken while it waits (1 halfword a clock)
     // VR_POST (with CAP_CHAIN): a CPU or DMA word write also goes to the write FIFO, so it costs a few clocks
     // instead of an SDRAM write through the serial port (Golden Sun DD's title: its HBlank row and GX list took
     // 4 video frames a game frame). Reads and partial writes from this port wait until the FIFO has drained.
@@ -63,7 +65,43 @@ module nds_vram
     // S_IDLE), so the DMA's next reads hit the current way meanwhile (VRAM->main units: 6.46 system cycles a word,
     // the DS's 4.08, unitmem). Anything else that needs the port waits for the prefetch's words; any write
     // invalidates both ways and the prefetch in flight, as it did the line.
-    parameter bit VR_PF = 0
+    parameter bit VR_PF = 0,
+    // VR_PFS (with VR_PF, RB_M10K): the two ways are sets chosen by the line's bit 5, so line L and L+1 are always in
+    // different sets and the read line stays in its M10K, read a clock early at {res[5], res[4:2]} as RB_M10K reads
+    // (a read that met a write to its word in that clock is not answered: rb_col). Set 1's tag is always res_q's
+    // bits 19:6 and set 0's res_q's + bit 5 (a fill of L, or the prefetch of L+1 into the other set): one
+    // incrementer, two compares, no tag muxes and no way registers (VR_PF: two full compares, an MLAB, ~+12 LABs)
+    parameter bit VR_PFS = 0,
+    // VR_PH (with VR_POST): halfword writes (byte enables 0011 / 1100: STRH, a DMA's 16-bit units) are posted like
+    // full words, their half enables (cw_he) beside them in the write FIFO; the SDRAM controller masks the other
+    // half (DQM). They went through S_CPU, the VRAM port's own write (STRH 5.76 system cycles, the DS's 4.03)
+    parameter bit VR_PH = 0,
+    // RB_M10K (with VR_RDB, not VR_PF or VR_HIT): the read line in an M10K (2 MLAB LABs -> 1 M10K, docs/rc8-packing.md
+    // row 9): its word is read a clock early, at the request's offset in S_IDLE (res, the resolver's input bits 4:2:
+    // bank bases are 32-byte aligned) and at res_q's in S_CRES, so S_CRES has it as the MLAB's read gave it. A fill
+    // writes only in S_RFIL, never in the clock a read is taken (no read-during-write)
+    parameter bit RB_M10K = 0,
+    // VR_WBQ (with VR_WB; 0, 2, 4, 8 ...): that many more full-word writes queue behind the buffer's word (an MLAB),
+    // so a write is acked while earlier ones still wait for 2D blocks or the shared write FIFO; they post in order,
+    // and this port's reads still wait until all have posted. The buffer alone held one: Golden Sun DD's title
+    // HBlank / list DMA main->VRAM took 5.25-5.43 system cycles a unit against the DS's 3.15 (w2-bus-census)
+    parameter integer VR_WBQ = 0,
+    // VR_HITB (with VR_RDB): a CPU/DMA read may go to S_CRES while 2D block words are still due (bw_left != 0), and
+    // is answered there if the read line holds its word; anything else waits in S_CRES for the words (back to
+    // S_IDLE when a 2D block asks, VR_YIELD), so no port access starts behind them. Before, every CPU/DMA access
+    // waited for the blocks to drain even when the line had the word (Golden Sun DD title: VRAM read units
+    // 10.7-19.7 clk_sys, the DS's 4.08)
+    parameter bit VR_HITB = 0,
+    // VR_HPAIR (with VR_WB, VR_PH): a halfword write waits up to 8 clocks (acked) in a staging register for the other
+    // half of its word; the pair then posts as one full word, else the half posts alone (sooner when another write
+    // or a read comes). This port's reads wait for it as for the buffer. A 16-bit DMA or STRH run then puts half the
+    // words into the shared SDRAM write FIFO (Burnout's menu: 2 x 24,576-unit 16-bit fills each VBlank; the FIFO
+    // was full 1.18 system cycles a unit)
+    parameter bit VR_HPAIR = 0,
+    // WQ_FE (with VR_WBQ; nds_top RAM_MOVE 256): the queue in M10K, read on the clock's falling edge (the Saturn core's
+    // FERAM, as nds_disp_refs FE): its head word is out in the clock's second half, as the MLAB's asynchronous read
+    // gave it, this clock's rising-edge write seen; it feeds only the buffer's load mux. 3 MLAB LABs -> 2 M10K (56 bits)
+    parameter bit WQ_FE = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -81,6 +119,7 @@ module nds_vram
     // 2D engine block port
     input  logic        g_req,
     input  blk_t        g_blk,
+    input  logic [1:0]  g_word,         // G2D_CWF: the block's first 64-bit word
     output logic        g_ack,
     output logic        g_rvalid,
     output logic [63:0] g_rdata,       // {the beat's second word, w0}: w0 changes only after the beat is taken
@@ -92,6 +131,7 @@ module nds_vram
     output logic        cw_valid,       // CAP_CHAIN: a word to write at VRAM word cw_addr, held until cw_ack
     output logic [23:0] cw_addr,
     output logic [31:0] cw_data,
+    output logic [1:0]  cw_he,          // VR_PH: the word's halves to write {high, low} (2'b11 without VR_PH)
     input  logic        cw_ack,
     input  logic        cw_drained,
     input  logic [6:0]  cw_fill,     // VR_PDRAIN: the FIFO's words written and not popped (lags)
@@ -110,6 +150,7 @@ module nds_vram
     output logic        vm_req,
     output logic        vm_we,
     output logic        vm_blk,
+    output logic        vm_tex,         // the block request is a 3D texture or texture-palette block (TX_HURRY)
     output logic [20:2] vm_addr,
     output logic [3:0]  vm_be,
     output logic [31:0] vm_wdata,
@@ -274,6 +315,10 @@ module nds_vram
     logic        cap_w, cap_p;
     logic [15:0] cap_pd;
     logic [16:0] cap_pa;
+    logic [16:0] cap_wa;        // CAP_DB: the waiting word's address (else cap_pa)
+    logic [15:0] cap_lo;        // CAP_DB: the waiting pair's low half (else cap_pd)
+    wire  [16:0] cap_wq = CAP_DB ? cap_wa : cap_pa;
+    wire  [15:0] cap_lq = CAP_DB ? cap_lo : cap_pd;
     logic [2:0]  cap_t;
     logic [20:2] va;
     logic        vwe, vblk;
@@ -294,7 +339,11 @@ module nds_vram
     wire         pr_hit = post_p && res_q[19:5] >= pr_lo && res_q[19:5] <= pr_hi;
     logic [19:5] bt0, bt1;       // VR_PASS: the lines of the last two 2D blocks (in flight while bw_left != 0)
     wire         bt_hit = bw_left != 5'd0 && (res_q[19:5] == bt0 || res_q[19:5] == bt1);
-    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rb [16];  // VR_RDB: the read line (MLAB: an M10K here was the 309th of 308 with MKDS's G3D_SL 9; read in S_IDLE, written in S_RBLK); {way, word}: one write site in every setting (a second, or an index wider than the array, built it from flip-flops: #2050, #2052)
+    localparam bit PS  = VR_PF && VR_PFS;
+    localparam bit RBM = RB_M10K && (!VR_PF || PS) && !VR_HIT;
+    (* ramstyle = RBM ? "M10K, no_rw_check" : "MLAB, no_rw_check" *) logic [31:0] rb [16];
+    logic [31:0] rb_q;           // RB_M10K: rb's registered read
+    logic [31:0] rb_a, rb_h;     // the word S_CRES / VR_HIT's S_IDLE answer with  // VR_RDB: the read line (MLAB: an M10K here was the 309th of 308 with MKDS's G3D_SL 9; read in S_IDLE, written in S_RBLK); {way, word}: one write site in every setting (a second, or an index wider than the array, built it from flip-flops: #2050, #2052)
     logic [19:5] lt [2];         // the ways' lines (VR_PF: way 1 too)
     logic        lv [2];         // a way is valid
     logic        rb_inv;         // a write came during the fill
@@ -305,13 +354,19 @@ module nds_vram
     function automatic logic [3:0] rbi(input logic wy, input logic [2:0] w);
         return {VR_PF && wy, w};
     endfunction
-    wire  [1:0]  lhit = {VR_PF && lv[1] && lt[1] == res_q[19:5], lv[0] && lt[0] == res_q[19:5]};
-    wire         lh = VR_PF && lhit[1];
+    // VR_PFS: set 0 is compared with res_q + bit 5 (L+1's tag when L is odd, L's own when it is even), set 1 with res_q
+    wire  [19:6] p_nt = res_q[19:6] + 14'(res_q[5]);
+    wire         p_e0 = lt[0][19:6] == p_nt, p_e1 = lt[1][19:6] == res_q[19:6];
+    logic        rb_col;         // VR_PFS: the registered read was taken in the clock a write went to its word
+    wire         p_h = !rb_col && (res_q[5] ? lv[1] && p_e1 : lv[0] && p_e0);
+    wire  [1:0]  lhit = PS ? {res_q[5] && p_h, !res_q[5] && p_h}
+                           : {VR_PF && lv[1] && lt[1] == res_q[19:5], lv[0] && lt[0] == res_q[19:5]};
+    wire         lh = PS ? res_q[5] : VR_PF && lhit[1];
     wire  [19:5] l_nx = res_q[19:5] + 15'd1;
     // VR_PF: L+1 for a DMA read of L into the other way w, unless it is there or asked for already. The request
     // takes w's tag at once (lv 0): the pending line is lt[pf_way]; none while prefetch words are due
     function automatic logic pf_want(input logic w);
-        return pf_left == 4'd0 && (lt[w] != l_nx || (!lv[w] && !pf_req));
+        return pf_left == 4'd0 && ((PS ? !(w ? p_e1 : p_e0) : lt[w] != l_nx) || (!lv[w] && !pf_req));
     endfunction
     wire         any_w;
 
@@ -325,21 +380,80 @@ module nds_vram
     logic [3:0]  wb_view;
     logic [19:2] wb_off;
     logic [31:0] wb_d;
-    wire         c_full = VR_POST && c_req && c_we && c_be == 4'hF;
-    wire         wb_take = VR_WB && c_full && !c_ack && !wb_v;
+    wire         c_pbe  = c_be == 4'hF || (VR_PH && (c_be == 4'b0011 || c_be == 4'b1100));   // a write that can be posted
+    wire         c_full = VR_POST && c_req && c_we && c_pbe;
+    logic [1:0]  wb_he;
+    localparam integer QW = VR_WBQ > 1 ? $clog2(VR_WBQ) : 1;
+    logic [QW:0] wq_n;           // VR_WBQ: words queued behind the buffer's (the buffer holds the oldest)
+    logic [QW-1:0] wq_rd, wq_wr;
+    (* ramstyle = WQ_FE ? "M10K, no_rw_check" : "MLAB, no_rw_check" *) logic [55:0] wq [VR_WBQ > 0 ? VR_WBQ : 1];
+    logic [55:0] wq_q;           // the queue's head word (read only when wq_n != 0, into the buffer)
+    generate if (WQ_FE && VR_WBQ != 0) begin : g_wqfe
+        always_ff @(negedge clk) wq_q <= wq[wq_rd
+`ifdef VRAM_WQFE_MUT
+            + 1'b1
+`endif
+            ];
+    end else begin : g_wqml
+        assign wq_q = wq[wq_rd];
+    end endgenerate
+    // a word may enter the buffer or the queue this clock (wb_push): the buffer is empty or the queue has room
+    wire         wb_room = !wb_v || (VR_WBQ != 0 && wq_n != (QW+1)'(VR_WBQ));
+    wire         wb_take = VR_WB && c_full && !c_ack && wb_room;
+    // VR_HPAIR: the staged half {view, word, data, halves}; a write of the other half of that word merges with it
+    logic        hp_v;
+    logic [3:0]  hp_view;
+    logic [19:2] hp_off;
+    logic [15:0] hp_d;           // the staged half's 16 bits (posted alone in both halves, its enable picks one)
+    logic [1:0]  hp_he;
+    logic [2:0]  hp_t;
+    wire         c_wr   = VR_WB && c_full && !c_ack;                       // a write waiting for its ack
+    wire         c_half = c_be == 4'b0011 || c_be == 4'b1100;
+    wire         hp_cmp = hp_v && c_half && {c_be[2], c_be[0]} == ~hp_he && c_view == hp_view && c_off[19:2] == hp_off;
+    wire         hp_due = hp_v && (hp_t == 3'd7 || (c_req && !c_ack && !c_we));  // waited long enough, or a read waits
+    // what enters the buffer / queue (wb_push) and whether the request is acked (wb_ack)
+    logic        wb_push, wb_ack, hp_stage;
+    logic [55:0] push_d;
+    always_comb begin
+        wb_push = wb_take; wb_ack = wb_take; hp_stage = 1'b0;
+        push_d = {c_view, c_off[19:2], c_wdata, c_be[2], c_be[0]};
+        if (VR_HPAIR) begin
+            wb_push = 1'b0; wb_ack = 1'b0;
+            if (c_wr && hp_cmp) begin             // the pair: one full word
+                wb_push = wb_room; wb_ack = wb_room;
+                push_d = {hp_view, hp_off, hp_he[1] ? hp_d : c_wdata[31:16], hp_he[0] ? hp_d : c_wdata[15:0], 2'b11};
+            end else if (hp_v && (c_wr || hp_due)) begin   // the staged half alone (a write waits a clock behind it)
+                wb_push = wb_room;
+                push_d = {hp_view, hp_off, hp_d, hp_d, hp_he};
+            end else if (c_wr && c_half) begin    // staged: acked now, no room needed
+                wb_ack = 1'b1; hp_stage = 1'b1;
+            end else if (c_wr) begin
+                wb_push = wb_room; wb_ack = wb_room;
+            end
+        end
+    end
+    // the buffer's word leaves: posted (S_POST's ack) or dropped unmapped (S_WRES)
+    wire         wb_pop  = VR_WB && wb_v && ((st == S_POST && wb_p && cw_post && cw_ack) || (st == S_WRES && !res_q[20]));
     assign res   = resolve(vramcnt, g_req ? g_view : VR_WB && wb_v ? wb_view : c_view,
                            g_req ? g_off : VR_WB && wb_v ? {wb_off, 2'b00} : c_off);
-    wire         hit0 = VR_HIT && VR_RDB && st == S_IDLE && !g_req && !(VR_WB && wb_v) && c_req && !c_ack && !c_we
+    wire         hit0 = VR_HIT && VR_RDB && st == S_IDLE && !g_req && !(VR_WB && wb_v) && !(VR_HPAIR && hp_v) && c_req && !c_ack && !c_we
                         && !VR_PF && res[20] && lv[0] && lt[0] == res[19:5];
 
     assign g_ack = st == S_IDLE && g_go;
+    // the block's space at its accept (g_blk may change after g_ack): a 3D texture / palette block (TX_HURRY)
+    logic g_tex;
+    always_ff @(posedge clk) if (g_ack) g_tex <= g_blk[17:15] == SP_TEX || g_blk[17:15] == SP_TPAL;
+    logic [1:0] g_wq;
+    always_ff @(posedge clk) if (g_ack) g_wq <= G2D_CWF ? g_word : 2'd0;
+    assign vm_tex = st == S_GBLK && g_tex;
     assign bw_acc = st == S_GBLK && vm_ack;
     wire cw_pair = CAP_CHAIN && cap_v && cap_w;
     wire cw_post = VR_POST && st == S_POST && !cw_pair;
     assign cw_valid = cw_pair || cw_post;
-    assign cw_addr  = cw_pair ? {7'd0, cap_pa} : {6'd0, res_q[19:2]};
-    assign cw_data  = cw_pair ? {cap_d, cap_pd} : VR_WB && wb_p ? wb_d : c_wdata;
-    assign cap_ready = !cap_v && (!cap_p || (cap_addr[0] && cap_addr[17:1] == cap_pa));
+    assign cw_addr  = cw_pair ? {7'd0, cap_wq} : {6'd0, res_q[19:2]};
+    assign cw_data  = cw_pair ? {cap_d, cap_lq} : VR_WB && wb_p ? wb_d : c_wdata;
+    assign cw_he    = !VR_PH || cw_pair ? 2'b11 : VR_WB && wb_p ? wb_he : {c_be[2], c_be[0]};
+    assign cap_ready = CAP_DB && !cap_addr[0] ? !cap_p : !cap_v && (!cap_p || (cap_addr[0] && cap_addr[17:1] == cap_pa));
 
     always_ff @(posedge clk) begin
         g_rvalid <= 1'b0;
@@ -348,13 +462,13 @@ module nds_vram
         if (cap_we && cap_ready) begin
             if (!cap_addr[0]) begin cap_p <= 1'b1; cap_pa <= cap_addr[17:1]; cap_pd <= cap_data; cap_t <= 3'd0; end
             else begin
-                cap_v <= 1'b1; cap_pa <= cap_addr[17:1]; cap_a0 <= 1'b1; cap_d <= cap_data;   // (cap_pa unchanged with a pair)
+                cap_v <= 1'b1; cap_pa <= cap_addr[17:1]; cap_wa <= cap_addr[17:1]; cap_lo <= cap_pd; cap_a0 <= 1'b1; cap_d <= cap_data;   // (cap_pa unchanged with a pair)
                 cap_w <= cap_p; cap_p <= 1'b0;
             end
         end else if (cap_p) begin
             cap_t <= cap_t + 3'd1;
             if (cap_t == 3'd4 && !cap_v) begin
-                cap_v <= 1'b1; cap_a0 <= 1'b0; cap_d <= cap_pd; cap_w <= 1'b0; cap_p <= 1'b0;
+                cap_v <= 1'b1; cap_wa <= cap_pa; cap_a0 <= 1'b0; cap_d <= cap_pd; cap_w <= 1'b0; cap_p <= 1'b0;
             end
         end
         if (cw_pair && cw_ack) cap_v <= 1'b0;
@@ -371,10 +485,27 @@ module nds_vram
         end
         if (st == S_IDLE) res_q <= res;
         if (bw_acc) begin bt0 <= va[19:5]; bt1 <= bt0; end
-        if (hit0) begin c_ack <= 1'b1; r_q <= rb[rbi(1'b0, res[4:2])]; end
-        if (wb_take) begin wb_v <= 1'b1; wb_view <= c_view; wb_off <= c_off[19:2]; wb_d <= c_wdata; c_ack <= 1'b1; end
+        if (hit0) begin c_ack <= 1'b1; r_q <= rb_h; end
+        if (wb_ack) c_ack <= 1'b1;
+        if (VR_HPAIR) begin
+            if (hp_stage) begin
+                hp_v <= 1'b1; hp_view <= c_view; hp_off <= c_off[19:2]; hp_d <= c_be[2] ? c_wdata[31:16] : c_wdata[15:0]; hp_he <= {c_be[2], c_be[0]}; hp_t <= 3'd0;
+            end else if (hp_v && wb_push) hp_v <= 1'b0;       // merged or posted alone
+            else if (hp_v && hp_t != 3'd7) hp_t <= hp_t + 3'd1;
+        end
+        // the buffer: filled by a write when it is empty or its word leaves with none queued, else from the queue
+        if (wb_push && (!wb_v || (wb_pop && wq_n == '0))) begin
+            wb_v <= 1'b1; {wb_view, wb_off, wb_d, wb_he} <= push_d;
+        end else if (VR_WBQ != 0 && wb_pop && wq_n != '0) {wb_view, wb_off, wb_d, wb_he} <= wq_q;
+        else if (wb_pop) wb_v <= 1'b0;
+        if (VR_WBQ != 0) begin
+            if (wb_push && wb_v && !(wb_pop && wq_n == '0)) wq_wr <= wq_wr + 1'b1;
+            if (wb_pop && wq_n != '0) wq_rd <= wq_rd + 1'b1;
+            wq_n <= wq_n + (wb_push && wb_v && !(wb_pop && wq_n == '0) ? 1'b1 : 1'b0) - (wb_pop && wq_n != '0 ? 1'b1 : 1'b0);
+        end
         if (rst) begin
             st <= S_IDLE; cap_v <= 1'b0; cap_p <= 1'b0; bw_left <= 5'd0; bw_odd <= 1'b0; wb_v <= 1'b0; wb_p <= 1'b0;
+            wq_n <= '0; wq_rd <= '0; wq_wr <= '0; hp_v <= 1'b0;
             pf_left <= 4'd0; pf_req <= 1'b0; cur <= 1'b0;
         end else case (st)
             S_IDLE: begin
@@ -383,16 +514,17 @@ module nds_vram
                     if (g_go) st <= S_GRES;
                 end else if (VR_WB && wb_v) st <= S_WRES;                // the buffer first (posted: no port use)
                 else if (VR_WB && c_full) ;                               // waits for the buffer
-                else if (VR_PASS && bw_left != 5'd0 && c_req && !c_ack && c_we && c_be == 4'hF) st <= S_CRES;   // posted: no port use
-                else if (bw_left != 5'd0) ;
+                else if (VR_HPAIR && hp_v) ;                              // reads and the rest wait for the staged half
+                else if (VR_PASS && bw_left != 5'd0 && c_req && !c_ack && c_we && c_pbe) st <= S_CRES;   // posted: no port use
+                else if (bw_left != 5'd0) begin if (VR_HITB && VR_RDB && c_req && !c_ack && !c_we && !hit0) st <= S_CRES; end
                 else if (VR_PF && pf_left != 4'd0) begin if (c_req && !c_ack) st <= S_CRES; end   // (a hit, or it waits there)
                 else if (cap_v && !cw_pair) begin
                     // capture writes go to banks A-D through their LCDC addresses
-                    st <= S_CAP; va <= cap_pa; vwe <= 1'b1; vblk <= 1'b0;
-                    vbe <= cap_w ? 4'b1111 : cap_a0 ? 4'b1100 : 4'b0011; vwd <= cap_w ? {cap_d, cap_pd} : {cap_d, cap_d};
+                    st <= S_CAP; va <= cap_wq; vwe <= 1'b1; vblk <= 1'b0;
+                    vbe <= cap_w ? 4'b1111 : cap_a0 ? 4'b1100 : 4'b0011; vwd <= cap_w ? {cap_d, cap_lq} : {cap_d, cap_d};
                 end else if (c_req && !c_ack && !hit0) st <= S_CRES;
                 else if (VR_PF && pf_req && !post_p) begin
-                    st <= S_PBLK; va <= {lt[pf_way], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; pf_inv <= 1'b0;
+                    st <= S_PBLK; va <= PS ? {lt[pf_way][19:6], pf_way, 3'd0} : {lt[pf_way], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; pf_inv <= 1'b0;
                 end
                 else if (sv_req && !sv_ack) begin
                     st <= S_CPU; va <= sv_addr; vwe <= sv_we; vblk <= 1'b0; vbe <= sv_be; vwd <= sv_wdata;
@@ -402,35 +534,39 @@ module nds_vram
             S_GRES:
                 if (VR_PASS && res_q[20] && pr_hit) ;      // its words may still be in the FIFO
                 else if (res_q[20]) begin
-                    st <= S_GBLK; va <= res_q[19:2]; vwe <= 1'b0; vblk <= 1'b1;
+                    st <= S_GBLK; va <= {res_q[19:5], G2D_CWF ? g_wq : 2'd0, 1'b0}; vwe <= 1'b0; vblk <= 1'b1;
                 end else if (bw_left == 5'd0) st <= S_GZERO;     // (in order, after the blocks in flight)
             S_CRES:
                 if (!res_q[20]) begin c_ack <= 1'b1; r_q <= 32'd0; st <= S_IDLE; end
-                else if (VR_POST && c_we && c_be == 4'hF) begin
+                else if (VR_POST && c_we && c_pbe) begin
                     if (!(VR_PASS && bt_hit)) st <= S_POST;   // not into a line a block still reads
                     else if (VR_YIELD && g_req) st <= S_IDLE;
                 end
                 else if (VR_RDB && !c_we && |lhit) begin
-                    c_ack <= 1'b1; r_q <= rb[rbi(lh, res_q[4:2])]; st <= S_IDLE;
+                    c_ack <= 1'b1; r_q <= rb_a; st <= S_IDLE;
                     cur <= lh;
-                    if (VR_PF && c_dma && pf_want(!lh)) begin pf_req <= 1'b1; lt[!lh] <= l_nx; lv[!lh] <= 1'b0; pf_way <= !lh; end
+                    if (VR_PF && c_dma && pf_want(!lh)) begin
+                        pf_req <= 1'b1; lv[!lh] <= 1'b0; pf_way <= !lh;
+                        if (!PS) lt[!lh] <= l_nx; else if (lh) lt[0] <= {p_nt, 1'b0}; else lt[1] <= {res_q[19:6], 1'b1};
+                    end
                 end
                 else if (VR_PF && pf_left != 4'd0) begin if (VR_YIELD && g_req) st <= S_IDLE; end   // the port's words are the prefetch's
+                else if (VR_HITB && bw_left != 5'd0) begin if (VR_YIELD && g_req) st <= S_IDLE; end  // a miss: after the block words
                 else if (post_p) begin if (VR_YIELD && g_req) st <= S_IDLE; end
                 else if (VR_RDB && !c_we) begin
                     st <= S_RBLK; va <= {res_q[19:5], 3'd0}; vwe <= 1'b0; vblk <= 1'b1; vsv <= 1'b0; rb_w <= 3'd0; rb_inv <= 1'b0;
-                    fw <= VR_PF && !cur; rd_dma <= c_dma; pf_req <= 1'b0;   // (asked again at the fill's end)
+                    fw <= PS ? res_q[5] : VR_PF && !cur; rd_dma <= c_dma; pf_req <= 1'b0;   // (asked again at the fill's end)
                 end
                 else begin
                     st <= S_CPU; va <= res_q[19:2]; vwe <= c_we; vblk <= 1'b0; vbe <= c_be; vwd <= c_wdata;
                     vsv <= 1'b0;
                 end
             S_POST: if (cw_post && cw_ack) begin
-                if (wb_p) begin wb_v <= 1'b0; wb_p <= 1'b0; end else c_ack <= 1'b1;
+                if (wb_p) wb_p <= 1'b0; else c_ack <= 1'b1;   // (wb_pop: the buffer's word)
                 st <= S_IDLE;
             end else if (VR_YIELD && g_req) begin wb_p <= 1'b0; st <= S_IDLE; end   // (wb_v stays: S_WRES again)
             S_WRES:                                                       // VR_WB: the buffer's word
-                if (!res_q[20]) begin wb_v <= 1'b0; st <= S_IDLE; end    // unmapped: dropped
+                if (!res_q[20]) st <= S_IDLE;                            // unmapped: dropped (wb_pop)
                 else if (!bt_hit) begin wb_p <= 1'b1; st <= S_POST; end
                 else if (VR_YIELD && g_req) st <= S_IDLE;
             S_RBLK: if (vm_ack) st <= S_RFIL;
@@ -439,13 +575,17 @@ module nds_vram
                 if (rb_w == res_q[4:2]) r_q <= vm_rdata;
                 if (VR_CWF ? rb_w == res_q[4:2] : rb_w == 3'd7) c_ack <= 1'b1;
                 if (rb_w == 3'd7) begin
-                    lt[fw] <= res_q[19:5]; lv[fw] <= !rb_inv; st <= S_IDLE;
+                    lv[fw] <= !rb_inv; st <= S_IDLE;
+                    if (!PS) lt[fw] <= res_q[19:5]; else if (fw) lt[1] <= {res_q[19:6], 1'b1}; else lt[0] <= {p_nt, 1'b0};
                     cur <= fw;
-                    if (VR_PF && rd_dma && pf_want(!fw)) begin pf_req <= 1'b1; lt[!fw] <= l_nx; lv[!fw] <= 1'b0; pf_way <= !fw; end
+                    if (VR_PF && rd_dma && pf_want(!fw)) begin
+                        pf_req <= 1'b1; lv[!fw] <= 1'b0; pf_way <= !fw;
+                        if (!PS) lt[!fw] <= l_nx; else if (fw) lt[0] <= {p_nt, 1'b0}; else lt[1] <= {res_q[19:6], 1'b1};
+                    end
                 end
             end
             S_GBLK: if (vm_ack) st <= S_IDLE;     // the words follow (bw_left)
-            S_PBLK: if (vm_ack) begin pf_left <= 4'd8; pf_w <= 3'd0; pf_req <= 1'b0; st <= S_IDLE; end   // VR_PF: they follow (pf_left)
+            S_PBLK: if (VR_PF && vm_ack) begin pf_left <= 4'd8; pf_w <= 3'd0; pf_req <= 1'b0; st <= S_IDLE; end   // VR_PF: they follow (pf_left)
             S_GZERO: begin
                 g_rvalid <= 1'b1; w0 <= 32'd0; w1 <= 32'd0; beat <= beat + 3'd1;
                 if (beat == 3'd3) st <= S_IDLE;
@@ -475,6 +615,23 @@ module nds_vram
     wire        rb_we  = rb_pfw || (st == S_RFIL && vm_rvalid);
     wire [3:0]  rb_wa  = rb_pfw ? rbi(pf_way, pf_w) : rbi(fw, rb_w);
     always_ff @(posedge clk) if (rb_we) rb[rb_wa] <= vm_rdata;
+    // VR_WBQ: the queue's one write port (a write taken while the buffer keeps or refills from older words)
+    always_ff @(posedge clk) if (VR_WBQ != 0 && wb_push && wb_v && !(wb_pop && wq_n == '0))
+        wq[wq_wr] <= push_d;
+    // the line's reads: RB_M10K the registered one alone (a clock ahead of S_CRES; any combinational read of rb
+    // keeps Quartus from an M10K: 10999 on dfd4d338), else the MLAB's combinational reads (S_CRES, VR_HIT's S_IDLE)
+    generate if (RBM) begin : g_rbm
+        wire [3:0] ra = rbi(PS && (st == S_IDLE ? res[5] : res_q[5]), st == S_IDLE ? res[4:2] : res_q[4:2]);
+        always_ff @(posedge clk) rb_q <= rb[ra];
+        always_ff @(posedge clk) rb_col <= PS && rb_we && rb_wa == ra;
+        assign rb_a = rb_q;
+        assign rb_h = 32'd0;
+    end else begin : g_rbl
+        assign rb_q = 32'd0;
+        assign rb_col = 1'b0;
+        assign rb_a = rb[rbi(lh, res_q[4:2])];
+        assign rb_h = rb[rbi(1'b0, res[4:2])];
+    end endgenerate
     logic [6:0]  pd_tgt;         // VR_PDRAIN: the pop count at which the last posted word has left
     // pops still due: 1..66 while the word waits (cw_fill reads up to 65: the read side pre-loads a word, and a
     // signed 7-bit test wrapped at 66 and ended the wait at once); 0, or 96 and up after pops overtook the target
@@ -514,7 +671,7 @@ module nds_vram
     // and sets its fields only before a request). vwd/vbe remain only for
     // that check (synthesis drops them).
     assign vm_be    = st == S_CAP ? (cap_w ? 4'b1111 : cap_a0 ? 4'b1100 : 4'b0011) : vsv ? sv_be : c_be;
-    assign vm_wdata = st == S_CAP ? (cap_w ? {cap_d, cap_pd} : {cap_d, cap_d}) : vsv ? sv_wdata : c_wdata;
+    assign vm_wdata = st == S_CAP ? (cap_w ? {cap_d, cap_lq} : {cap_d, cap_d}) : vsv ? sv_wdata : c_wdata;
 
 
     assign vramstat = {vramcnt[31] && vramcnt[26:24] == 3'd2, vramcnt[23] && vramcnt[18:16] == 3'd2};

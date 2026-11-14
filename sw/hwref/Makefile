@@ -22,7 +22,7 @@ ARM7 := $(CALICO)/bin/ds7_maine.elf
 
 PROGS := gxtime cap3d rules3d memtime sndcap rand3d replay3d gxcount dmacpu cputime lat2d load3d vramcnt gxburst sndq late3d tmcnt wbuf cacheorg openq dmaslip
 ifeq ($(SPEED_TRIP),1)
-PROGS := late3d rdtimeline gxlatency
+PROGS := late3d rdtimeline gxlatency gxtest
 CFLAGS += -DHWREF_SPEED_TRIP
 endif
 ALL := $(OUT)/hwref.nds
@@ -32,6 +32,8 @@ gxtime_TITLE := hwref GX timing;NDS_Pocket hw reference;results in /hwref/
 gxlatency_SRC := gxlatency/main.c gxlatency/read.itcm.c gxtime/run.itcm.c
 gxlatency_TITLE := hwref new GX timing;NDS_Pocket hw reference;new trip results
 rdtimeline_SRC := rdtimeline/main.c common/gxplay.c
+gxtest_SRC := gxtest/main.c gxtime/run.itcm.c
+gxtest_TITLE := hwref GX test costs;NDS_Pocket hw reference;results in /hwref/
 rdtimeline_TITLE := hwref render progress;NDS_Pocket hw reference;new trip results
 cap3d_SRC := cap3d/main.c
 cap3d_EXTRA := $(OUT)/obj/font.o
@@ -121,6 +123,12 @@ $(OUT)/load2d.elf: $(OUT)/obj/load2d/main.o $(OUT)/obj/common/hwref.o
 $(OUT)/load2d.nds: $(OUT)/load2d.elf
 	$(NDSTOOL) -c $@ -9 $< -7 $(ARM7) -b $(CALICO)/share/nds-icon.bmp "hwref 2D load;NDS_Pocket hw reference;results in /hwref/" >/dev/null
 
+# Standalone 3D-limit probe (budget-3d "The DS's 3D limits"); not part of the all-probe chain.
+$(OUT)/lim3d.elf: $(OUT)/obj/lim3d/main.o $(OUT)/obj/common/hwref.o $(OUT)/obj/common/gxplay.o
+	$(CC) $(LDFLAGS) $^ $(LIBS) -o $@
+$(OUT)/lim3d.nds: $(OUT)/lim3d.elf
+	$(NDSTOOL) -c $@ -9 $< -7 $(ARM7) -b $(CALICO)/share/nds-icon.bmp "hwref 3D limits;NDS_Pocket hw reference;results in /hwref/" >/dev/null
+
 # Standalone peripheral timing probes need their own ARM7 (no competing
 # sound/touch/WiFi servers). Deliberately not included in hwref.nds's chain.
 $(OUT)/perftime7.elf: $(OUT)/obj7/perftime/arm7.o
@@ -139,6 +147,8 @@ $(OUT)/$(1).nds: $(OUT)/$(1).elf
 	$(NDSTOOL) -c $$@ -9 $$< -7 $(ARM7) -b $(CALICO)/share/nds-icon.bmp "$$($(1)_TITLE)" >/dev/null
 endef
 $(foreach p,$(PROGS),$(eval $(call prog,$(p))))
+# gxtest.nds standalone too (in hwref.nds only as the speed trip's step gxtest_v1)
+$(if $(filter gxtest,$(PROGS)),,$(eval $(call prog,gxtest)))
 
 # ITCM code: ARM state, long calls out to main RAM.
 $(OUT)/obj/%.itcm.o: %.itcm.c

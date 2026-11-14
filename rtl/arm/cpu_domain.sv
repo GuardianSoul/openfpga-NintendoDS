@@ -25,6 +25,7 @@
 module cpu_domain #(
   parameter int CPU_FAST   = 0,
   parameter int ARM9_WAYS  = 2,
+  parameter int ARM9_IWAYS = 0,           // the ARM9 I-cache's ways (0: ARM9_WAYS's)
   parameter int ARM7_CACHE = 1,
   parameter int A7_IL      = 7,
   parameter int A7_DL      = 6,
@@ -37,12 +38,14 @@ module cpu_domain #(
   parameter int A9_EVBW    = 0,         // EVB drained as a block write (CPU_FAST = 0 only)
   parameter int A9_BURST   = 0,         // arm9_mem BURST (line fills as one request)
   parameter int MR_BLOCK   = 0,         // A9_BURST: the fabric serves a fill as one block (b9_n8, b9_rvalid beats)
-  parameter int A9_SOLO    = 0          // arm_core A9_SOLO: the ARM9 issues every cycle while the ARM7 is halted
+  parameter int A9_SOLO    = 0          // arm_core A9_SOLO: the ARM9 issues every cycle while the ARM7 is halted; bit 3: the ARM9 is arm9_core (docs/arm9-stall.md, with bit 2)
 ) (
   input  logic        clk,              // clk_sys
   input  logic        clk_cpu,          // CPU_FAST: the CPUs' clock
   input  logic        rst,              // the ARM7 port's reset
   input  logic        cpu_rst,          // the CPUs' reset
+  input  logic        cpu_rst9,         // copies of cpu_rst (same edge) for arm9_core and arm7_ds alone (CPU_FAST 0)
+  input  logic        cpu_rst7,
   input  logic [1:0]  run,
   input  logic [1:0]  irq,
   input  logic        wake7,
@@ -116,8 +119,8 @@ module cpu_domain #(
 
   logic        c_b9_n8;
   generate if ((A9_SOLO & 2) == 0) begin : g_one
-  arm_cpu #(.A7_DS((A9_SOLO & 4) != 0), .ARM9_EVB(A9_EVB != 0), .ARM9_EARLYD(A9_EARLYD != 0), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .ARM9_EVBW(A9_EVBW != 0 && CPU_FAST == 0), .ARM9_WAYS(ARM9_WAYS), .ARM9_BURST(A9_BURST != 0), .A9_SOLO((A9_SOLO & 1) != 0), .SLOW(CPU_FAST == 0)) u_cpu (
-      .clk(cclk), .rst(c_cpu_rst), .run(c_run),
+  arm_cpu #(.SEP_RST(CPU_FAST == 0), .A7_DS((A9_SOLO & 4) != 0), .A9_CORE((A9_SOLO & 8) != 0), .A9_RF("MLAB"), .ARM9_EVB(A9_EVB != 0), .ARM9_EARLYD(A9_EARLYD != 0), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .ARM9_EVBW(A9_EVBW != 0 && CPU_FAST == 0), .ARM9_WAYS(ARM9_WAYS), .ARM9_IWAYS(ARM9_IWAYS), .ARM9_BURST(A9_BURST != 0), .A9_SOLO((A9_SOLO & 1) != 0), .SLOW(CPU_FAST == 0)) u_cpu (
+      .clk(cclk), .rst(c_cpu_rst), .rst9(cpu_rst9), .rst7(cpu_rst7), .run(c_run),
       .reset_pc0(32'hFFFF_8000), .reset_pc1(32'h0000_8004), .hivecs7(1'b0),
       .wake7(c_wake7), .irq(c_irq), .fiq(2'b00),
       .b9_n8(c_b9_n8), .b9_wnext(CPU_FAST == 0 && b9_wnext), .b9_req(c_b9_req), .b9_we(c_b9_we), .b9_addr(c_b9_addr), .b9_wdata(c_b9_wdata), .b9_be(c_b9_be), .b9_tmr(c_b9_tmr),
@@ -139,8 +142,8 @@ module cpu_domain #(
     logic        b_b9_n8, b_b9_req, b_b9_we;
     logic [31:0] b_b9_addr, b_b9_wdata;
     logic [3:0]  b_b9_be, b_b9_tmr;
-    arm_cpu #(.ARM9_EVB(A9_EVB != 0), .ARM9_EARLYD(A9_EARLYD != 0), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .ARM9_EVBW(A9_EVBW != 0 && CPU_FAST == 0), .ARM9_WAYS(ARM9_WAYS), .ARM9_BURST(A9_BURST != 0), .A9_SOLO(1'b1), .SLOW(CPU_FAST == 0)) u_cpu (
-      .clk(cclk), .rst(c_cpu_rst), .run({1'b0, c_run[0]}),
+    arm_cpu #(.ARM9_EVB(A9_EVB != 0), .ARM9_EARLYD(A9_EARLYD != 0), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .ARM9_EVBW(A9_EVBW != 0 && CPU_FAST == 0), .ARM9_WAYS(ARM9_WAYS), .ARM9_IWAYS(ARM9_IWAYS), .ARM9_BURST(A9_BURST != 0), .A9_SOLO(1'b1), .SLOW(CPU_FAST == 0)) u_cpu (
+      .clk(cclk), .rst(c_cpu_rst), .rst9(c_cpu_rst), .rst7(c_cpu_rst), .run({1'b0, c_run[0]}),
       .reset_pc0(32'hFFFF_8000), .reset_pc1(32'h0000_8004), .hivecs7(1'b0),
       .wake7(1'b0), .irq({1'b0, c_irq[0]}), .fiq(2'b00),
       .b9_n8(c_b9_n8), .b9_wnext(CPU_FAST == 0 && b9_wnext), .b9_req(c_b9_req), .b9_we(c_b9_we), .b9_addr(c_b9_addr), .b9_wdata(c_b9_wdata), .b9_be(c_b9_be), .b9_tmr(c_b9_tmr),
@@ -149,7 +152,7 @@ module cpu_domain #(
       .a7_d_req(a_a7_d_req), .a7_d_we(a_a7_d_we), .a7_d_be(a_a7_d_be), .a7_d_addr(a_a7_d_addr), .a7_d_wdata(a_a7_d_wdata), .a7_d_rdata(32'h0), .a7_d_ok(1'b0),
       .dbg_wen(a_wen), .dbg_wa(a_wa), .dbg_wd(a_wd), .dbg_retire(ra), .dbg_tid(a_tid), .dbg_pc(a_pc), .dbg_cpsr(a_cpsr), .dbg_halt(a_halt), .dg_fill(a_fill));
     arm_cpu #(.ARM9_WAYS(2), .SLOW(CPU_FAST == 0)) u_cpu7 (
-      .clk(cclk), .rst(c_cpu_rst), .run({c_run[1], 1'b0}),
+      .clk(cclk), .rst(c_cpu_rst), .rst9(c_cpu_rst), .rst7(c_cpu_rst), .run({c_run[1], 1'b0}),
       .reset_pc0(32'hFFFF_8000), .reset_pc1(32'h0000_8004), .hivecs7(1'b0),
       .wake7(c_wake7), .irq({c_irq[1], 1'b0}), .fiq(2'b00),
       .b9_n8(b_b9_n8), .b9_wnext(1'b0), .b9_req(b_b9_req), .b9_we(b_b9_we), .b9_addr(b_b9_addr), .b9_wdata(b_b9_wdata), .b9_be(b_b9_be), .b9_tmr(b_b9_tmr),

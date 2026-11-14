@@ -28,7 +28,9 @@
 // sector's last word, as the chips' aligned erases (melonDS: 256 bytes or 64 KiB
 // from any address). ROMCTRL reads back only bits 31 and 23, and the data port
 // shows a word only while bit 23 says so (docs/ds-rules.md).
-module nds_cart (
+module nds_cart #(
+    parameter bit QFE = 1'b0        // the ROM line q in M10K, read on the falling edge (core_top_ds RAM_MOVE 2)
+) (
     input  logic        clk,
     input  logic        rst,
     input  logic        tick,           // 33.51 MHz enable
@@ -68,7 +70,11 @@ module nds_cart (
     logic [7:0]  spidata;
     logic        ro_start, ro_drq;  // ROMCTRL bits 31, 23
     logic [39:0] cmd;               // byte 0 (the command) in [7:0]
-    wire  [28:0] rom_l = rom_size[28:0] - 29'd1;    // the last byte: its 4 KiB page is the check past the ROM's end
+    // the last byte's 4 KiB page (bits 28:12 of rom_size - 1; the low bits are not used): the static size's page less
+    // the borrow, in a DSP block (nds_dsp_add; D1: blocks freed in gpu2d_bg)
+    logic [17:0] rl_s;
+    nds_dsp_add #(.W(17)) u_rl (.clk, .a(rom_size[28:12]), .b(rom_size[11:0] == 12'd0 ? 17'h1FFFF : 17'd0), .s(rl_s));
+    wire  [28:12] rom_l = rl_s[16:0];
 
     // chip ID as melonDS, from the card's size (the next power of two of the file, m = 2^k - 1; only its bits from
     // 19 up matter). melonDS: 0x1 MiB-0x80 MiB: ((m + 1) >> 20) - 1, else 0x100 - ((m + 1) >> 28), in bits 15:8.
@@ -120,7 +126,14 @@ module nds_cart (
     logic        so_v, sv_er;
     op_t         so_op;             // (its address is sp_a, unmasked: the request masks it)
     logic [7:0]  so_d;
-    wire  [19:0] sp_a1 = sp_a + 20'd1;
+    // the save address plus one: its low 18 bits in a DSP block (nds_dsp_add), the top two take the carry
+    logic [18:0] sa_s;
+    nds_dsp_add #(.W(18)) u_sa1 (.clk, .a(sp_a[17:0]), .b(18'd1), .s(sa_s));
+`ifdef CART_SA_MUT
+    wire  [19:0] sp_a1 = {sp_a[19:18], sa_s[17:0]};                       // (mutant: the carry dropped)
+`else
+    wire  [19:0] sp_a1 = {sp_a[19:18] + {1'b0, sa_s[18]}, sa_s[17:0]};
+`endif
     logic [17:0] er_a;              // erase: next word
     logic [18:0] er_a1;             // (an adder in a DSP block, nds_dsp_add: the chip is short of LABs)
     nds_dsp_add #(.W(18)) u_er1 (.clk, .a(er_a), .b(18'd1), .s(er_a1));
@@ -157,13 +170,22 @@ module nds_cart (
     logic [14:0] left_1;
     nds_dsp_add #(.W(12)) u_ra4 (.clk, .a(raddr[11:0]), .b(12'd4), .s(ra4));
     nds_dsp_add #(.W(14)) u_lf1 (.clk, .a(left), .b(14'h3FFF), .s(left_1));
-    wire         r_past = raddr[28:12] > rom_l[28:12];   // past the file's last 4 KiB page
+    // past the file's last 4 KiB page: raddr's page + ~the last page carries out exactly when raddr's page is the
+    // greater (a + (2^17 - 1 - b) >= 2^17 iff a > b), in a DSP block (nds_dsp_add, D1)
+    logic [17:0] rp_s;
+`ifdef CART_D1_MUT
+    nds_dsp_add #(.W(17)) u_rp (.clk, .a(raddr[28:12]), .b(rom_l), .s(rp_s));   // (mutant: the page not inverted)
+`else
+    nds_dsp_add #(.W(17)) u_rp (.clk, .a(raddr[28:12]), .b(~rom_l), .s(rp_s));
+`endif
+    wire         r_past = rp_s[17];
     // the 16-byte line, written as it arrives and read ahead combinationally
     // (MLAB: one write port, one asynchronous read)
-    (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] q [4];
     logic [1:0]  fw;
     wire  [1:0]  ptr = raddr[3:2];
-    always_ff @(posedge clk) if (!rst && rs == R_FILL && cr_rvalid) q[fw] <= cr_rdata;
+    logic [31:0] q_rd;              // q[ptr] (gpu3d_lram: MLAB, or with QFE an M10K read on the falling edge)
+    gpu3d_lram #(.W(32), .AW(2), .FE(QFE)) u_q (.clk, .we(!rst && rs == R_FILL && cr_rvalid), .waddr(fw), .wdata(cr_rdata),
+        .raddr(ptr), .rdata(q_rd));
 
     always_ff @(posedge clk) begin
         irq <= 1'b0;
@@ -368,7 +390,7 @@ module nds_cart (
         if (rd) case (io_reg)
             3'd0: r = {8'd0, (spicnt[15] && spicnt[13] && !spicnt[7]) ? spidata : 8'd0, spicnt};
             3'd1: r = {ro_start, 7'd0, ro_drq, 23'd0};
-            3'd4: r = kind == 2'd0 ? (r_past ? 32'hFFFF_FFFF : q[ptr]) : kind == 2'd1 ? {1'b0, dsi, 13'd0, chip_id} : 32'd0;
+            3'd4: r = kind == 2'd0 ? (r_past ? 32'hFFFF_FFFF : q_rd) : kind == 2'd1 ? {1'b0, dsi, 13'd0, chip_id} : 32'd0;
             default: r = 32'd0;
         endcase
         io_rdata <= r;

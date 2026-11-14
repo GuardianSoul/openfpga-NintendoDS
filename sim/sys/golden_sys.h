@@ -153,13 +153,13 @@ struct Sys {
     }
     void StartDiv() { DivCnt |= 0x8000; DivEvent = sys + (((DivCnt & 3) == 0) ? 18 : 34); DivPending = true; }
     void SqrtDone() {
-        u64 val; u32 res = 0; u64 rem = 0; u32 prod = 0; u32 nbits, topshift;
+        u64 val; u32 res = 0; u64 rem = 0; u64 prod = 0; u32 nbits, topshift;
         SqrtCnt &= ~0x8000;
         if (SqrtCnt & 1) { memcpy(&val, SqrtVal, 8); nbits = 32; topshift = 62; }
         else { val = SqrtVal[0]; nbits = 16; topshift = 30; }
         for (u32 i = 0; i < nbits; i++) {
             rem = (rem << 2) + ((val >> topshift) & 3); val <<= 2; res <<= 1;
-            prod = (res << 1) + 1;
+            prod = (u64(res) << 1) + 1;
             if (rem >= prod) { rem -= prod; res++; }
         }
         SqrtRes = res;

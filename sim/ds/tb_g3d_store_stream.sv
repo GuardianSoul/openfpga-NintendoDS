@@ -9,7 +9,17 @@
 //   +scene=2  a 2-line band (item 16): line 120-121 holds 2 << SL polygons spanning both lines (3 vertices each),
 //             more than the pool holds: STREAM alone stalls; with DROP the frame goes on, the polygons the
 //             pool can't take are dropped (whole: on none of their lines), the rest come out in order
+//   +scene=4  a restart (DROP after a raster restart): lines 0-49 of a frame are drawn unchecked, the raster restarts
+//             (abort, then frame_go: the same bank drawn again), and the whole frame is checked. 12 polygons start on
+//             line 0, so its first arrivals come while the free lists refill after the clear (2^SL / 2^CL clocks);
+//             DROP must not take that for a full pool (every beat expected)
+//   +scene=5  2,048 quad-strip polygons (4 vertex records each: 8,192 records, past the 13-bit record numbers' 6,144;
+//             the DS counts 4,098 vertices for them): every header and vertex comes back (before the FF4 fix, record
+//             6,144 + k overwrote header k)
+//   +scene=6  the bound: 2,048 polygons of 5 records, 10,240 records (NV + 2 NP at the DS's 6,144 / 2,048 limits)
+//   +scene=7  1,536 quads, 6,144 records: the last frame size the 13-bit store handled (equivalence edge)
 //   +seed=N   the random scene's seed
+//   +beatlog=FILE  every beat and PSRAM access with its clock (old/new store equivalence: the logs must be identical)
 module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1'b0, parameter int SL = 5, parameter int CL = 7);
     logic clk = 0;
     always #5 clk = !clk;
@@ -34,6 +44,12 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
     logic [8:0]   y_lim = 9'd255;
     logic [1:0]   ps_type;
     logic [127:0] ps_data;
+`ifdef PS_ONE_PORT
+    wire  [127:0] ps_d = ps_data;                          // a store with one beat port (before the split, OLD_SV)
+`else
+    logic [127:0] ps_vdata;                                // the vertex beats' own port
+    wire  [127:0] ps_d = ps_type == 2'd1 ? ps_vdata : ps_data;
+`endif
     // PSRAM
     logic         p_req, p_we, p_ack = 0, p_rvalid = 0;
     logic [22:2]  p_addr;
@@ -42,6 +58,9 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
     nds_g3d_store #(.SL(SL), .CL(CL), .STREAM(STREAM), .DROP(DROP)) dut (.clk, .rst, .po_valid, .po_ready, .po_type, .po_data,
         .po_index, .po_wv, .po_wk, .po_wd, .so_we, .so_pos, .so_idx, .so_done, .so_count, .drawing, .lists_bld,
         .frame_go, .abort, .diag_ld, .ps_line_req, .ps_line_y, .y_lim, .ps_valid, .ps_ready, .ps_type, .ps_data,
+`ifndef PS_ONE_PORT
+        .ps_vdata,
+`endif
         .p_req, .p_we, .p_addr, .p_wdata, .p_ack, .p_rvalid, .p_rdata, .p_wdrained(1'b1));
 
     // PSRAM model: a request is taken after 2-5 clocks; a read then returns its 4 words a clock apart
@@ -125,6 +144,21 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
         for (int i = 0; i < 20; i++) begin ytop[np] = $urandom_range(0, 180); ybot[np] = ytop[np] + 4; nv[np] = 4; np++; end
     endfunction
 
+    // scene 4: the restart
+    function automatic void scene_restart();
+        np = 0;
+        for (int i = 0; i < 12; i++) begin ytop[np] = 0; ybot[np] = 6; nv[np] = 4; np++; end
+        for (int i = 0; i < 30; i++) begin
+            ytop[np] = $urandom_range(10, 180); ybot[np] = ytop[np] + $urandom_range(0, 6); nv[np] = $urandom_range(3, 6); np++;
+        end
+    endfunction
+
+    // scenes 5-7: n polygons of k vertex records, one or two lines each, spread down the frame
+    function automatic void scene_records(int n, int k);
+        np = 0;
+        for (int i = 0; i < n; i++) begin ytop[np] = (i * 3) % 192; ybot[np] = ytop[np] + (i % 2); nv[np] = k; np++; end
+    endfunction
+
     // scene 2: the 2-line band
     function automatic void scene_band();
         np = 0;
@@ -204,7 +238,7 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
 
     int scene = 0, seed = 1, beats = 0, errors = 0;
     int line = 0, line_clk = 0;
-    bit running = 0;
+    bit running = 0, unchecked = 0;     // (scene 4: the lines before the restart)
     always @(posedge clk) begin
         if (running) begin
             line_clk++;
@@ -217,8 +251,10 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
                 $finish;
             end
         end
-        if (ps_valid && ps_ready && scene == 2 && DROP) begin
-            drop_beat(line, ps_type, ps_data);
+        if (ps_valid && ps_ready && unchecked) begin
+            if (ps_type == 2'd3) begin line++; line_clk = 0; end
+        end else if (ps_valid && ps_ready && scene == 2 && DROP) begin
+            drop_beat(line, ps_type, ps_d);
             beats++;
             if (ps_type == 2'd3) begin line++; line_clk = 0; end
         end else if (ps_valid && ps_ready) begin
@@ -226,11 +262,11 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
             if (exp_q.size() == 0) begin $display("FAIL: beat after the frame's last"); errors++; end
             else begin
                 e = exp_q.pop_front();
-                if (ps_type != e.t || (e.t != 3 && ps_data !== e.d)) begin
+                if (ps_type != e.t || (e.t != 3 && ps_d !== e.d)) begin
                     if (errors < 10) $display("FAIL: line %0d beat %0d: type %0d data %h, expected type %0d data %h",
-                                              line, beats, ps_type, ps_data, e.t, e.d);
+                                              line, beats, ps_type, ps_d, e.t, e.d);
                     if (errors < 10 && ps_type == 0 && e.t == 0)
-                        for (int p = 0; p < np; p++) if (order[p] == int'(ps_data[15:0]) - 4096 || order[p] == int'(e.d[15:0]) - 4096)
+                        for (int p = 0; p < np; p++) if (order[p] == int'(ps_d[15:0]) - 4096 || order[p] == int'(e.d[15:0]) - 4096)
                             $display("  position %0d: polygon %0d ytop %0d ybot %0d", p, order[p], ytop[order[p]], ybot[order[p]]);
                     errors++;
                 end
@@ -239,6 +275,17 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
             if (ps_type == 2'd3) begin line++; line_clk = 0; end
         end
     end
+    // +beatlog: beats and PSRAM accesses with their clock
+    int blog = 0;
+    longint cyc = 0;
+    initial begin string fn; if ($value$plusargs("beatlog=%s", fn)) blog = $fopen(fn, "w"); end
+    always @(posedge clk) begin
+        cyc++;
+        if (blog != 0 && ps_valid && ps_ready) $fdisplay(blog, "%0d beat %0d %h", cyc, ps_type, ps_type == 2'd3 ? 128'd0 : ps_d);
+        // (a header's word 3 (written third) without its first-vertex record number, bits 31:12: 13 bits before the FF4 fix, 14 after)
+        if (blog != 0 && p_req && p_ack) $fdisplay(blog, "%0d psram %s %h %h", cyc, p_we ? "W" : "R", p_addr,
+            !p_we ? 32'd0 : p_addr[19:15] == 5'd0 && p_addr[3:2] == 2'd2 ? {20'd0, p_wdata[11:0]} : p_wdata);
+    end
     // a random ready, so the fetcher's held beats are covered
     always @(negedge clk) ps_ready = $urandom_range(0, 3) != 0;
 
@@ -246,7 +293,9 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
         void'($value$plusargs("scene=%d", scene));
         void'($value$plusargs("seed=%d", seed));
         void'($urandom(seed));
-        if (scene == 0) scene_random(); else if (scene == 1) scene_horizon(); else scene_band();
+        if (scene == 0) scene_random(); else if (scene == 1) scene_horizon(); else if (scene == 2) scene_band();
+        else if (scene == 5) scene_records(2048, 4); else if (scene == 6) scene_records(2048, 5);
+        else if (scene == 7) scene_records(1536, 4); else scene_restart();
         for (int i = 0; i < np; i++) make_header(i);
         // render order: a random permutation
         for (int i = 0; i < np; i++) order[i] = i;
@@ -271,6 +320,20 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
         @(negedge clk); frame_go = 1;
         @(negedge clk); frame_go = 0;
         running = 1;
+        if (scene == 4) begin
+            unchecked = 1;
+            for (int y = 0; y < 50; y++) begin
+                @(negedge clk); ps_line_req = 1; ps_line_y = 8'(y);
+                @(negedge clk); ps_line_req = 0;
+                while (line == y) @(posedge clk);
+            end
+            repeat (20) @(posedge clk);
+            // the raster restarts: abort the clock before frame_go (nds_gpu3d RESTART)
+            @(negedge clk); abort = 1;
+            @(negedge clk); abort = 0; frame_go = 1;
+            @(negedge clk); frame_go = 0;
+            unchecked = 0; line = 0; line_clk = 0;
+        end
         for (int y = 0; y < 192; y++) begin
             @(negedge clk); ps_line_req = 1; ps_line_y = 8'(y);
             @(negedge clk); ps_line_req = 0;
@@ -285,6 +348,7 @@ module tb_g3d_store_stream #(parameter bit STREAM = 1'b1, parameter bit DROP = 1
         end else if (exp_q.size() != 0) begin $display("FAIL: %0d beats never came", exp_q.size()); errors++; end
         $display("%s: STREAM %0d DROP %0d SL %0d CL %0d scene %0d seed %0d: %0d polygons, %0d beats, %0d errors",
                  errors == 0 ? "PASS" : "FAIL", STREAM, DROP, SL, CL, scene, seed, np, beats, errors);
+        if (blog != 0) $fclose(blog);
         $finish;
     end
 endmodule

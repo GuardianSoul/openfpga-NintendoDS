@@ -7,7 +7,10 @@
 # analysis and corner, and packages OUTDIR/package/NDS.zip. Writes
 # OUTDIR/result.txt.
 # Run it only through the Jenkins nds-fit job (TARGET=ds, docs/fitting.md):
-# never start Quartus by hand on a fit node.
+# never start Quartus by hand on a fit node. The one exception is the
+# pre-queue gate (tools/ds/prequeue.py, DS_PREQUEUE=1), which runs
+# quartus_map and a post-map read of the SDC only, never while a psx-fit
+# build waits for the node.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=$1 seed=$2
@@ -158,14 +161,14 @@ echo "PROJECT_REVISION = \"$top\"" > $top.qpf
   for f in psx_sdram_ctrl.sv psx_pq_psram.sv; do
     echo "set_global_assignment -name SYSTEMVERILOG_FILE \"$root/rtl/mem/$f\""
   done
-  for f in arm/arm_pkg.sv arm/arm_regfile.sv arm/arm_mul.sv arm/arm_thumb.sv arm/arm_core.sv arm/arm7_ds.sv arm/arm9_ram.sv \
+  for f in arm/arm_pkg.sv arm/arm_regfile.sv arm/arm_mul.sv arm/arm_thumb.sv arm/arm_core.sv arm/arm9_core.sv arm/arm7_ds.sv arm/arm9_ram.sv \
            arm/arm9_mem.sv arm/arm_cpu.sv arm/cdc_req.sv arm/cdc_fifo.sv arm/cdc_a7.sv arm/cpu_domain.sv \
            ds/nds_dsp_add.sv sys/sys_ram.sv sys/sys_irq.sv sys/sys_timers.sv sys/sys_ipc.sv sys/sys_math.sv sys/sys_dma.sv sys/nds_sys.sv \
            gpu2d/gpu2d_pkg.sv gpu2d/gpu2d_ram.sv gpu2d/gpu2d_cache.sv gpu2d/gpu2d_bg.sv gpu2d/gpu2d_obj.sv gpu2d/gpu2d.sv \
            ds/nds_ram.sv ds/nds_lcache.sv ds/nds_arm7_port.sv ds/nds_arm7_port_min.sv ds/nds_fabric.sv ds/nds_vram.sv ds/nds_io.sv ds/nds_disp_refs.sv ds/nds_disp.sv \
            sound/sound_ram.sv sound/sound.sv \
            gpu3d/gpu3d_pkg.sv gpu3d/gpu3d_div4.sv gpu3d/gpu3d_ram.sv gpu3d/gpu3d_edge.sv gpu3d/gpu3d_front.sv gpu3d/gpu3d_fpass.sv gpu3d/gpu3d_raster.sv \
-           gpu3d/gpu3d_gxu_pkg.sv gpu3d/gpu3d_gxrom.sv gpu3d/gpu3d_gxrom_us.sv gpu3d/gpu3d_gxrom_ul.sv gpu3d/gpu3d_gxrom_uv.sv gpu3d/gpu3d_gxrom_uw.sv gpu3d/gpu3d_gxrom_uf.sv gpu3d/gpu3d_gxlight.sv gpu3d/gpu3d_gxvfin.sv gpu3d/gpu3d_gxdiv.sv gpu3d/gpu3d_gxfront.sv gpu3d/gpu3d_gxeng.sv gpu3d/gpu3d_gxsort.sv gpu3d/gpu3d_geom.sv ds/nds_blk_arb.sv ds/nds_g3d_plane.sv ds/nds_l3d_xscroll.sv ds/nds_fr_arb.sv ds/nds_mr_arb.sv ds/nds_g3d_store.sv ds/nds_g3d_ring.sv ds/nds_gpu3d.sv \
+           gpu3d/gpu3d_gxu_pkg.sv gpu3d/gpu3d_gxrom.sv gpu3d/gpu3d_gxrom_us.sv gpu3d/gpu3d_gxrom_ul.sv gpu3d/gpu3d_gxrom_uv.sv gpu3d/gpu3d_gxrom_uw.sv gpu3d/gpu3d_gxrom_uf.sv gpu3d/gpu3d_gxrom_up1.sv gpu3d/gpu3d_gxrom_up2.sv gpu3d/gpu3d_gxlight.sv gpu3d/gpu3d_gxvfin.sv gpu3d/gpu3d_gxdiv.sv gpu3d/gpu3d_gxfront.sv gpu3d/gpu3d_gxeng.sv gpu3d/gpu3d_gxsort.sv gpu3d/gpu3d_geom.sv ds/nds_blk_arb.sv ds/nds_g3d_plane.sv ds/nds_l3d_xscroll.sv ds/nds_fr_arb.sv ds/nds_mr_arb.sv ds/nds_g3d_store.sv ds/nds_g3d_ring.sv ds/nds_gpu3d.sv \
            ds/nds_cart.sv ds/nds_spi.sv ds/nds_rtc.sv ds/nds_wifi.sv ds/nds_wifi_mc.sv ds/nds_top.sv; do
     echo "set_global_assignment -name SYSTEMVERILOG_FILE \"$root/rtl/$f\""
   done
@@ -207,6 +210,26 @@ echo "PROJECT_REVISION = \"$top\"" > $top.qpf
   for i in $(seq 0 15); do
     echo "set_instance_assignment -name FAST_INPUT_REGISTER ON -to dram_dq[$i]"
     echo "set_instance_assignment -name D1_DELAY 24 -to dram_dq[$i]"
+  done
+  # (fit branch rc10-kconst-ll, from rc8p3e-b; Standard Edition, replacing the card's I-tag and q_w location pins)
+  # the ARM9 fetch answer's cone in one floating, non-reserved LogicLock region: the I-cache
+  # tag and data RAMs, the instruction queue's registers and the Thumb expander, so the fitter keeps them together
+  # and may still pack other logic there (#2285: I-tag -> way -> Thumb -> q_w, -1.074 ns, +1.45 ns in the block)
+  r=fetchq; c="core_top:ic|nds_top:ds|cpu_domain:u_cpud|arm_cpu:g_one.u_cpu"
+  echo "set_global_assignment -name LL_ENABLED ON -section_id $r"
+  echo "set_global_assignment -name LL_AUTO_SIZE ON -section_id $r"
+  echo "set_global_assignment -name LL_STATE FLOATING -section_id $r"
+  echo "set_global_assignment -name LL_RESERVED OFF -section_id $r"
+  echo "set_global_assignment -name LL_CORE_ONLY OFF -section_id $r"
+  echo "set_global_assignment -name LL_SECURITY_ROUTING_INTERFACE OFF -section_id $r"
+  echo "set_global_assignment -name LL_IGNORE_IO_BANK_SECURITY_CONSTRAINT OFF -section_id $r"
+  echo "set_global_assignment -name LL_PR_REGION OFF -section_id $r"
+  echo "set_global_assignment -name LL_ROUTING_REGION_EXPANSION_SIZE 2147483647 -section_id $r"
+  for m in "$c|arm9_mem:u_mem9|arm9_ram:u_itag" "$c|arm9_mem:u_mem9|arm9_ram:dway[0].u_i" "$c|arm9_mem:u_mem9|arm9_ram:dway[1].u_i" \
+           "$c|arm9_core:g_a9c.u_core9|arm_thumb:u_thumb" "$c|arm9_core:g_a9c.u_core9|q_w*" "$c|arm9_core:g_a9c.u_core9|q_cls*" \
+           "$c|arm9_core:g_a9c.u_core9|q_hw*" "$c|arm9_core:g_a9c.u_core9|q_kind*" "$c|arm9_core:g_a9c.u_core9|q_pa*" \
+           "$c|arm9_core:g_a9c.u_core9|q_th*" "$c|arm9_core:g_a9c.u_core9|q_ab*"; do
+    echo "set_instance_assignment -name LL_MEMBER_OF $r -to \"$m\" -section_id $r"
   done
 } > $top.qsf
 
@@ -426,11 +449,16 @@ if {[get_collection_size $a7_fr] > 0} {
 }
 # The fabric's request: addr, be, wdata load on entering S_GO. An I/O register captures on S_GO's second clock (io_go2), the
 # VRAM on S_WAIT: 2 clocks. A 2D fill's ack (nds_vram g_ack) needs g_req, which takes g_off out of the resolver: no path from addr.
+# The cart's read register (nds_cart io_rdata) captures under rd = io_req (nds_io cart_req), S_GO's second clock, as the
+# other I/O (RC11 #2443/#2444/#2436: fabric addr -> cart_reg -> io_rdata, cone -23 / -28 / -11 ns TNS at all three fits).
+# The display's parameter RAM (nds_disp u_pr): its CPU writes (pr_io, ar_we) are all under wr = io_req && io_we, S_GO's
+# second clock; its other writes (clears, the pending half pw_v) and its read address take nothing from the fabric
+# (RC11 #2449 1asR: fabric addr -> u_pr porta we / datain -1.90 ns; nds_sdp_ram cone -25 ns TNS).
 set fab "*|nds_fabric:u_fab|"
 set fab_fr [get_registers -nowarn [list "${fab}addr\[*\]" "${fab}addr\[*\]~*" "${fab}be\[*\]" "${fab}be\[*\]~*" "${fab}wdata\[*\]" "${fab}wdata\[*\]~*" "${fab}we" "${fab}we~*" "${fab}cpu" "${fab}cpu~*"]]
 set fab_to {}
 foreach u {nds_vram:u_vram|res_q* nds_vram:u_vram|va* nds_vram:u_vram|vwe* nds_vram:u_vram|vblk* nds_vram:u_vram|vbe* nds_vram:u_vram|vwd* nds_vram:u_vram|st* nds_vram:u_vram|vsv* nds_vram:u_vram|c_ack* nds_vram:u_vram|r_q*
-           gpu2d:u_gpu2d|q_v* gpu2d:u_gpu2d|out_v* nds_io:*|* sys_*:*|* nds_sys:*|* nds_rtc:*|* nds_spi*:*|* nds_ipc*:*|*} {
+           gpu2d:u_gpu2d|q_v* gpu2d:u_gpu2d|out_v* nds_cart:u_cart|io_rdata* nds_disp:u_disp|nds_sdp_ram:u_pr|* nds_io:*|* sys_*:*|* nds_sys:*|* nds_rtc:*|* nds_spi*:*|* nds_ipc*:*|*} {
   lappend fab_to "*|$u"
 }
 set fab_tr [get_registers -nowarn $fab_to]
@@ -439,11 +467,96 @@ if {[get_collection_size $fab_fr] > 0 && [get_collection_size $fab_tr] > 0} {
   set_multicycle_path -hold 1 -from $fab_fr -to $fab_tr
   post_message -type info "Fabric request 2-clock paths: [get_collection_size $fab_fr] -> [get_collection_size $fab_tr]"
 }
+# Fitter-only overconstraint (RC11 T1): the three ARM9 cones that stay negative at card 3b (#2484 1asR / #2485 7asR):
+# the I-tag -> hit -> i_rdata -> Thumb expansion -> q_w / q_cls (-0.835 / -0.614 ns), the D fill -> der -> d_sel_h ->
+# d_rdata_f -> m_ldv -> e_bw / w_wd (-0.832 ns at 7asR) and w_pg -> d_ok -> stall -> m_res (#2458). quartus_fit
+# places and routes them against a clk_sys period 1 ns shorter (DS_T1_NS, 0 = off); quartus_sta reads this file
+# without it, so the timing receipt and its PASS/FAIL stay against the real 67 MHz relationship.
+if {[info exists ::TimeQuestInfo(nameofexecutable)] && $::TimeQuestInfo(nameofexecutable) eq "quartus_fit"} {
+  set t1_ns DS_T1_NS
+  if {$t1_ns > 0} {
+    set a9 "*|arm9_core:g_a9c.u_core9|"
+    set m9 "*|arm9_mem:u_mem9|"
+    # card 3e (#2493 1asR / #2494 7asR): operand B -> shifter -> address adder -> w_pg / w_addr, operand B -> Z ->
+    # cpsr_s, the D hit -> d_ok -> e_live -> cpsr_s, the condition -> redirect -> i_addr_r -> f_tm, operand B -> m_wd;
+    # card 3f (#2496 7asR): operand B -> address adder -> the ITCM / DTCM port B address and w_ra
+    # RC12c-full #2571 1asR: w_pg -> region match -> d_ok -> stall -> e_live -> mq_acch -0.178 (routes across the chip)
+    set t1_to [get_registers -nowarn [list "${a9}q_w\[*" "${a9}q_cls\[*" "${a9}e_bw\[*" "${a9}w_wd\[*" "${a9}m_res\[*" \
+      "${a9}cpsr_s\[*" "${a9}m_wd\[*" "${m9}w_pg\[*" "${m9}w_addr\[*" "${m9}f_tm" "${m9}f_tm~*" \
+      "${m9}w_ra\[*" "${m9}arm9_ram:u_itcm|*~portb_address_reg*" "${m9}arm9_ram:u_dtcm|*~portb_address_reg*" \
+      "${a9}mq_acch\[*" "${a9}q_hpc\[*" "${a9}q_kind\[*" "${a9}q_hw\[*" "*|gpu2d_bg:u_bg|s4.kb\[*"]]
+    # RC12f #2580 1asR: w_pg -> region match -> stall -> pop -> the queue's load enable -> q_hpc / q_kind (-0.272,
+    # -0.161; q_hw +0.191 on the same enable) and gpu2d_bg s3_lb.done -> s4.kb (-0.043)
+    if {[get_collection_size $t1_to] > 0} {
+      set t1_max [expr {[get_clock_info -period [get_clocks $clk_sys]] - $t1_ns}]
+      set_max_delay -from [get_clocks $clk_sys] -to $t1_to $t1_max
+      post_message -type info "T1 fitter overconstraint: [get_collection_size $t1_to] registers at $t1_max ns"
+    }
+    # T2: the I-tag -> way hit -> i_rhw -> Thumb expansion -> q_w / q_cls cone gets a further 0.5 ns (RC12f #2581
+    # 7asR -0.525 at 0C with T1 on: four routes of 1.0-1.2 ns between the tag RAM, the hit mux and u_thumb)
+    set t2_to [get_registers -nowarn [list "${a9}q_w\[*" "${a9}q_cls\[*"]]
+    if {[get_collection_size $t2_to] > 0} {
+      set t2_max [expr {[get_clock_info -period [get_clocks $clk_sys]] - $t1_ns - 0.5}]
+      set_max_delay -from [get_clocks $clk_sys] -to $t2_to $t2_max
+      post_message -type info "T2 fitter overconstraint: [get_collection_size $t2_to] fetch-queue registers at $t2_max ns"
+    }
+  }
+  # H1: a hold margin for the fitter on the 3D caches' pump writes (bwd -> the M10K's port B data-in register, on
+  # the pump clock): RC12c-full #2572 1asR -0.047 / #2573 7asR -0.025 ns at the fast 0C corner (#2570 +0.011, #2571
+  # +0.053 before). The RAM's clock tap is later than the flop's; asking the router for 0.2 ns makes it pad the hop.
+  # quartus_sta keeps the plain hold check (receipt unchanged)
+  set h1_fr [get_registers -nowarn "*|nds_g3d_cache2:*|*g_pump.g_w*bwd*"]
+  set h1_to [get_registers -nowarn "*|nds_g3d_cache2:*|gpu3d_tdp2c:g_pump.g_w*|*~portb_datain_reg*"]
+  if {[get_collection_size $h1_fr] > 0 && [get_collection_size $h1_to] > 0} {
+    set_min_delay -from $h1_fr -to $h1_to 0.2
+  }
+  post_message -type info "H1 fitter hold margin: [get_collection_size $h1_fr] -> [get_collection_size $h1_to] 3D pump registers at 0.2 ns"
+  # H1b: the hop before it, the cache's write data (f_w, clk_sys) -> bwd (pump clock): RC12f #2581 7asR -0.018 at
+  # the fast 0C corner, 2 endpoints
+  if {[get_collection_size $h1_fr] > 0} {
+    set_min_delay -from [get_clocks $clk_sys] -to $h1_fr 0.2
+  }
+  post_message -type info "H1b fitter hold margin: clk_sys -> [get_collection_size $h1_fr] pump write registers at 0.2 ns"
+  # H2: the sound unit's write data w6 -> its run RAM's port A data-in register (RC12f 2690c7b75 #2590 1asR
+  # u_snd|w6[27] -> sound_run_ram u_run ~porta_datain_reg33 hold -0.004 at the fast 0C corner, the one failing path)
+  set h2_fr [get_registers -nowarn "*|sound:g_snd.u_snd|w6\[*"]
+  set h2_to [get_registers -nowarn "*|sound:g_snd.u_snd|sound_run_ram:u_run|*~porta_datain_reg*"]
+  if {[get_collection_size $h2_fr] > 0 && [get_collection_size $h2_to] > 0} {
+    set_min_delay -from $h2_fr -to $h2_to 0.2
+  }
+  post_message -type info "H2 fitter hold margin: [get_collection_size $h2_fr] -> [get_collection_size $h2_to] sound run RAM write registers at 0.2 ns"
+}
 
 SDC
-sed -i "s|APF_DIR|$apf|" ds.sdc
+sed -i "s|APF_DIR|$apf|; s|DS_T1_NS|${DS_T1_NS:-1.0}|" ds.sdc
 # SDRAM pin timing (Pocket board): chip clock on dram_clk, read capture, command/data outputs
 cat "$root/rtl/pocket/nds_sdram_io.sdc" >> ds.sdc
+
+if [ "${DS_PREQUEUE:-0}" = 1 ]; then
+  # pre-queue gate: synthesis (RAM inference in map.log/map.rpt) and the SDC
+  # read on the post-map netlist (its own assertions, ignored filters and
+  # assignments, every constraint's collection); no fit (tools/ds/prequeue.py)
+  set +e
+  quartus_map $top > map.log 2>&1
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    cat > pq_sdc.tcl <<'TCL'
+project_open apf_top
+create_timing_netlist -post_map
+read_sdc
+update_timing_netlist
+report_clocks -file pq_clocks.txt
+TCL
+    if [ "${PQ_RECEIPT_TEST:-0}" = 1 ]; then
+      echo "source ${PQ_RECEIPT_TCL:-$root/tools/fit/timing_receipt.tcl}" >> pq_sdc.tcl
+      echo "timing_receipt pq_timing_receipt.txt" >> pq_sdc.tcl
+    fi
+    quartus_sta -t pq_sdc.tcl > pq_sdc.log 2>&1
+    rc=$((rc | ($? << 4)))
+  fi
+  echo $rc > pq.rc
+  exit $rc
+fi
 
 set +e
 quartus_map $top > map.log 2>&1 && quartus_fit $top > fit.log 2>&1 && quartus_asm $top > asm.log 2>&1 && quartus_sta $top > sta.log 2>&1
@@ -499,6 +612,9 @@ foreach cond [get_available_operating_conditions] {
   }
 }
 TCL
+# TNS and failing endpoints per clock and cone in every corner (AGENTS.md "Plan and fit process" rule 3)
+echo "source $root/tools/fit/timing_receipt.tcl" >> worst_paths.tcl
+echo "timing_receipt timing_receipt.txt" >> worst_paths.tcl
 quartus_sta -t worst_paths.tcl > worst_paths.log 2>&1 || true
 field() { grep -a -m1 "^; $1" "$2" 2>/dev/null | awk -F';' '{gsub(/^ +| +$/, "", $3); print $3}'; }
 labs=$(field "Total LABs:  partially or completely used" output_files/$top.fit.rpt)
@@ -520,5 +636,7 @@ echo "RESULT ds s$seed$qmode: ${labs%% /*} LABs, timing $timing (worst slack $wo
 python3 "$root/tools/fit/ramcheck.py" output_files/$top.fit.rpt > ramcheck.txt 2>&1 || true
 grep -v '^ramcheck:' ramcheck.txt | sed 's/^/RAMCHECK /' | tee -a result.txt || true
 tail -1 ramcheck.txt | tee -a result.txt || true
+if [ -s timing_receipt.txt ]; then python3 "$root/tools/fit/timing_summary.py" timing_receipt.txt | tee -a result.txt || true
+else echo "TIMING receipt missing (worst_paths.log)" | tee -a result.txt; fi
 [ "$timing" = PASS ] || exit 1
 python3 "$root/tools/ds/package.py" output_files/$top.rbf package

@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define VERSION "rules3d 18"
+#define VERSION "rules3d 19"
 
 #define R_CLEARCOL    REG32(0x04000350)
 #define R_CLEARDEPTH  REG16(0x04000354)
@@ -29,7 +29,15 @@
 #define PA_SHADOW     (3u << 4)
 #define PA_DEPTH_EQ   (1u << 14)
 
-static inline void gx(u32 cmd, u32 v) { *GXPORT(cmd) = v; }
+// v19: the FIFO wait is bounded (hang-safe): a port write into a full FIFO stalls the bus for as long as the
+// engine doesn't drain; after a timeout the panel's writes are dropped (s_gx_timeouts, in rules3d_info.txt)
+static u32 s_gx_timeouts;
+static void gx(u32 cmd, u32 v)
+{
+	for (u32 i = 0; GXSTAT_LEVEL(R_GXSTAT) >= 248; i++)
+		if (s_gx_timeouts || i > 4000000) { s_gx_timeouts++; return; }
+	*GXPORT(cmd) = v;
+}
 
 // ---- projections and exact vertices ----------------------------------------
 
@@ -1725,6 +1733,32 @@ static void p_fog_d(void) { fog_sweep('d', 0x0000, 0, 0x400, 0); }
 // v18 (run 30: d stayed in entry 0, density 0): d with T[0] = 64
 static void p_fog_d2(void) { fog_sweep('D', 0x0000, 0, 0x400, 64); }
 typedef struct { const char* name; void (*fn)(void); u32 disp3d; u32 swap; bool aa_bg; } Panel;
+
+// v19 (pixel-rules, docs/pixel-rules.md): the Y perspective factor where the
+// full-w numerator (y * w0) << 9 passes 32 bits (y * w0 >= 2^23: tall edges,
+// top w >= 0xAAAB). 16 columns top y 0 -> bottom y 192, w exact (proj2/vp2),
+// t over large ranges; columns 5, 7, 10, 11 stay below the wrap (controls).
+// Candidates: 32-bit wrap (core, census), no wrap, w >> k when max >= 0x8000.
+static void p_persp_ybig(void)
+{
+	proj2();
+	attr(PA(31, 1) | PA_DECAL);
+	teximg(TEX32(REP_S | REP_T));
+	static const u16 wt[16] = { 0xFFFF, 0xFFFF, 0xF000, 0xC000, 0xAAAB, 0xAAAA, 0xE000, 0x9000,
+	                            0xFFFF, 0xB000, 0x8001, 0x1000, 0xD555, 0xFFF0, 0xBEEF, 0xFFFF };
+	static const u16 wb[16] = { 0x8000, 0x1000, 0xF001, 0x4000, 0xAAA8, 0x2000, 0xFFFF, 0x9001,
+	                            0xFFFE, 0x0800, 0xFFFF, 0xFFFF, 0x6AAA, 0xC000, 0x7531, 0xFFFF };
+	for (int j = 0; j < 16; j++) {
+		s32 t0 = -30000 + j * 1999, t1 = 30000 - j * 1234;
+		int x0 = j * 16, x1 = x0 + 15;
+		begin(1);
+		tc(j * 16, t0); vp2(x0, 0, wt[j]);
+		tc(j * 16, t1); vp2(x0, 192, wb[j]);
+		tc(j * 16, t1); vp2(x1, 192, wb[j]);
+		tc(j * 16, t0); vp2(x1, 0, wt[j]);
+	}
+}
+
 static const Panel s_panels[] = {
 	{ "fill",         p_fill,         0 },
 	{ "span",         p_span,         0 },
@@ -1841,6 +1875,9 @@ static const Panel s_panels[] = {
 	{ "fog_sweep_c",          p_fog_c,                0x0A88 },
 	{ "fog_sweep_d",          p_fog_d,                0x0088 },
 	{ "fog_sweep_d2",         p_fog_d2,               0x0088 },
+	// v19: Y factor past 32 bits (pixel-rules)
+	{ "persp_ybig",      p_persp_ybig,      GL_TEXTURE_2D },
+	{ "persp_ybig_wbuf", p_persp_ybig,      GL_TEXTURE_2D, 2 },
 };
 #define NPANELS (int)(sizeof s_panels / sizeof s_panels[0])
 
@@ -1861,6 +1898,7 @@ static void capture(int srcA, const char* name, const char* suffix)
 int main(void)
 {
 	hw_init(VERSION " - 3D rules");
+	if (!hw_chain) hw_new_only = true;   // v19: standalone runs the panels not yet captured (rules3d_v19_steps.txt resumes)
 	videoSetMode(MODE_0_3D);
 	glInit();
 	R_VRAMCNT(1) = 0x80;   // B: LCDC, capture destination
@@ -1880,9 +1918,11 @@ int main(void)
 	// Panels from here on aren't captured on the DS yet (update per batch).
 	int first_new = 0;
 	for (int i = 0; i < NPANELS; i++)
-		if (!strcmp(s_panels[i].name, "fog_sweep_d2")) first_new = i;   // v18: fog_sweep_d2
+		if (!strcmp(s_panels[i].name, "persp_ybig")) first_new = i;   // v19: persp_ybig
 	for (int i = hw_new_only ? first_new : 0; i < NPANELS; i++) {
 		const Panel* p = &s_panels[i];
+		// new-only: a panel started before (a hang) or done is skipped on a rerun
+		if (hw_new_only && !hw_step_begin("rules3d_v19_steps.txt", p->name)) continue;
 		iprintf("\x1b[8;0H%2d/%d %-16s", i + 1, NPANELS, p->name);
 		R_DISP3DCNT = p->disp3d | GL_COLOR_UNDERFLOW | GL_POLY_OVERFLOW;
 		bool fogp = !strncmp(p->name, "fog_sweep", 9);
@@ -1907,7 +1947,9 @@ int main(void)
 		}
 		buf_printf(&info, "%s,%04lx,%lu,%d,%08lx\n", p->name, (unsigned long)p->disp3d,
 		           (unsigned long)p->swap, p->aa_bg, (unsigned long)R_GXSTAT);
+		if (hw_new_only) hw_step_done("rules3d_v19_steps.txt", p->name);
 	}
+	buf_printf(&info, "gx_timeouts,%lu\n", (unsigned long)s_gx_timeouts);
 	buf_write(&info, "rules3d_info.txt");
 	if (s_fogcsv.len) buf_write(&s_fogcsv, "rules3d_fog_sweep.csv");
 	hw_done();

@@ -15,7 +15,8 @@
 //   0x208/0x210/0x214 IME/IE/IF       0x280..0x2BF DIV/SQRT (ARM9)
 //   0x4100000 IPCFIFORECV
 module nds_sys #(
-    parameter bit DMA_FAST = 0,         // sys_dma FAST: combined main-RAM units (m_unit, m_dst)
+    parameter bit DMA_FAST = 0,
+    parameter bit DMA_FILL1 = 0,        // sys_dma FILL1: a fill-word run reads its word once         // sys_dma FAST: combined main-RAM units (m_unit, m_dst)
     parameter bit PUMP     = 0          // sys_math's u_res written on clk2 (sys_ram64w, 2 -> 1 M10K) and its sqrt on clk2
 ) (
     input  logic        clk,
@@ -25,6 +26,7 @@ module nds_sys #(
     // register port
     input  logic        io_req,
     input  logic        io_pre,     // io_req without the GX hold, which never holds a timer access: the timers' visit, off g_busy's path
+    input  logic        io_tmr,     // io_pre && d_tmr, registered in the fabric (its one-clock path is outside the fabric multicycle)
     // timer writes as nds_fabric decodes them on its grant edge, a register
     // in the request's cycle: bit {cpu, index} (= io_req && io_we && d_tmr
     // and the CPU and index this decode gives; timing: #470, #519)
@@ -153,7 +155,7 @@ module nds_sys #(
     // ---- blocks
     logic [7:0]  dma_en;
     logic [3:0]  dirq9, dirq7;
-    sys_dma #(.FAST(DMA_FAST)) u_dma (
+    sys_dma #(.FAST(DMA_FAST), .FILL1(DMA_FILL1)) u_dma (
         .clk, .rst, .cnt_we(wr && d_dma && dsel == 2'd2 && cnt_ok), .cpu(io_cpu), .ch(dch),
         .be(io_be), .wdata(io_wdata), .en_q(dma_en),
         .reg_gnt(!cpu_rg), .reg_raddr(dma_raddr), .reg_rd,
@@ -178,7 +180,7 @@ module nds_sys #(
     assign f1024 = tmr_tap[3];
     logic [31:0] t_rd;
     logic [7:0]  tirq /*verilator public_flat_rd*/;
-    sys_timers u_tmr (.clk, .rst, .tick, .dv(tmr_dv), .acc(io_pre && d_tmr), .acc_i({!a9, w[1:0]}), .we(wr), .be(io_be),
+    sys_timers u_tmr (.clk, .rst, .tick, .dv(tmr_dv), .acc(io_tmr), .acc_i({!a9, w[1:0]}), .we(wr), .be(io_be),
         .wdata(io_wdata), .rdata(t_rd), .irq(tirq));
     assign t9_rd = t_rd; assign t7_rd = t_rd;
     assign tirq9 = tirq[3:0]; assign tirq7 = tirq[7:4];

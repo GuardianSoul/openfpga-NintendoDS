@@ -10,17 +10,17 @@ module tb_sdram_mc;
     always #4.973 clk = !clk;                 // 100.54 MHz
     reg init = 1;
     wire ready;
-    reg c_valid = 0, c_we = 0;
+    reg c_valid = 0, c_we = 0, c_wrap = 0;   // c_wrap: +wrap, 8-word reads from a random word, wrapping in their 8 words
     reg [23:0] c_addr = 0;
     reg [3:0] c_n = 0, c_be = 0;
     reg [31:0] c_wdata = 0;
     wire c_ready, r_valid, r_last;
     wire [31:0] r_data;
     // write-chain FIFO (first word fall through)
-    reg [55:0] bq [0:255];
+    reg [57:0] bq [0:255];             // {half enables, word address, data}
     integer bq_r = 0, bq_w = 0;
     wire bw_valid = bq_r != bq_w;
-    wire [55:0] bw_head = bq[bq_r & 255];
+    wire [57:0] bw_head = bq[bq_r & 255];
     wire bw_read;
     // the ordering contract (nds_sdram_mc serves a waiting port before the
     // chain): a client never reads or writes a word while a chain write to it
@@ -40,8 +40,8 @@ module tb_sdram_mc;
 
     wire [15:0] dq; wire [12:0] a; wire [1:0] ba, dqm; wire nwe, nras, ncas, cke, sclk;
     nds_sdram_mc #(.POWERUP_CYCLES(400)) dut (.clk, .init, .ready,
-        .c_valid, .c_hurry(1'b0), .c_we, .c_addr, .c_rb(c_addr[22:8]), .c_n, .c_wdata, .c_be, .c_ready, .r_valid, .r_data, .r_last,
-        .bw_valid, .bw_addr(bw_head[55:32]), .bw_data(bw_head[31:0]), .bw_read,
+        .c_valid, .c_hurry(1'b0), .c_we, .c_wrap, .c_addr, .c_rb(c_addr[22:8]), .c_n, .c_wdata, .c_be, .c_ready, .r_valid, .r_data, .r_last,
+        .bw_valid, .bw_addr(bw_head[55:32]), .bw_data(bw_head[31:0]), .bw_he(bw_head[57:56]), .bw_read,
         .SDRAM_DQ(dq), .SDRAM_A(a), .SDRAM_BA(ba), .SDRAM_DQML(dqm[0]), .SDRAM_DQMH(dqm[1]),
         .SDRAM_nWE(nwe), .SDRAM_nRAS(nras), .SDRAM_nCAS(ncas), .SDRAM_CKE(cke), .SDRAM_CLK(sclk));
     // board timing as in tb_ds_pocket: the chip clock arrives 2 ns late, data 2 ns back
@@ -76,7 +76,7 @@ module tb_sdram_mc;
     endfunction
     task automatic request(input we, input [23:0] wa, input [3:0] n, input [31:0] d, input [3:0] be);
         @(negedge clk);
-        if (pending(wa, n)) begin held++; do @(negedge clk); while (pending(wa, n)); end
+        if (pending(c_wrap ? {wa[23:3], 3'd0} : wa, n)) begin held++; do @(negedge clk); while (pending(c_wrap ? {wa[23:3], 3'd0} : wa, n)); end
         c_valid = 1; c_we = we; c_addr = wa; c_n = n; c_wdata = d; c_be = be;
         do @(posedge clk); while (!c_ready);
         if (we) begin
@@ -87,8 +87,10 @@ module tb_sdram_mc;
             writes++;
         end else begin
             for (int k = 0; k < n; k++) begin
-                exp_addr.push_back(wa + k);
-                exp_val.push_back(gold.exists(wa + 24'(k)) ? {1'b1, gold[wa + 24'(k)]} : 33'd0);
+                reg [23:0] ka;
+                ka = c_wrap ? {wa[23:3], 3'(wa[2:0] + 3'(k))} : wa + 24'(k);
+                exp_addr.push_back(ka);
+                exp_val.push_back(gold.exists(ka) ? {1'b1, gold[ka]} : 33'd0);
             end
             reads++;
         end
@@ -96,11 +98,17 @@ module tb_sdram_mc;
     endtask
     task automatic chain(input [23:0] wa, input integer n);
         for (int k = 0; k < n; k++) begin
-            reg [31:0] d;
+            reg [31:0] d, g;
+            reg [1:0] he;
             while (bq_w - bq_r >= 250) @(posedge clk);
             d = $urandom;
-            bq[bq_w & 255] = {wa + 24'(k), d};
-            gold[wa + 24'(k)] = d;
+            // halfword posts (VRAM STRH): one half only, on words already written
+            he = gold.exists(wa + 24'(k)) && $urandom_range(0, 3) == 0 ? 2'($urandom_range(1, 2)) : 2'b11;
+            bq[bq_w & 255] = {he, wa + 24'(k), d};
+            g = gold.exists(wa + 24'(k)) ? gold[wa + 24'(k)] : 32'h0;
+            if (he[0]) g[15:0] = d[15:0];
+            if (he[1]) g[31:16] = d[31:16];
+            gold[wa + 24'(k)] = g;
             pend[int'(wa) + k] = pend.exists(int'(wa) + k) ? pend[int'(wa) + k] + 1 : 1;
             bq_w = bq_w + 1;
         end
@@ -111,7 +119,7 @@ module tb_sdram_mc;
         repeat (5) @(posedge clk); init = 0;
         wait (ready);
         if ($test$plusargs("directed")) begin
-            for (int k = 0; k < 16; k++) begin bq[bq_w & 255] = {24'h000040 + 24'(k), 32'h11110000 + 32'(k)}; bq_w = bq_w + 1; end
+            for (int k = 0; k < 16; k++) begin bq[bq_w & 255] = {2'b11, 24'h000040 + 24'(k), 32'h11110000 + 32'(k)}; bq_w = bq_w + 1; end
             wait (!bw_valid); repeat (20) @(posedge clk);
             request(0, 24'h000040, 4'd8, 0, 0);
             repeat (60) @(posedge clk);
@@ -136,7 +144,10 @@ module tb_sdram_mc;
         for (int i = 0; i < 4000; i++) begin
             int r;
             r = $urandom_range(0, 9);
-            if (r < 4) request(0, rnd_addr(8), 4'd8, 0, 0);
+            if (r < 4) begin
+                if ($test$plusargs("wrap") && $urandom_range(0, 1)) begin c_wrap = 1; request(0, rnd_addr(8) | 24'($urandom_range(0, 7)), 4'd8, 0, 0); c_wrap = 0; end
+                else request(0, rnd_addr(8), 4'd8, 0, 0);
+            end
             else if (r < 6) request(0, rnd_addr(4), 4'd4, 0, 0);
             else if (r < 7) request(0, rnd_addr(1), 4'd1, 0, 0);
             else if (r < 9) request(1, rnd_addr(1), 4'd1, $urandom, 4'($urandom_range(1, 15)));

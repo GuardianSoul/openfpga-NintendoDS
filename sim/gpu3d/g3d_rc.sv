@@ -62,6 +62,7 @@ module g3d_rc #(
     output logic         ps_ready,
     input  logic [1:0]   ps_type,
     input  logic [127:0] ps_data,
+    input  logic [127:0] ps_vdata,
     output logic         tex_req,
     output logic [18:0]  tex_addr,
     output logic         tex_valid,
@@ -92,7 +93,7 @@ module g3d_rc #(
         .tbl_we, .tbl_sel, .tbl_addr, .tbl_data,
         .frame_start, .busy, .frame_done, .px_hold(1'b0), .fp_line(), .fp_act(), .r_go(),
         .ll_rd(1'b0), .ll_slot(2'd0), .ll_x(8'd0), .ll_ack(), .ll_q(),
-        .ps_line_req, .ps_line_y, .ps_valid, .ps_ready, .ps_type, .ps_data,
+        .ps_line_req, .ps_line_y, .ps_valid, .ps_ready, .ps_type, .ps_data, .ps_vdata,
         .tex_req, .tex_addr, .tex_inval(1'b0), .tex_valid, .tex_data,
         .pal_req, .pal_addr, .pal_valid, .pal_data,
         .px_valid, .px_x, .px_y, .px_color, .dbg_phase, .dbg_span, .dbg_pixel);

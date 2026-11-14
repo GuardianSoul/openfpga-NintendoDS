@@ -31,6 +31,7 @@ int hwref_main_openq(void);
 int hwref_main_dmaslip(void);
 int hwref_main_gxlatency(void);
 int hwref_main_rdtimeline(void);
+int hwref_main_gxtest(void);
 
 // secs: expected time on the DS, shown in the menu; new_secs in "new only".
 // first: runs before the others (a step that can't hang, ahead of riskier ones).
@@ -39,6 +40,7 @@ static const struct { const char* name; int (*fn)(void); int secs, new_secs; boo
 	{ "late3d_v2", hwref_main_late3d, 5, 5, true },
 	{ "gxlatency_v4", hwref_main_gxlatency, 180, 180, false },
 	{ "rdtimeline_v1", hwref_main_rdtimeline, 3, 3, true },
+	{ "gxtest_v1", hwref_main_gxtest, 15, 15, false },
 #else
 	{ "memtime", hwref_main_memtime, 2 },
 	{ "gxtime",  hwref_main_gxtime, 15 },
@@ -85,7 +87,7 @@ static void log_line(const char* s)
 // The steps not yet run on the DS (the menu's default): update with each
 // staged batch. Bit i = s_steps[i].
 #ifdef HWREF_SPEED_TRIP
-#define NEW_STEPS 7u // only late3d v2 restart, GX v4 and three new raster timelines
+#define NEW_STEPS (1u << 3) // only gxtest v1 (BOX/POS/VEC_TEST and NORMAL-pipeline costs); steps 0-2 ran in run 44
 #else
 #define NEW_STEPS (1u << 19)   // legacy menu; never shipped for the speed trip
 #endif

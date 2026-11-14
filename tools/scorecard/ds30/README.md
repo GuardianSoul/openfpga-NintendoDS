@@ -44,7 +44,7 @@ The build stamp matches DSrun30 exactly. The old DS return did not record
 a loaded ROM hash or live CP15/stack/cache state, so it cannot prove
 bit-exact physical caller/cache prehistory. FAT/card prehistory also differs
 in this simulation wrapper. Completion context is not a measurement of DS
-context during the timed interval. See [scope and missing observables](../../../docs/arm7-ds30-native-adapter.md).
+context during the timed interval. See [scope and missing observables](../../../docs/archive/arm7-ds30-native-adapter.md).
 
 The next changed-source native can use `prepare_observer.py --root ROOT
 --adapter ADAPTER --out FRESH_DIR`. It supplies an exact passive testbench

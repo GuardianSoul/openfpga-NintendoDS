@@ -68,6 +68,7 @@ void golden_set_nolower(bool on);   // golden_hooks.py: no lower layer (FEAT_LOW
 
 std::vector<Scene> builtin_scenes();
 Scene random_mix_scene(uint32_t seed);
+std::vector<Scene> pixrules_scenes(int reps);   // extreme w, s/t, z (docs/pixel-rules.md)
 bool save_scene(const Scene& sc, const std::string& path);
 bool load_scene(Scene& sc, const std::string& path);
 

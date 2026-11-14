@@ -1,6 +1,6 @@
 /* unitmem.nds (sw/tests build, no calico): ARM9 memory and DMA timing per
    unit, the rows of hwref memtime v2 (docs/hw-reference.md "memtime"; DS
-   values in run 35) for the core's scorecard (docs/unit-scorecard.md).
+   values in run 35) for the core's scorecard (docs/archive/unit-scorecard.md).
    Values: system cycles (33.5 MHz, TM0 F/1 + TM1 cascade) per access x 100,
    differential over N1/N2 loop iterations, best of 5 after a warm-up.
    MPU as calico (cputime): main RAM C1B1; plus region 5 over an 8 KiB

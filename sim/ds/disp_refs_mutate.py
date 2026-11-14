@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Deliberate bugs in rtl/ds/nds_disp_refs.sv that sim/ds/disp_refs_test.sh
 must catch.
-  disp_refs_mutate.py VERILATOR BUILD_DIR"""
+  disp_refs_mutate.py VERILATOR BUILD_DIR
+FE=1 in the environment: the test runs the FE=1 build, and the falling-edge read's own mutations are added."""
 import os
 import shutil
 import subprocess
@@ -25,6 +26,16 @@ MUTATIONS = [
      "if (!done && qv[k] && qa[k] == c_a && !(dr && dk == k)) begin\n                    qd[k] <= c_wd; done = 1'b1;",
      "if (1'b0) begin\n                    qd[k] <= c_wd; done = 1'b1;"),
 ]
+
+# FE=1 only (the g_fe block: the copies in M10K read on the falling edge)
+MUTATIONS_FE = [
+    ("the falling-edge read one entry off",
+     "mc_q <= mem_c[{1'b0, c_a}];", "mc_q <= mem_c[{1'b0, c_a} + 4'd1];"),
+    ("the CPU port's copy read on the rising edge (a clock late)",
+     "always_ff @(negedge clk) mc_q <=", "always_ff @(posedge clk) mc_q <="),
+]
+if os.environ.get("FE") == "1":
+    MUTATIONS = MUTATIONS + MUTATIONS_FE
 
 
 def main():

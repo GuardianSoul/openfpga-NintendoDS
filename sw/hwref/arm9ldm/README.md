@@ -7,7 +7,7 @@ three-probe batch. No deployment follows from building it.
 
 The ready ROM, original objects, exact serial build/check driver and
 software-only qualification are in the capsule linked from
-[the measurement note](../../../docs/arm9ldm-v1.md). The driver expects a
+[the measurement note](../../../docs/archive/arm9ldm-v1.md). The driver expects a
 private `sdk/` copy of devkitARM, Calico, libnds and ndstool plus the existing
 qualified Census22 CLI. A coordinator-allocated worker is required to build
 or simulate; checking saved CSV files needs no simulation.

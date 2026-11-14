@@ -8,7 +8,7 @@ unitgx, unitcpu; run with --plus stop_done=1, which prints "value I V" per
 result row). --gx takes the geometry rows from tools/scorecard/gxbodies.py
 (the engine's own clocks in tb_geom) in the main table; --strict also
 prints unitgx's CPU-visible DMA-fed body timings in a separate table.
-Prints docs/unit-scorecard.md's measured table (markdown): DS
+Prints docs/archive/unit-scorecard.md's measured table (markdown): DS
 value, the core's value per LABEL, core / DS, owner. Every DS value comes
 from a hwref capture on the test DS (docs/hw-reference.md, run named per row).
 Times are DS time (the core's timers tick at the DS rate), so a ratio > 1

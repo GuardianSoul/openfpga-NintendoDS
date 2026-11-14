@@ -20,7 +20,17 @@
 module gpu2d_bg
     import gpu2d_pkg::*;
 #(
+    parameter bit ER       = 0,   // gpu2d_cache ER (nds_top G2D_ER)
     parameter bit PERSIST  = 0,   // keep cached blocks across lines until VRAM is written
+    // CFL (with PERSIST): a capture write does not start the caches over (it writes an LCDC bank, which no
+    // BG/OBJ/ext-palette view maps). LCDC blocks (VRAM display, capture source B: the texel cache's only blocks
+    // a capture or LCDC write can change, in the map and texel caches) hit only in the job that filled them: their tag entry carries this
+    // job's number (l_gen) and a 1 in an extra top bit, the other blocks c_gen and a 0 (gpu2d_cache LGEN)
+    parameter bit CFL      = 0,
+    // AMF (with CFL): a CPU/DMA write through a BG view no longer starts the caches over; vw_blk's block range
+    // since the last job start is swept out of the map and texel caches at the next one (gpu2d_wrange)
+    parameter int THASH    = 1,   // the BG texel cache's index function (gpu2d_cache HASH): 0 c0 ^ c1 (gsdd-battle: fewer conflicts)
+    parameter int AMF      = 0,   // 2: a written range per engine, up to 256 blocks (gpu2d_wrange ENG2, SWMAX)
     parameter int MAP_IDXW = 6,   // log2 blocks per cache
     parameter int TEX_IDXW = 6,
     parameter int EXT_IDXW = 6,
@@ -33,7 +43,12 @@ module gpu2d_bg
     // clock schedule is the same as without (docs/2d-engine.md)
     parameter bit WST_RF   = 0,
     parameter bit MOSAIC   = 1,   // 0: no BG or OBJ mosaic (a fit setting; behaves as mosaic size 0)
-    parameter bit CAPTURE  = 1    // 0: no display capture (a temporary fit setting: nothing is written, DISPCAPCNT's handshake stays)
+    parameter bit CAPTURE  = 1,   // 0: no display capture (a temporary fit setting: nothing is written, DISPCAPCNT's handshake stays)
+    // CBD: in display mode 2, capture source B is the VRAM display's own halfword. Both read the bank DISPCNT
+    // selects at {line, x} (c3_cb adds DISPCAPCNT's read offset only outside mode 2), looked up for the same S3
+    // pixel and read at S4, so the texel cache's word (t_q, the display's) is capture B's: the map cache no longer
+    // fetches the same LCDC blocks a second time (Burnout's race: 23.5K of its ~240K 2D blocks a run)
+    parameter bit CBD      = 0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -52,13 +67,17 @@ module gpu2d_bg
     input  logic        cap_en,
     input  logic [3:0]  lcdc_map,    // banks A-D mapped to LCDC
     input  logic        vram_wr,     // VRAM or VRAMCNT written (PERSIST)
+    input  logic        vw_v,        // AMF: a CPU/DMA write through a BG/OBJ view, its block
+    input  blk_t        vw_blk,
     // fills: request per cache (0 map, 1 texel, 2 ext palette)
     output logic [3:0]  fill_req,    // [3]: texel prefetch, never stalls
     output blk_t [3:0]  fill_blk,
+    output logic [3:0][1:0] fill_word,  // the needed 64-bit word (pair) of each miss's block (CWF; the prefetch's 0)
     input  logic        pf_ack,      // prefetch taken (or dropped as already in flight)
     input  logic [2:0]  fill_we,
     input  blk_t        fill_fblk,   // block the beats belong to
     input  logic [1:0]  fill_beat,
+    input  logic        fill_first,
     input  logic        fill_last,
     input  logic [63:0] fill_data,
     // palette RAM (BG copy), word = 2 halfwords
@@ -295,9 +314,10 @@ module gpu2d_bg
         logic        v;
         logic [7:0]  x;
         logic [17:0] o2d;         // Output2D (pre display mode)
-        logic [22:0] c3d;         // the 3D pixel for capture A (alpha, 5:5:5 of 6:6:6)
+        logic [15:0] ca;          // capture source A (CAPCNT bit 24: the 3D pixel, else Output2D), chosen at S4 -> S5
         logic [15:0] vdisp, cbs;  // VRAM display pixel, capture source B (CAPCNT bit 25's: the FIFO or VRAM)
         logic        cbn;         // source B is null (VRAM, its bank not LCDC)
+        logic [4:0]  cevbg;       // source B's blend factor (CAPCNT EVB, at most 16), 0 when B is null: with cbn
         logic [15:0] fifo;
     } s5_t;
     typedef struct packed {
@@ -309,6 +329,9 @@ module gpu2d_bg
     } s6_t;
 
     s1_t s1; s2_t s2; s3_t s3; s4_t s4; s5_t s5; s6_t s6;
+`ifndef SYNTHESIS
+    logic [22:0] c3d_ref;         // simulation: the 3D pixel S5 held before source A moved to S4 -> S5
+`endif
     logic [18:0] s1_maddr_q;   // map read address, latched with S1
     logic [14:0] s3_eaddr_q;   // ext-palette read address, latched with S3
     logic [28:0] s3_olb;       // OBJ line buffer entry for S3 (read at S1)
@@ -322,29 +345,36 @@ module gpu2d_bg
     blk_t        m_cur, t_cur, e_cur;
     logic [1:0]  m_curw, t_curw, e_curw;
     logic        cclear;
+    logic        w_big, w_on, w_inv;
+    blk_t        w_blk;
+    gpu2d_wrange #(.SP(SP_BG), .ENG2(AMF >= 2), .SWMAX(AMF >= 2 ? 256 : 64)) u_wr (.clk, .rst, .vw_v(AMF != 0 && vw_v), .vw_blk, .take(js == J_IDLE && start),
+        .ok(!(|fill_we[1:0])), .big(w_big), .sw_on(w_on), .sw_blk(w_blk));
+    assign w_inv = w_on && !(|fill_we[1:0]);
 
     // one generation and scrub counter for this side's caches (gpu2d_cgen)
     // (the ext-palette cache with its tag in the data words scrubs words: EXT_IDXW + 2 bits)
     localparam int ESW = EXT_TAG_MLAB ? EXT_IDXW + 2 : EXT_IDXW;
     localparam int CSW = ((MAP_IDXW > TEX_IDXW ? MAP_IDXW : TEX_IDXW) > ESW ? (MAP_IDXW > TEX_IDXW ? MAP_IDXW : TEX_IDXW) : ESW);
     logic [9:0]     c_gen;
+    logic [9:0]     l_gen = 10'd1;   // CFL: the job number of the texel cache's LCDC blocks (never 0)
+    always_ff @(posedge clk) if (CFL && js == J_INIT) l_gen <= l_gen == 10'h3ff ? 10'd1 : l_gen + 10'd1;
     logic [CSW-1:0] c_scrub, c_scrub_q;
     logic           c_scrub_v;
     gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub),
         .scrub_q(c_scrub_q), .scrub_v(c_scrub_v));
     // (the map and texel caches give the halfword addressed: HALF)
-    gpu2d_cache #(.IDXW(MAP_IDXW), .HASH(1), .HALF(1)) u_mc (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[MAP_IDXW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(MAP_IDXW), .HASH(1), .HALF(1), .LGEN(CFL)) u_mc (.clk, .idle(js == J_IDLE), .gen(c_gen), .lgen(l_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[MAP_IDXW-1:0]),
         .scrub_q(c_scrub_q[MAP_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(m_ablk), .a_word(m_aword), .a_half(m_ahalf),
         .q(m_q), .hit(m_hit), .cur_blk(m_cur), .cur_word(m_curw),
-        .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
-    gpu2d_cache #(.IDXW(TEX_IDXW), .HASH(1), .HALF(1)) u_tc (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[TEX_IDXW-1:0]),
+        .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
+    gpu2d_cache #(.ER(ER), .IDXW(TEX_IDXW), .HASH(THASH), .HALF(1), .LGEN(CFL)) u_tc (.clk, .idle(js == J_IDLE), .gen(c_gen), .lgen(l_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[TEX_IDXW-1:0]),
         .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword), .a_half(t_ahalf),
         .q(t_q), .hit(t_hit), .cur_blk(t_cur), .cur_word(t_curw),
-        .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
-    gpu2d_cache #(.IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .HASH(2), .VLO(10)) u_ec (.clk, .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub[ESW-1:0]),
+        .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
+    gpu2d_cache #(.ER(ER), .IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .HASH(2), .VLO(10)) u_ec (.clk, .idle(js == J_IDLE), .gen(c_gen), .lgen(c_gen), .inv_v(1'b0), .inv_blk('0), .scrub(c_scrub[ESW-1:0]),
         .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword), .a_half(2'd0),
         .q(e_q), .hit(e_hit), .cur_blk(e_cur), .cur_word(e_curw),
-        .fill_we(fill_we[2]), .fill_blk(fill_fblk), .fill_beat, .fill_last, .fill_data);
+        .fill_we(fill_we[2]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
 
     // S1/S2/S3 track which cache read their pixel needs (latched with the address)
     logic s1_nm, s2_nt, s3_ne;
@@ -355,6 +385,7 @@ module gpu2d_bg
     assign fill_blk[0] = m_cur;
     assign fill_blk[1] = t_cur;
     assign fill_blk[2] = e_cur;
+    assign fill_word = {2'd0, e_curw, t_curw, m_curw};
     logic pipe_empty;
     assign pipe_empty = !s1.v && !s2.v && !s3.v && !s4.v && !s5.v && !s6.v;
     // texel prefetch: the prefetch pass queues each missing tile-row block
@@ -483,7 +514,7 @@ module gpu2d_bg
         // uses it (DoCapture: srcB + (offset & 0xFFFF) + x); the other passes
         // look up their map entry for S0's
         c3_cb   = {j_line, s3.x} + (c_dmode != 2'd2 ? {capcnt[27:26], 14'd0} : 16'd0);
-        c3_nm   = c_capB && {1'b0, s3.x} < c_capw;
+        c3_nm   = c_capB && {1'b0, s3.x} < c_capw && !(CBD && c_vdisp);
         if (c_kind == K_COMP) begin
             m_ablk  = blk_of(SP_LCDC, j_eng, {st.dispcnt[19:18], c3_cb, 1'b0});
             m_aword = c3_cb[3:2];
@@ -589,6 +620,10 @@ module gpu2d_bg
     logic [3:0]  omx;
     logic        ob_latch;
     logic [5:0]  wmask;       // (registered with s3_olb: s3_win -> wmask -> s3_e -> s4.ka/kb, #1329 -0.08 ns)
+    // the layer's window bit and the OBJ-over-layer compare, taken with s3_olb and the layer's flag a register (plan_k ->
+    // c_bg/c_prio -> s3_pre/s3_bgop -> s4.ka/kb, RC2b #1851 -0.62 ns, #1852 -0.10 ns); c_bg and c_prio hold for the pass
+    logic        s3_wbg, s3_ogt, ob_lgt, ob_gt;
+    logic [7:0]  c_bf;        // 8'd1 << c_bg
     logic [15:0] s3_col;
     logic [17:0] s3_c18;
     px_t         s3_bg;
@@ -598,27 +633,28 @@ module gpu2d_bg
         // OBJ X mosaic (SoftRenderer2D::ApplySpriteMosaicX), left to right
         ob_latch = omx == 4'd0 || !s3_olb[24] || !ob_lat[24] || s3_olb[26:25] < ob_lat[26:25];
         ob = (!MOSAIC || st.obj_mos_w == 4'd0 || ob_latch) ? s3_olb : ob_lat;
+        ob_gt = (!MOSAIC || st.obj_mos_w == 4'd0 || ob_latch) ? s3_ogt : ob_lgt;
         // BG colour
         s3_col = s3.direct ? {1'b0, s3.dcol[14:0]} : s3.ext ? hw_of(e_q, s3_eaddr_q[2:1])
                                                        : (s3.pal_hi ? pal_rdata[31:16] : pal_rdata[15:0]);
         s3_c18 = c15to18(s3_col);
         if (c_3d) begin
             s3_bg = {s3_l3d[21:16], s3_l3d[13:8], s3_l3d[5:0], s3_l3d[31:24] | 8'h40};
-            s3_bgop = s3_l3op && wmask[0];
+            s3_bgop = s3_l3op && s3_wbg;
         end else begin
-            s3_bg = {s3_c18, 8'd1 << c_bg};
-            s3_bgop = s3.op && wmask[c_bg];
+            s3_bg = {s3_c18, c_bf};
+            s3_bgop = s3.op && s3_wbg;
         end
         s3_in = s3_lb;
         objq = st.layer_enable[4] && ob[27] && wmask[4];
-        s3_pre = !s3_in.done && objq && (c_comp || ob[26:25] > c_prio);
+        s3_pre = !s3_in.done && objq && ob_gt;
         s3_e = s3_in;
         if (s3_pre) begin
             s3_e.sec = s3_e.top;
             s3_e.top = px_t'({c15to18(ob[15:0]), ob[23:16]});
             s3_e.done = 1'b1;
         end
-        if (!c_comp && s3_bgop) begin
+        if (s3_bgop) begin
             s3_e.sec = s3_e.top;
             s3_e.top = s3_bg;
         end
@@ -648,7 +684,7 @@ module gpu2d_bg
         // t2 for each pixel S3 can make second, chosen by S3's own selects
         // (the same value as from f2, a level shorter)
         t2_sec = t2_of(s3_in.sec.f, bldcnt); t2_top = t2_of(s3_in.top.f, bldcnt); t2_ob = t2_of(ob[23:16], bldcnt);
-        t2 = (!c_comp && s3_bgop) ? (s3_pre ? t2_ob : t2_top) : (s3_pre ? t2_top : t2_sec);
+        t2 = s3_bgop ? (s3_pre ? t2_ob : t2_top) : (s3_pre ? t2_top : t2_sec);
         ka = 6'd32; kb = 6'd0; b63 = 1'b0;
         if (f1[7] && t2) begin
             if (f1[6]) begin ka = {f1[4:0], 1'b0}; kb = 6'(6'd32 - {f1[4:0], 1'b0}); end
@@ -707,10 +743,11 @@ module gpu2d_bg
         end
         if (white) mb = 18'h3FFFF;
         // capture (DoCapture)
-        if (capcnt[24]) ca = {s5.c3d[22:15] != 8'd0, s5.c3d[14:0]};
-        else            ca = {1'b1, s5.o2d[17:13], s5.o2d[11:7], s5.o2d[5:1]};
-        // (source B's null gates the B product, not its multiplier input; both chosen at S4 -> S5: CAPCNT, the LCDC map
-        // and DISPCNT change only between jobs)
+        ca = s5.ca;
+        // (source B's null gates B's factor, registered at S4 -> S5 with cbn (s5.cevbg), so B's factor is the same one LUT
+        // as A's and the two products and the rounding constant form one sum-of-two DSP block per channel (#2485: the gate
+        // at S5, s5.cbn -> s6.cdata +1.249 ns against the colour effect's +1.458); CAPCNT, the LCDC map and DISPCNT change
+        // only between jobs)
         cbnull = s5.cbn;
         cbs = s5.cbs;
         cb = cbnull ? 16'd0 : cbs;
@@ -721,7 +758,7 @@ module gpu2d_bg
             2'd1: cw = cb;
             default: begin
                 for (int i = 0; i < 3; i++) begin
-                    csum[i] = 11'(ca[i*5 +: 5] * (ca[15] ? ceva : 5'd0)) + (cbnull ? 11'd0 : 11'(cbs[i*5 +: 5] * (cbs[15] ? cevb : 5'd0))) + 11'd8;
+                    csum[i] = 11'(ca[i*5 +: 5] * (ca[15] ? ceva : 5'd0)) + 11'(cbs[i*5 +: 5] * (cbs[15] ? s5.cevbg : 5'd0)) + 11'd8;
                     cw[i*5 +: 5] = csum[i][10:4] > 7'd31 ? 5'd31 : csum[i][8:4];
                 end
                 cw[15] = (ceva != 0 && ca[15]) || (cevb != 0 && cb[15]);
@@ -729,6 +766,14 @@ module gpu2d_bg
         endcase
     end
 
+`ifndef SYNTHESIS
+    // simulation: s5.ca is the source A the blend chose at S5 from the 3D pixel / Output2D and CAPCNT bit 24
+    always_ff @(posedge clk) begin
+        if (s5.v && s5.ca !== (capcnt[24] ? {c3d_ref[22:15] != 8'd0, c3d_ref[14:0]} : {1'b1, s5.o2d[17:13], s5.o2d[11:7], s5.o2d[5:1]}))
+            $error("gpu2d_bg: capture source A %h, the S5 select's %h (capcnt %h)", s5.ca,
+                   capcnt[24] ? {c3d_ref[22:15] != 8'd0, c3d_ref[14:0]} : {1'b1, s5.o2d[17:13], s5.o2d[11:7], s5.o2d[5:1]}, capcnt);
+    end
+`endif
     // ---------------------------------------------------------------- sequencing
     // the RAM read of a just-written head is not ready yet: bypass it
     always_ff @(posedge clk) begin
@@ -815,7 +860,7 @@ module gpu2d_bg
     assign cclear = js == J_INIT && (!PERSIST || dirty);
     always_ff @(posedge clk)
         if (rst) dirty <= 1'b1;
-        else if (vram_wr || (cap_we && cap_ready)) dirty <= 1'b1;
+        else if (vram_wr || w_big || (!CFL && cap_we && cap_ready)) dirty <= 1'b1;
         else if (cclear) dirty <= 1'b0;
 
     // RAM read addresses (held by the RAMs' own address mux while stalled)
@@ -855,7 +900,7 @@ module gpu2d_bg
                 J_IDLE: if (start) begin
                     js <= J_INIT; j_eng <= eng; j_line <= line; j_slot <= objslot;
                 end
-                J_INIT: js <= J_BACK;              // caches clear, backdrop read issued
+                J_INIT: if (!w_on) js <= J_BACK;   // caches clear (AMF: the written blocks swept), backdrop read issued
                 J_BACK: begin                      // backdrop arrives
                     backdrop <= c15to18(pal_rdata[15:0]);
                     first <= 1'b1;
@@ -865,6 +910,7 @@ module gpu2d_bg
                 J_PLAN: begin
                     if (pk_ok) begin
                         c_kind <= kind_t'(pk_kind[2:0]);
+                        c_bf <= 8'd1 << pk_bg;
                         c_comp <= kind_t'(pk_kind[2:0]) == K_COMP;
                         c_3d <= kind_t'(pk_kind[2:0]) == K_3D;
                         c_pf <= PREFETCH && kind_t'(pk_kind[2:0]) != K_3D;
@@ -961,6 +1007,9 @@ module gpu2d_bg
                 s3_ne <= s2.v && s2_ext && !s2_direct && s2_op && c_kind != K_COMP && c_kind != K_3D;
                 s3_eaddr_q <= s2_eaddr;
                 wmask <= s2_wmask;
+                // c_comp folded in (it holds for the pass): RC6 #2100 2asR c_comp -> s3_pre / s3_bgop -> s4.ka, -1.89 ns
+                s3_wbg <= !c_comp && (c_3d ? s2_wmask[0] : s2_wmask[c_bg]);
+                s3_ogt <= c_comp || olb_rdata[26:25] > c_prio;
                 s3_olb <= olb_rdata;
                 s3_lb <= first ? lbe_t'({backdrop, 8'h20, 26'd0, 1'b0}) : lb_q;
                 s3_l3d <= l3d_rdata;
@@ -975,16 +1024,30 @@ module gpu2d_bg
                 s4.fifo <= fifo_rdata;
                 if (s3.v) begin
                     omx <= omx == st.obj_mos_w ? 4'd0 : omx + 4'd1;
-                    ob_lat <= ob;
+                    ob_lat <= ob; ob_lgt <= ob_gt;
                 end
                 // S4 -> S5 (composite only)
                 s5.v <= s4.v && c_kind == K_COMP;
                 s5.x <= s4.x;
                 s5.o2d <= o2d;
-                s5.c3d <= {l3d_rdata[31:24], l3d_rdata[21:17], l3d_rdata[13:9], l3d_rdata[5:1]};
+                // capture source A chosen here, as source B is (#2399 2asR: capcnt[24] -> the blend -> s6.cdata -0.530 ns)
+`ifdef G2D_CA_MUT
+                s5.ca <= {1'b1, o2d[17:13], o2d[11:7], o2d[5:1]};
+`else
+                s5.ca <= capcnt[24] ? {l3d_rdata[31:24] != 8'd0, l3d_rdata[21:17], l3d_rdata[13:9], l3d_rdata[5:1]}
+                                    : {1'b1, o2d[17:13], o2d[11:7], o2d[5:1]};
+`endif
+`ifndef SYNTHESIS
+                c3d_ref <= {l3d_rdata[31:24], l3d_rdata[21:17], l3d_rdata[13:9], l3d_rdata[5:1]};
+`endif
                 s5.vdisp <= t_q[15:0];      // (the halfword s4.x[1:0])
-                s5.cbs <= capcnt[25] ? s4.fifo : m_q[15:0];   // (m_q: the halfword of capture source B)
+                s5.cbs <= capcnt[25] ? s4.fifo : CBD && c_vdisp ? t_q[15:0] : m_q[15:0];   // (m_q: the halfword of capture source B; CBD: the display's)
                 s5.cbn <= !capcnt[25] && !lcdc_map[st.dispcnt[19:18]];
+`ifdef G2D_CEVBG_MUT
+                s5.cevbg <= capcnt[12:8] > 5'd16 ? 5'd16 : capcnt[12:8];
+`else
+                s5.cevbg <= !capcnt[25] && !lcdc_map[st.dispcnt[19:18]] ? 5'd0 : capcnt[12:8] > 5'd16 ? 5'd16 : capcnt[12:8];
+`endif
                 s5.fifo <= s4.fifo;
                 // S5 -> S6
                 s6.v <= s5.v;

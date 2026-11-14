@@ -3,7 +3,10 @@
    the core's one-request units and their read-ahead move them
    (docs/phase2-integration.md "DMA read-ahead"): runs across several
    16-byte quads from different word offsets, a decrementing destination,
-   and a run over words the CPU rewrote after a run that read near them. */
+   and a run over words the CPU rewrote after a run that read near them.
+   7-8: halfword writes to VRAM (CPU STRH, a DMA's 16-bit units), which
+   nds_vram VR_PH posts with their byte enables: read back as words, a
+   halfword over a word written just before it included. */
 #include "../common/con.h"
 #include "../common/results.h"
 #include "../common/ipc.h"
@@ -36,7 +39,7 @@ static u32 wsum(const volatile u32 *p, int n)
 int main(void)
 {
     con_init();
-    res_begin("DMA UNITS", 7);
+    res_begin("DMA UNITS", 9);
     for (int i = 0; i < 80; i++)
         src[i] = 0x9E3779B9u * (u32)(i + 7) ^ (u32)i << 24;
     VRAMCNT(4) = 0x80;                                  /* E -> LCDC */
@@ -83,6 +86,20 @@ int main(void)
     dma3(&src[40], 0x0400000C, DMA_32BIT | (2u << 21) | 8);
     res_check(6, "DMAIO", R32(0x0400000C), want);
     R32(0x0400000C) = 0;
+
+    /* 7: CPU STRH to VRAM, then a word and a halfword over its other half */
+    volatile u16 *vh = (volatile u16 *)(VRAM_E + 0x600);
+    static u16 want_h[48];
+    for (int i = 0; i < 48; i++) { want_h[i] = (u16)(src[i] >> (i & 15)); vh[i] = want_h[i]; }
+    ((volatile u32 *)vh)[10] = src[70];                 /* halfwords 20, 21 */
+    vh[21] = 0xBEEF;                                    /* its high half, posted right behind it */
+    want_h[20] = (u16)src[70]; want_h[21] = 0xBEEF;
+    res_check(7, "STRHVRAM", wsum((volatile u32 *)vh, 24), wsum((const u32 *)want_h, 24));
+
+    /* 8: DMA3 16-bit units, 40 halfwords from main RAM to VRAM */
+    for (int i = 0; i < 40; i++) ve[0x1C0 + i] = 0xFFFFFFFFu;
+    dma3(&src[10], VRAM_E + 0x700, 40);
+    res_check(8, "DMA16VR", wsum(ve + 0x1C0, 20), wsum(src + 10, 20));
     res_finish();
     for (;;)
         ;

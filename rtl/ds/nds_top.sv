@@ -25,7 +25,10 @@ module nds_top #(
     parameter integer GX_LUNIT = 1,     // GPU3D=1: gpu3d_geom LUNIT, the lighting unit (mkds-heavy: with VFIN 2, engine −17.2%)
     parameter integer GX_VFIN = 2,      // GPU3D=1: gpu3d_geom VFIN (2: VFIN-lite)
     parameter integer GX_FF = 1,        // GPU3D=1: gpu3d_geom FF, the geometry redesign (with GX_USORT, GX_LUNIT, GX_VFIN 1)
+    parameter integer GX_PAR = 2,       // GPU3D=1: gpu3d_geom GX_PAR, the number of the per-vertex parallel engine's steps, cumulative (docs/geometry-engine-par.md); 0: today's
+    parameter integer RAM_MOVE = 0,     // core_top_ds RAM_MOVE (MLAB arrays to M10K)
     parameter integer GX_GATH16 = 0,    // gpu3d_gxfront GATH16: the GX spill's gather 16 entries deep
+    parameter integer GX_FFVTX = 0,     // nds_gpu3d GX_FFVTX: the geometry engine's hardware vertex decode (with GX_FF)
     parameter integer GX_ENGM10K = 1,   // nds_gpu3d GX_ENGM10K: the engine's VC and VOC tables in M10K (0: MLAB, -2 M10K)
     parameter integer G3D_VYSM10K = 1,  // nds_gpu3d VYS_M10K: the raster front's vertex y table in M10K (0: MLAB, -1 M10K)
     parameter integer GX_SPAW = 12,     // gpu3d_gxfront SP_AW: the GX spill ring, 2^GX_SPAW entries at SDRAM byte 0x300000 (14: 128 KiB)
@@ -45,6 +48,8 @@ module nds_top #(
     // the calibrated and a harsher VRAM model (docs/2d-engine.md); the maintainer's #557
     // (256, hashed) showed KH's menu clean on hardware
     parameter integer G2D_TEX_IDXW = GPU3D != 0 ? 7 : 9,
+    parameter integer G2D_CWF = 0,          // gpu2d / nds_vram CWF: a 2D miss's block read starts at its needed 64-bit word (core_top wraps it in the SDRAM)
+    parameter integer G2D_OTEX_IDXW = 6,    // nds_disp OTEX_IDXW: the OBJ texel cache, log2 blocks (7: 128, both engines' OBJ tiles of a line stay in)
     // BG/OBJ mosaic (1); 0 drops it (~90 ALMs) when the fit needs room: no census run of
     // the maintainer's games uses it (docs/2d-engine.md)
     parameter integer G2D_MOSAIC = 1,
@@ -75,21 +80,39 @@ module nds_top #(
     parameter integer G3D_FPCLR = 0,    // gpu3d_raster FPCLR: the final pass's clear waits from F_3 on
     parameter integer G3D_YLIM2 = 0,    // nds_gpu3d YLIM2: the store two lines further past the ring's writes
     parameter integer G3D_NX2 = 0,      // nds_gpu3d NX2: the 3D ring also fetches line dline+2 (the display skips a late 2D line)
+    parameter integer G2D_ER = 0,       // nds_disp ER: the 2D caches hit a block's word as it arrives (early restart)
+    parameter integer G2D_CBD = 0,      // nds_disp CBD: display-mode-2 capture source B from the display's own texel lookup
+    // G2D_CFL: the 2D engine's caches (PERSIST) keep their BG/OBJ blocks through a capture write and a CPU/DMA
+    // write through the LCDC or ARM7 view: those land in banks no BG/OBJ/ext-palette view maps (capture writes
+    // LCDC banks only: gpu2d_bg cap_hit). The map and texel caches' LCDC blocks (VRAM display, capture source B)
+    // hit only in the job that filled them (gpu2d_bg CFL). A VRAMCNT change still starts every cache over, so a
+    // captured bank remapped to BG/OBJ is read fresh. 2: also a CPU/DMA write through a BG/OBJ view drops only
+    // its own blocks (gpu2d_wrange) instead of starting the caches over. 0: every VRAM and capture write did
+    parameter integer G2D_CFL = 0,
+    parameter integer G2D_THASH = 1,    // gpu2d_bg THASH: the BG texel cache's index function (1 the HASH 1 fold, 0 c0 ^ c1)
     parameter integer G2D_HURRY = 0,    // nds_disp HURRY_AT: the BG job's blocks urgent after that many clocks (hurry2d; 0: never)
     parameter integer G3D_RH_AT = 0,    // nds_gpu3d RH_AT: the ring's needed-line read urgent after that many clocks (rg_hurry; 0: never)
     parameter integer G3D_RPRI = 0,     // nds_gpu3d RPRI: the 3D ring reads the needed line before writing a staged one
     parameter integer G3D_LLR = 0,      // nds_gpu3d LLR: a late line shows the polygons drawn so far over the clear colour (DS rule)
     parameter integer CAP_CHAIN = 0,    // nds_vram CAP_CHAIN: capture word pairs through cw_* (core_top_ds)
+    parameter integer CAP_DB = 0,       // nds_vram CAP_DB: an even capture halfword taken while the previous word waits
     parameter integer VR_POST = 0,      // nds_vram VR_POST: CPU and DMA word writes through cw_* too
     parameter integer VR_RDB = 0,       // nds_vram VR_RDB: reads through an 8-word line
     parameter integer VR_PASS = 0,      // nds_vram VR_PASS: 2D reads wait only for posted words in their lines
     parameter integer VR_WB = 0,
+    parameter integer VR_WBQ = 0,
+    parameter integer VR_HITB = 0,
+    parameter integer VR_HPAIR = 0,     // nds_vram VR_HPAIR: posted halfword pairs merged into one word      // nds_vram VR_HITB: CPU/DMA read-line hits while 2D block words drain       // nds_vram VR_WBQ: full-word VRAM writes queued behind VR_WB's buffer
     parameter integer VR_CWF = 0,
     parameter integer VR_HIT = 0,
     parameter integer VR_PF = 0,        // nds_vram VR_PF: next-line prefetch for DMA reads
+    parameter integer VR_PFS = 0,       // nds_vram VR_PFS: the prefetch's lines in sets by line bit 5, the read line in its M10K
+    parameter integer VR_PH = 0,
+    parameter integer RB_M10K = 0,      // nds_vram RB_M10K: the read line in an M10K (read a clock early)        // nds_vram VR_PH: halfword VRAM writes posted (cw_he)
     parameter integer VR_PDRAIN = 0,    // nds_vram VR_PDRAIN: a post ends when its own word leaves the FIFO
     parameter integer VR_YIELD = 0,     // nds_vram VR_YIELD: CPU waits give way to a 2D block request       // nds_vram VR_HIT: a read-line hit answered from S_IDLE       // nds_vram VR_CWF: a line fill acks the read with its word        // nds_vram VR_WB: a full-word write is acked from a one-word buffer
     parameter integer G3D_STORE_SD = 0, // nds_gpu3d STORE_SD: the polygon store in SDRAM, not PSRAM (needs GX_SPILL)
+    parameter integer G3D_RING3 = 0,    // nds_gpu3d RING3 (core_top_ds G3D_RING3)
     parameter integer G3D_RING = 0,     // nds_gpu3d RING: the 3D line ring in SDRAM (core_top_ds RING)
     parameter integer G3D_DSHARE = 0,   // gpu3d_raster DSHARE: one front divider (edge + AA coverage)
     parameter integer G3D_LB2 = 0,      // gpu3d_raster LB2: line buffers as two RAMs per layer (2:1 read muxes)
@@ -130,6 +153,7 @@ module nds_top #(
     parameter integer A9_EVB = 0,    // 1: the ARM9's dirty fill victim goes to an eviction buffer, the fill starts at once (arm9_mem EVB)
     parameter integer A9_XD = 0,      // ARM9 cache sets: 2^XD (D) / 2^XI (I) times the DS's
     parameter integer A9_XI = 0,
+    parameter integer A9_IWAYS = 0,     // the ARM9 I-cache's ways (0: as the D-cache's)
     parameter integer A9_OPT = 0,     // ARM9 speed options (arm_core / arm9_mem bitmask)
     parameter integer A9_EARLYD = 0, // 1: a refused D access's fetch hold ends with the fill's last word (arm9_mem EARLYD)
     parameter integer A9_EVBW = 0,   // 1: the eviction buffer drains as one block write (PSRAM_BW; CPU_FAST = 0)
@@ -137,6 +161,7 @@ module nds_top #(
     parameter integer A9_SOLO = 0,
     parameter integer MR_BLOCK = 1,  // 1: the ARM9's 32-byte main-RAM blocks (mr_n8/mr_wnext; nds_fabric); on with 3D off (KH speed set)
     parameter integer A7_IO = 0,     // 1: an ARM7 request goes before an ARM9 DMA unit (nds_fabric A7_IO; the DS's ARM7 bus)
+    parameter integer DMA_FILL1 = 0, // 1: a DMA run from a fill word reads it once (sys_dma FILL1)
     parameter integer DMA_UNIT = 0,  // 1: an ARM9 DMA unit from main RAM is one fabric request (sys_dma FAST, nds_fabric DMA_FAST)
     parameter integer DMA_RA = 0,    // 1 (with DMA_UNIT): a unit's write reads the next source quad ahead (nds_fabric DMA_RA)
     parameter integer DMA_B8 = 0,    // nds_fabric DMA_B8: DMA lines of 32 bytes, one PSRAM burst
@@ -144,12 +169,17 @@ module nds_top #(
     parameter integer DMA_PACE_GX = 80, // nds_fabric DMA_PACE_GX: the GX FIFO route's floor, eighths of a clk_sys
     parameter integer DMA_PW = 0,         // nds_fabric DMA_PW: a DMA's main-RAM word write posted
     parameter integer PO_WD = 0,          // nds_fabric PO_WD: palette/OAM writes skip S_RAM
+    parameter integer DMA_IOF = 0,
+    parameter integer G2D_HBD = 1,        // nds_disp HBD: the HBlank DMA after the line's BG jobs (ds-rules R396)
+    parameter integer GX_REL = 1,         // nds_fabric GX_REL: an ARM9 waiting on the geometry engine releases the bus
+    parameter integer DMA_PMM = 0,        // nds_fabric DMA_PMM: main->main DMA reads paced to the DS (36)        // nds_fabric DMA_IOF: DMA I/O / GX-port writes acked without S_DONE
     parameter integer DMA_GX = 0     // 1 (with DMA_UNIT, GPU3D): a unit's GX FIFO/command word posted to the geometry engine (nds_fabric DMA_GX); 3: the ARM9's too
 ) (
     input  logic        clk,
     input  logic        clk_cpu,        // CPU_FAST: the CPUs' clock (unused otherwise)
     input  logic        clk_2x,         // 2 x clk_sys, phase 0 (double-pumped RAMs: G3D_PUMP)
     input  logic        rst,
+    input  logic        rst_3d,         // rst's own synchroniser copy for nds_gpu3d (core_top_ds rst_3d_s: the same value every clock)
     input  logic        go,
     input  logic [31:0] rom_size,
     input  logic        mem_dirty,      // 1: memories power up random (the Pocket); 0: zero (the simulation models)
@@ -192,6 +222,7 @@ module nds_top #(
     output logic        cw_valid,       // the display capture's word pairs for the SDRAM write FIFO (nds_vram CAP_CHAIN)
     output logic [23:0] cw_addr,
     output logic [31:0] cw_data,
+    output logic [1:0]  cw_he,              // VR_PH: the word's halves to write
     input  logic        cw_ack,
     output logic        rg_wreq,
     output logic [23:0] rg_waddr,
@@ -211,6 +242,7 @@ module nds_top #(
     output logic        vm_req,
     output logic        vm_we,
     output logic        vm_blk,
+    output logic        vm_tex,             // nds_vram: the block request is a 3D texture/palette block (TX_HURRY)
     output logic [20:2] vm_addr,
     output logic [3:0]  vm_be,
     output logic [31:0] vm_wdata,
@@ -414,13 +446,16 @@ module nds_top #(
 `ifndef ALTERA_RESERVED_QIS   // (Quartus rejects $test$plusargs)
     // simulation (+a7chk): a shadow of the SRAM, written by every writer
     // (ARM7 stores as the port accepts them, the others as they complete);
-    // every cached ARM7 load and fetch must return its word
+    // every cached ARM7 load and fetch must return its word. A byte nobody
+    // has written since the start (a state import loads the SRAM directly)
+    // is learnt from its first read; the known bytes are checked.
     logic [31:0] a7sh [0:65535];
+    logic [3:0]  a7sk [0:65535];        // the shadow's known bytes
     logic        a7chk = 1'b0;
     integer      a7bad = 0;
     initial begin
         a7chk = $test$plusargs("a7chk");
-        for (int i = 0; i < 65536; i++) a7sh[i] = 32'd0;
+        for (int i = 0; i < 65536; i++) begin a7sh[i] = 32'd0; a7sk[i] = 4'd0; end
     end
     // (re-read now and then: a loaded checkpoint brings the saving run's)
     logic [19:0] a7_rd = '0;
@@ -428,22 +463,90 @@ module nds_top #(
         a7_rd <= a7_rd + 1'b1;
         if (a7_rd == 20'd0) begin a7chk <= $test$plusargs("a7chk"); a7_dbg <= $test$plusargs("a7dbg"); end
     end
+    function automatic logic [31:0] a7k_mask(input logic [3:0] k);
+        return {{8{k[3]}}, {8{k[2]}}, {8{k[1]}}, {8{k[0]}}};
+    endfunction
+    wire [15:0] a7c_da = u_cpud.g_a7c.u_p7.da_xa[17:2], a7c_ia = u_cpud.g_a7c.u_p7.ia_xa[17:2];
+    wire        a7c_d = a7_d_ok && u_cpud.g_a7c.u_p7.da_r == 2'd2 && !u_cpud.g_a7c.u_p7.da_w && !u_cpud.g_a7c.u_p7.prot_q;
+    wire        a7c_i = a7_i_ok && u_cpud.g_a7c.u_p7.ia_r == 2'd2;
     always_ff @(posedge clk) if (a7chk) begin
+        // reads first: learn the unknown bytes (writes this cycle land after them)
+        if (a7c_d) begin
+            if (((a7_d_rdata ^ a7sh[a7c_da]) & a7k_mask(a7sk[a7c_da])) != 0) begin
+                a7bad <= a7bad + 1;
+                if (a7bad < 8) $display("a7chk: load %h (SRAM %h) = %h, expected %h (known bytes %b)", a7_d_addr_q, u_cpud.g_a7c.u_p7.da_xa, a7_d_rdata, a7sh[a7c_da], a7sk[a7c_da]);
+            end
+            a7sh[a7c_da] <= a7_d_rdata; a7sk[a7c_da] <= 4'hF;
+        end
+        if (a7c_i) begin
+            if (((a7_i_rdata ^ a7sh[a7c_ia]) & a7k_mask(a7sk[a7c_ia])) != 0) begin
+                a7bad <= a7bad + 1;
+                if (a7bad < 8) $display("a7chk: fetch SRAM %h = %h, expected %h (known bytes %b)", u_cpud.g_a7c.u_p7.ia_xa, a7_i_rdata, a7sh[a7c_ia], a7sk[a7c_ia]);
+            end
+            if (!(a7c_d && a7c_da == a7c_ia)) begin a7sh[a7c_ia] <= a7_i_rdata; a7sk[a7c_ia] <= 4'hF; end
+        end
         if (u_cpud.g_a7c.u_p7.su_v && u_cpud.g_a7c.u_p7.su_a[17:14] != 4'b0110)
-            for (int b = 0; b < 4; b++) if (u_cpud.g_a7c.u_p7.su_be[b]) a7sh[u_cpud.g_a7c.u_p7.su_a][b*8 +: 8] <= u_cpud.g_a7c.u_p7.su_d[b*8 +: 8];
+            for (int b = 0; b < 4; b++) if (u_cpud.g_a7c.u_p7.su_be[b]) begin
+                a7sh[u_cpud.g_a7c.u_p7.su_a][b*8 +: 8] <= u_cpud.g_a7c.u_p7.su_d[b*8 +: 8]; a7sk[u_cpud.g_a7c.u_p7.su_a][b] <= 1'b1;
+            end
         if (fr_done && fr_we && u_frarb.own != 2'd2)
-            for (int b = 0; b < 4; b++) if (fr_be[b]) a7sh[fr_addr][b*8 +: 8] <= fr_wdata[b*8 +: 8];
-        if (a7_d_ok && u_cpud.g_a7c.u_p7.da_r == 2'd2 && !u_cpud.g_a7c.u_p7.da_w && !u_cpud.g_a7c.u_p7.prot_q && a7_d_rdata != a7sh[u_cpud.g_a7c.u_p7.da_xa[17:2]]) begin
-            a7bad <= a7bad + 1;
-            if (a7bad < 8) $display("a7chk: load %h (SRAM %h) = %h, expected %h", a7_d_addr_q, u_cpud.g_a7c.u_p7.da_xa, a7_d_rdata, a7sh[u_cpud.g_a7c.u_p7.da_xa[17:2]]);
-        end
-        if (a7_i_ok && u_cpud.g_a7c.u_p7.ia_r == 2'd2 && a7_i_rdata != a7sh[u_cpud.g_a7c.u_p7.ia_xa[17:2]]) begin
-            a7bad <= a7bad + 1;
-            if (a7bad < 8) $display("a7chk: fetch SRAM %h = %h, expected %h", u_cpud.g_a7c.u_p7.ia_xa, a7_i_rdata, a7sh[u_cpud.g_a7c.u_p7.ia_xa[17:2]]);
-        end
+            for (int b = 0; b < 4; b++) if (fr_be[b]) begin a7sh[fr_addr][b*8 +: 8] <= fr_wdata[b*8 +: 8]; a7sk[fr_addr][b] <= 1'b1; end
     end
     logic [31:0] a7_d_addr_q;
     always_ff @(posedge clk) a7_d_addr_q <= a7_d_addr;
+`endif
+`ifndef ALTERA_RESERVED_QIS   // (Quartus rejects $test$plusargs)
+    // simulation (+a7prof): the ARM7's port answers per access type, cumulative, every
+    // 1,117,170 clocks (a 60 Hz frame): ok / refused (a refused request is replayed: one
+    // waiting cycle). Types: fetch {SRAM-cached, main RAM, other}, data {SRAM-cached,
+    // main RAM, sound I/O 0x04000400-5FF, other I/O, VRAM, other}; SRAM-cached split
+    // into ARM7 WRAM, shared WRAM, BIOS7. Plus retired instructions and idle cycles.
+    logic        a7p_on = 1'b0;
+    initial a7p_on = $test$plusargs("a7prof");
+    longint      a7p_ok [0:11], a7p_no [0:11], a7p_ret = 0, a7p_idle = 0, a7p_t = 0;
+    initial for (int k = 0; k < 12; k++) begin a7p_ok[k] = 0; a7p_no[k] = 0; end
+    logic        a7p_iv = 1'b0, a7p_dv = 1'b0, a7p_dw = 1'b0;
+    logic [31:0] a7p_ia = '0, a7p_da = '0, a7p_lia = '0;
+    integer      a7p_fd = 0;
+    string       a7p_fn;
+    initial if ($value$plusargs("a7trace=%s", a7p_fn)) begin a7p_fd = $fopen(a7p_fn, "w"); a7p_on = 1'b1; end
+    function automatic int a7p_sram(input logic [31:0] a);   // 0 WRAM, 1 shared, 2 BIOS, -1 not cached
+        if (a[31:14] == 18'd0) return 2;
+        if (a[31:24] == 8'h03) return a[23] ? 0 : 1;
+        return -1;
+    endfunction
+    function automatic int a7p_fk(input logic [31:0] a);
+        int s = a7p_sram(a);
+        if (s >= 0) return s;                                  // 0-2
+        return a[31:24] == 8'h02 ? 3 : 4;
+    endfunction
+    function automatic int a7p_dk(input logic [31:0] a);
+        int s = a7p_sram(a);
+        if (s >= 0) return 5 + s;                              // 5-7
+        if (a[31:24] == 8'h02) return 8;
+        if (a[31:24] == 8'h04) return (a[23:0] >= 24'h400 && a[23:0] < 24'h600) ? 9 : 10;
+        return 11;                                             // VRAM and the rest
+    endfunction
+    always_ff @(posedge clk) if (a7p_on) begin
+        a7p_iv <= a7_i_req; a7p_ia <= a7_i_addr;
+        a7p_dv <= a7_d_req; a7p_da <= a7_d_addr; a7p_dw <= a7_d_we;
+        if (a7p_iv) begin if (a7_i_ok) a7p_ok[a7p_fk(a7p_ia)]++; else a7p_no[a7p_fk(a7p_ia)]++; end
+        if (a7p_dv) begin if (a7_d_ok) a7p_ok[a7p_dk(a7p_da)]++; else a7p_no[a7p_dk(a7p_da)]++; end
+        if (dbg_retire && dbg_tid) a7p_ret++;
+        if (!a7_i_req && !a7_d_req) a7p_idle++;
+        a7p_t++;
+        // +a7trace=FILE: each answered access, "clock I|R|W address" (a fetch only when its word changes)
+        if (a7p_fd != 0 && a7p_iv && a7_i_ok && a7p_ia != a7p_lia) begin
+            $fdisplay(a7p_fd, "%0d I %h", a7p_t, a7p_ia); a7p_lia <= a7p_ia;
+        end
+        if (a7p_fd != 0 && a7p_dv && a7_d_ok) $fdisplay(a7p_fd, "%0d %s %h", a7p_t, a7p_dw ? "W" : "R", a7p_da);
+        if (a7p_t % 1117170 == 0) begin
+            $write("a7prof t=%0d ret=%0d idle=%0d", a7p_t, a7p_ret, a7p_idle);
+            if (a7chk) $write(" a7chk_bad=%0d", a7bad);
+            for (int k = 0; k < 12; k++) $write(" %0d/%0d", a7p_ok[k], a7p_no[k]);
+            $write("\n");
+        end
+    end
 `endif
     end endgenerate
 `ifndef ALTERA_RESERVED_QIS
@@ -500,9 +603,14 @@ module nds_top #(
     // ld_fin instead of with it, the loader's handover only
     reg cpu_rst_q = 1'b1;
     always_ff @(posedge clk) cpu_rst_q <= rst || !ld_fin;
-    cpu_domain #(.CPU_FAST(CPU_FAST), .ARM9_WAYS(GPU3D ? 2 : 4), .ARM7_CACHE(ARM7_CACHE),
+    // the same reset, two more copies kept apart so the fitter places each by its own CPU (#2309: cpu_rst_q -> arm9_core
+    // eu.imm -0.240 ns, a reset register far from the execute stage; -> arm7_ds -> the ARM7 port's rp_a +0.215 ns)
+    (* preserve, dont_merge *) reg cpu_rst9_q = 1'b1;
+    (* preserve, dont_merge *) reg cpu_rst7_q = 1'b1;
+    always_ff @(posedge clk) begin cpu_rst9_q <= rst || !ld_fin; cpu_rst7_q <= rst || !ld_fin; end
+    cpu_domain #(.CPU_FAST(CPU_FAST), .ARM9_WAYS(GPU3D ? 2 : 4), .ARM9_IWAYS(A9_IWAYS), .ARM7_CACHE(ARM7_CACHE),
                  .A7_IL(A7_IL), .A7_DL(A7_DL), .A9_BURST(A9_BURST), .A9_EVB(A9_EVB), .A9_EVBW(A9_EVBW), .A9_EARLYD(A9_EARLYD), .A7_BOOTF(BOOT_SRAM), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .MR_BLOCK(MR_BLOCK), .A9_SOLO(A9_SOLO)) u_cpud (
-        .clk, .clk_cpu, .rst, .cpu_rst(cpu_rst_q),
+        .clk, .clk_cpu, .rst, .cpu_rst(cpu_rst_q), .cpu_rst9(cpu_rst9_q), .cpu_rst7(cpu_rst7_q),
         .run({!dma_busy[1], DMA9_RUN != 0 || !dma_busy[0]}), .irq({irq7, irq9}), .wake7, .wramcnt,
         .b9_n8, .b9_rvalid, .b9_wnext, .b9_req, .b9_we, .b9_addr, .b9_wdata, .b9_be, .b9_tmr, .b9_ack, .b9_rdata,
         .p7_ib, .boot_qa, .p7_db, .p7_dboot, .boot_qb,
@@ -527,7 +635,9 @@ module nds_top #(
     logic [31:0] dm_addr, dm_wdata, dm_rdata, dm_dst;
     logic        dm_unit, dm_more;
     logic        dx_valid, dx_ready, dx_idle;     // DMA_GX: a unit's word posted to the geometry engine
-    logic        io_req, io_pre, io_cpu, io_we, io_ack;
+    logic        io_req, io_pre, io_tmr, io_cpu, io_we, io_ack;
+    logic        gx_park, gxp_done;                 // nds_fabric GX_REL: the parked geometry read
+    logic [31:0] gxp_rdata;
     logic [3:0]  io_be;
     logic [23:2] io_addr;
     logic [31:0] io_wdata, io_rdata;
@@ -566,7 +676,7 @@ module nds_top #(
     logic [31:0] pal_cq, oam_cq;
     logic        oam_cre, oam_cgnt;
     logic [7:0] io_tmr_oh;               // timer writes, decoded by the fabric on its grant edge
-    nds_fabric #(.A9_CWF((A9_OPT >> 30) & 1), .MR_BLOCK(MR_BLOCK), .BOOT_SRAM(BOOT_SRAM), .OAM_SHARE(OAM_SHARE), .A7_IO(A7_IO), .DMA_FAST(DMA_UNIT != 0), .DMA_RA(DMA_RA), .DMA_B8(DMA_B8), .DMA_PACE(DMA_PACE), .DMA_PACE_GX(DMA_PACE_GX), .DMA_GX(GPU3D != 0 ? DMA_GX : 0), .DMA_PW(DMA_PW), .PO_WD(PO_WD)) u_fab (.clk, .rst, .wramcnt, .pb_busy(use_d),
+    nds_fabric #(.A9_CWF((A9_OPT >> 30) & 1), .MR_BLOCK(MR_BLOCK), .BOOT_SRAM(BOOT_SRAM), .OAM_SHARE(OAM_SHARE), .A7_IO(A7_IO), .DMA_FAST(DMA_UNIT != 0), .DMA_RA(DMA_RA), .DMA_B8(DMA_B8), .DMA_PACE(DMA_PACE), .DMA_PACE_GX(DMA_PACE_GX), .DMA_GX(GPU3D != 0 ? DMA_GX : 0), .DMA_PW(DMA_PW), .PO_WD(PO_WD), .DMA_IOF(DMA_IOF), .GX_REL(GX_REL), .DMA_PMM(DMA_PMM)) u_fab (.clk, .rst, .wramcnt, .pb_busy(use_d),
         .dm_req, .dm_we, .dm_cpu, .dm_size32, .dm_addr, .dm_unit, .dm_more, .dm_dst, .dx_valid, .dx_ready, .dx_idle, .dm_wdata, .dm_ack, .dm_rdata,
         .a9_req(b9_req && !(DMA9_RUN != 0 && dma_busy[0])), .a9_we(b9_we), .a9_addr(b9_addr), .a9_be(b9_be), .a9_tmr(b9_tmr), .a9_wdata(b9_wdata),
         .a9_ack(b9_ack), .a9_rdata(b9_rdata), .a9_n8(b9_n8), .a9_rvalid(b9_rvalid), .a9_wnext(b9_wnext),
@@ -577,7 +687,7 @@ module nds_top #(
         .mr_ack(fm_ack), .mr_rvalid(fm_rvalid), .mr_rdata, .mr_n8(fm_n8), .mr_wnext(fm_wnext),
         .fx_req, .fx_we, .fx_addr, .fx_be, .fx_wdata, .fx_done, .fx_rdata(fr_rdata),
         .boot_addr(f_boot_a), .boot_q(boot_qb), .ram_wdata(f_wd),
-        .io_req, .io_pre, .io_cpu, .io_we, .io_be, .io_addr, .io_wdata, .io_ack, .io_rdata,
+        .io_req, .io_pre, .io_tmr, .io_cpu, .io_we, .io_be, .io_addr, .io_wdata, .io_ack, .io_rdata, .gx_park, .gxp_done, .gxp_rdata,
         .vr_req(vc_req), .vr_cpu(vc_cpu), .vr_dma(vc_dma), .vr_we(vc_we), .vr_addr(vc_addr), .vr_be(vc_be),
         .vr_wdata(vc_wdata), .vr_ack(vc_ack), .vr_rdata(vc_rdata),
         .pal_we, .oam_we, .po_waddr, .po_wdata, .po_be, .pal_cq, .oam_cre, .oam_cgnt, .oam_cq,
@@ -601,7 +711,7 @@ module nds_top #(
         .sys_req, .sys_rdata, .disp_req, .disp_rdata, .cart_req, .cart_reg, .cart_rdata,
         .spi_req, .spi_rdata, .rtc_req, .rtc_rdata,
         .snd_req, .snd_ack, .snd_rdata, .snd_real(SOUND != 0),
-        .gx_req, .gx_ack, .gx_rdata, .gx_real(GPU3D != 0), .gx_ovf, .disp3dcnt_o(disp3dcnt),
+        .gx_req, .gx_ack, .gx_rdata, .gx_real(GPU3D != 0), .gx_park, .gxp_done, .gxp_rdata, .gx_ovf, .disp3dcnt_o(disp3dcnt),
         .wf_req, .wf_ack, .wf_rdata,
         .keys, .pen_down, .lid_closed(1'b0), .rom_size, .mem_dirty, .save_info, .rtc_valid, .rtc_date, .rtc_time, .vramstat,
         .powcnt1, .powcnt2, .exmem_o(exmem_o7), .wramcnt, .vramcnt, .vramcnt_chg, .bootctl,
@@ -612,6 +722,7 @@ module nds_top #(
     logic        dma_vbl, dma_hbl, dma_dst, dma_dstop, dma_mmstop, frame_start;
     logic        g_req, g_ack, g_rvalid, d_req, d_ack, d_rvalid, t_req, t_ack, t_rvalid;
     gpu2d_pkg::blk_t g_blk, d_blk, t_blk;
+    logic [1:0]  d_word, g_word;      // G2D_CWF: the 2D block's first 64-bit word
     logic        l3d_go;
     logic [7:0]  l3d_line, l3d_raddr;
     logic [31:0] l3d_rdata;
@@ -623,17 +734,27 @@ module nds_top #(
                             vramcnt[15] && vramcnt[9:8] == 2'd0, vramcnt[7] && vramcnt[1:0] == 2'd0};
     // a VRAM write (CPU or DMA) or a VRAMCNT change: the 2D engine's caches start over
     logic        vramcnt_chg;
-    wire vram_wr = (vc_req && vc_we && vc_ack) || vramcnt_chg;
+    wire vc_2dv = vc_req && vc_we && vc_ack && !vc_cpu && !vc_addr[23];   // through a BG/OBJ view
+    wire vram_wr = (vc_req && vc_we && vc_ack && (G2D_CFL == 0 || (G2D_CFL == 1 && vc_2dv))) || vramcnt_chg;
+    // G2D_CFL 2: the write's block (gpu2d_bg blk_of: {space, engine, offset / 32}; engine B's views are 128 KB)
+    wire vw_v = G2D_CFL >= 2 && vc_2dv;
+    logic [17:0] vw_blk;
+    always_comb case (vc_addr[22:21])
+        2'd0: vw_blk = {3'd0, 1'b0, vc_addr[18:5]};          // engine A BG
+        2'd1: vw_blk = {3'd0, 1'b1, 2'b0, vc_addr[16:5]};    // engine B BG
+        2'd2: vw_blk = {3'd1, 1'b0, 1'b0, vc_addr[17:5]};    // engine A OBJ
+        default: vw_blk = {3'd1, 1'b1, 2'b0, vc_addr[16:5]}; // engine B OBJ
+    endcase
     // the 3D caches start over only on a VRAMCNT change: the CPU port (and
     // DMA) reaches the ARM7, BG, OBJ and LCDC views only (nds_vram), so no
     // write lands in a bank mapped as texture or texture palette
     wire g3d_flush = vramcnt_chg;
-    nds_disp #(.AR_RAM(DISP_AR_RAM != 0), .OAM_CPU(OAM_SHARE != 0), .WST_RF(G2D_WST_RF != 0), .TEX_IDXW(G2D_TEX_IDXW), .MOSAIC(G2D_MOSAIC != 0), .CAPTURE(G2D_CAPTURE != 0), .TAG_MLAB(G2D_TAG_MLAB != 0), .HURRY_AT(G2D_HURRY)) u_disp (.hurry2d, .clk, .rst, .vram_wr,
+    nds_disp #(.HBD(G2D_HBD != 0), .REFS_FE((RAM_MOVE & 64) != 0), .REFS_FE_S((RAM_MOVE & 128) != 0), .AR_RAM(DISP_AR_RAM != 0), .OAM_CPU(OAM_SHARE != 0), .WST_RF(G2D_WST_RF != 0), .TEX_IDXW(G2D_TEX_IDXW), .MOSAIC(G2D_MOSAIC != 0), .CAPTURE(G2D_CAPTURE != 0), .TAG_MLAB(G2D_TAG_MLAB != 0), .HURRY_AT(G2D_HURRY), .CBD(G2D_CBD != 0), .ER(G2D_ER != 0), .OTEX_IDXW(G2D_OTEX_IDXW), .CWF(G2D_CWF != 0), .CFL(G2D_CFL != 0), .THASH(G2D_THASH), .AMF(G2D_CFL >= 2 ? G2D_CFL - 1 : 0)) u_disp (.hurry2d, .clk, .rst, .vram_wr,
         .io_req(disp_req), .io_cpu, .io_we, .io_be, .io_addr(io_addr[12:2]), .io_wdata, .io_rdata(disp_rdata),
         .powcnt1, .lcdc_ab, .vcount, .line_start,
         .irq_vblank(irq_vbl), .irq_hblank(irq_hbl), .irq_vcount(irq_vct),
         .dma_vblank(dma_vbl), .dma_hblank(dma_hbl), .dma_dstart(dma_dst), .dma_dstop, .dma_mmstop, .frame_start,
-        .vr_req(d_req), .vr_blk(d_blk), .vr_ack(d_ack), .vr_rvalid(d_rvalid), .vr_rdata(g_rdata),
+        .vr_req(d_req), .vr_blk(d_blk), .vr_word(d_word), .vr_ack(d_ack), .vr_rvalid(d_rvalid), .vr_rdata(g_rdata),
         .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata,
         .cap_we, .cap_addr, .cap_data, .cap_ready,
         .pal_we, .oam_we, .po_waddr, .po_wdata, .po_be, .pal_cq, .oam_cre, .oam_cgnt, .oam_cq,
@@ -703,12 +824,12 @@ module nds_top #(
         logic [7:0]  g3_ra;           // the 3D line read after the X scroll
         logic [31:0] g3_rd;
         nds_blk_arb u_arb (.clk, .rst,
-            .a_req(d_req), .a_blk(d_blk), .a_ack(d_ack), .a_rvalid(d_rvalid),
+            .a_req(d_req), .a_blk(d_blk), .a_word(d_word), .a_ack(d_ack), .a_rvalid(d_rvalid),
             .b_req(t_req), .b_blk(t_blk), .b_ack(t_ack), .b_rvalid(t_rvalid),
-            .g_req, .g_blk, .g_ack, .g_rvalid);
-        nds_gpu3d #(.FEAT_AA(G3D_AA != 0), .FEAT_TOON(G3D_TOON != 0), .FEAT_FOG(G3D_FOG != 0), .FEAT_ATEST(G3D_ATEST != 0),
-            .FEAT_EDGE(G3D_EDGE != 0), .FEAT_SHADOW(G3D_SHADOW != 0), .FEAT_LOWER(G3D_LOWER != 0), .GX_USORT(GX_USORT != 0), .GX_LUNIT(GX_LUNIT != 0), .GX_VFIN(GX_VFIN), .GX_FF(GX_FF != 0), .GX_SPILL(GX_SPILL != 0), .STORE_SD(G3D_STORE_SD != 0), .GX_GATH16(GX_GATH16 != 0), .GX_ENGM10K(GX_ENGM10K != 0), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID != 0),
-            .TC_FAST(G3D_TCFAST != 0), .VYS_M10K(G3D_VYSM10K != 0), .TC_MIF2(G3D_TCMIF2 != 0), .TC_V2(G3D_TCV2 != 0), .TC_WAYS(G3D_TCWAYS), .TC_V2W(G3D_TCV2W), .SPO(G3D_SPO != 0), .SPO_SL(G3D_SPOSL), .SPOG(G3D_SPO != 0 && G3D_SPOG != 0), .SPOG_N(G3D_SPOGN), .TXD(G3D_TXD), .PXD(G3D_PXD), .FPSKIP(G3D_FPSKIP != 0), .TRU(G3D_TRU != 0), .TRUL(G3D_TRUL != 0), .FPCLR(G3D_FPCLR != 0), .YLIM2(G3D_YLIM2 != 0), .LLR(G3D_LLR != 0), .RPRI(G3D_RPRI != 0), .NX2(G3D_NX2 != 0), .RH_AT(G3D_RH_AT), .NXB(G3D_NXB != 0), .VREG(G3D_VREG != 0), .DSHARE(G3D_DSHARE != 0), .LB2(G3D_LB2 != 0), .LOV(G3D_LOV != 0), .EDIV4(G3D_EDIV4 != 0), .EDGE2(G3D_EDGE2 != 0), .EP2(G3D_EP2 != 0), .FDB(G3D_FDB != 0), .RING(G3D_RING != 0), .TL(G3D_TL), .PL(G3D_PL), .RESTART(G3D_RESTART != 0), .PUMP(G3D_PUMP != 0), .SWHOLD(G3D_SWHOLD != 0), .SWPC(G3D_SWPC != 0), .LMARK(G3D_LMARK != 0), .RLEAD(G3D_LEAD), .SSL(G3D_SL), .SCL(G3D_CL), .SDROP(G3D_DROP != 0)) u_gpu3d (.clk, .clk_2x, .rst, .tick, .geom_en(powcnt1[3]), .rend_en(powcnt1[2]),
+            .g_req, .g_blk, .g_word, .g_ack, .g_rvalid);
+        nds_gpu3d #(.RAM_MOVE(RAM_MOVE), .RING3(G3D_RING3 != 0), .FEAT_AA(G3D_AA != 0), .FEAT_TOON(G3D_TOON != 0), .FEAT_FOG(G3D_FOG != 0), .FEAT_ATEST(G3D_ATEST != 0),
+            .FEAT_EDGE(G3D_EDGE != 0), .FEAT_SHADOW(G3D_SHADOW != 0), .FEAT_LOWER(G3D_LOWER != 0), .GX_USORT(GX_USORT != 0), .GX_LUNIT(GX_LUNIT != 0), .GX_VFIN(GX_VFIN), .GX_FF(GX_FF != 0), .GX_FFVTX(GX_FFVTX != 0), .GX_PAR(GX_PAR), .GX_SPILL(GX_SPILL != 0), .STORE_SD(G3D_STORE_SD != 0), .GX_GATH16(GX_GATH16 != 0), .GX_ENGM10K(GX_ENGM10K != 0), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID != 0),
+            .TC_FAST(G3D_TCFAST != 0), .VYS_M10K(G3D_VYSM10K != 0), .TC_MIF2(G3D_TCMIF2 != 0), .TC_V2(G3D_TCV2 != 0), .TC_WAYS(G3D_TCWAYS), .TC_V2W(G3D_TCV2W), .SPO(G3D_SPO != 0), .SPO_SL(G3D_SPOSL), .SPOG(G3D_SPO != 0 && G3D_SPOG != 0), .SPOG_N(G3D_SPOGN), .TXD(G3D_TXD), .PXD(G3D_PXD), .FPSKIP(G3D_FPSKIP != 0), .TRU(G3D_TRU != 0), .TRUL(G3D_TRUL != 0), .FPCLR(G3D_FPCLR != 0), .YLIM2(G3D_YLIM2 != 0), .LLR(G3D_LLR != 0), .RPRI(G3D_RPRI != 0), .NX2(G3D_NX2 != 0), .RH_AT(G3D_RH_AT), .NXB(G3D_NXB != 0), .VREG(G3D_VREG != 0), .DSHARE(G3D_DSHARE != 0), .LB2(G3D_LB2 != 0), .LOV(G3D_LOV != 0), .EDIV4(G3D_EDIV4 != 0), .EDGE2(G3D_EDGE2 != 0), .EP2(G3D_EP2 != 0), .FDB(G3D_FDB != 0), .RING(G3D_RING != 0), .TL(G3D_TL), .PL(G3D_PL), .RESTART(G3D_RESTART != 0), .PUMP(G3D_PUMP != 0), .SWHOLD(G3D_SWHOLD != 0), .SWPC(G3D_SWPC != 0), .LMARK(G3D_LMARK != 0), .RLEAD(G3D_LEAD), .SSL(G3D_SL), .SCL(G3D_CL), .SDROP(G3D_DROP != 0)) u_gpu3d (.clk, .clk_2x, .rst(rst_3d), .tick, .geom_en(powcnt1[3]), .rend_en(powcnt1[2]),
             .vblank(line_start && vcount == 9'd192), .line215(line_start && vcount == 9'd215), .sw_close(line_start && vcount == 9'(215 + G3D_SWL)), .sw_lim(line_start && vcount == 9'(222 + G3D_SWL)),
             .disp3dcnt,
             .io_req(gx_req), .io_we, .io_be, .io_addr(io_addr[11:2]), .io_wdata, .io_ack(gx_ack), .io_rdata(gx_rdata), .dx_valid, .dx_ready, .dx_idle,
@@ -729,9 +850,9 @@ module nds_top #(
         // no 3D engine: the 3D layer is the clear plane (its bitmap rows share
         // the block port behind the 2D engine)
         nds_blk_arb u_arb (.clk, .rst,
-            .a_req(d_req), .a_blk(d_blk), .a_ack(d_ack), .a_rvalid(d_rvalid),
+            .a_req(d_req), .a_blk(d_blk), .a_word(d_word), .a_ack(d_ack), .a_rvalid(d_rvalid),
             .b_req(t_req), .b_blk(t_blk), .b_ack(t_ack), .b_rvalid(t_rvalid),
-            .g_req, .g_blk, .g_ack, .g_rvalid);
+            .g_req, .g_blk, .g_word, .g_ack, .g_rvalid);
         nds_g3d_plane u_plane (.clk, .rst, .powcnt1(powcnt1[3:2]), .disp3dcnt,
             .io_req, .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
             .line_start, .vcount,
@@ -746,7 +867,7 @@ module nds_top #(
         assign diag_r_ev = 11'd0; assign diag_r_val = 32'd0; assign diag_t_start = 1'b0; assign diag_t_stop = 1'b0;
         assign diag_l3d_v = 1'b0; assign diag_l3d_line = 9'd0;
     end else begin : g_no3d
-        assign g_req = d_req; assign g_blk = d_blk; assign d_ack = g_ack; assign d_rvalid = g_rvalid;
+        assign g_req = d_req; assign g_blk = d_blk; assign g_word = d_word; assign d_ack = g_ack; assign d_rvalid = g_rvalid;
         assign t_req = 1'b0; assign t_blk = '0; assign t_ack = 1'b0; assign t_rvalid = 1'b0;
         assign gx_ack = 1'b0; assign gx_rdata = 32'd0; assign gx_ovf = 1'b0; assign dx_ready = 1'b1; assign dx_idle = 1'b1;
         assign gx_irq = gx_irq_stub; assign gx_dma_low = 1'b1; assign l3d_rdata = 32'd0;
@@ -758,14 +879,14 @@ module nds_top #(
         assign diag_l3d_v = 1'b0; assign diag_l3d_line = 9'd0;
     end endgenerate
 
-    nds_vram #(.CAP_CHAIN(CAP_CHAIN != 0), .VR_POST(VR_POST != 0), .VR_RDB(VR_RDB != 0), .VR_PASS(VR_PASS != 0), .VR_WB(VR_WB != 0), .VR_CWF(VR_CWF != 0), .VR_HIT(VR_HIT != 0), .VR_YIELD(VR_YIELD != 0), .VR_PDRAIN(VR_PDRAIN != 0), .VR_PF(VR_PF != 0)) u_vram (.clk, .rst, .vramcnt,
+    nds_vram #(.WQ_FE((RAM_MOVE & 256) != 0), .CAP_CHAIN(CAP_CHAIN != 0), .VR_POST(VR_POST != 0), .VR_RDB(VR_RDB != 0), .VR_PASS(VR_PASS != 0), .VR_WB(VR_WB != 0), .VR_WBQ(VR_WBQ), .VR_HITB(VR_HITB != 0), .VR_HPAIR(VR_HPAIR != 0), .VR_CWF(VR_CWF != 0), .VR_HIT(VR_HIT != 0), .VR_YIELD(VR_YIELD != 0), .VR_PDRAIN(VR_PDRAIN != 0), .VR_PF(VR_PF != 0), .VR_PFS(VR_PFS != 0), .VR_PH(VR_PH != 0), .RB_M10K(RB_M10K != 0), .CAP_DB(CAP_DB != 0), .G2D_CWF(G2D_CWF != 0)) u_vram (.clk, .rst, .vramcnt,
         .c_req(vc_req), .c_cpu(vc_cpu), .c_dma(vc_dma), .c_we(vc_we), .c_addr(vc_addr), .c_be(vc_be), .c_wdata(vc_wdata),
         .c_ack(vc_ack), .c_rdata(vc_rdata),
-        .g_req, .g_blk, .g_ack, .g_rvalid, .g_rdata,
-        .cap_we, .cap_addr, .cap_data, .cap_ready, .cw_valid, .cw_addr, .cw_data, .cw_ack, .cw_drained(rg_wdrained), .cw_fill(rg_wfill), .cw_pcnt(rg_wpcnt),
+        .g_req, .g_blk, .g_word, .g_ack, .g_rvalid, .g_rdata,
+        .cap_we, .cap_addr, .cap_data, .cap_ready, .cw_valid, .cw_addr, .cw_data, .cw_he, .cw_ack, .cw_drained(rg_wdrained), .cw_fill(rg_wfill), .cw_pcnt(rg_wpcnt),
         .sv_req(vs_req), .sv_we(vs_we), .sv_addr(vs_addr), .sv_be(vs_be), .sv_wdata(vs_wdata),
         .sv_ack(vs_ack), .sv_rdata(vs_rdata),
-        .vm_req, .vm_we, .vm_blk, .vm_addr, .vm_be, .vm_wdata, .vm_ack, .vm_rvalid, .vm_rdata,
+        .vm_req, .vm_we, .vm_blk, .vm_tex, .vm_addr, .vm_be, .vm_wdata, .vm_ack, .vm_rvalid, .vm_rdata,
         .vramstat);
 
     // card
@@ -795,7 +916,7 @@ module nds_top #(
     logic [3:0]  sv_be;
     logic [31:0] sv_wdata, sv_rdata;
     assign save_type = bootctl[6:4];
-    nds_cart u_cart (.clk, .rst, .tick, .owner7(exmem_o7), .raw(bootctl[0]), .ir(bootctl[1]), .dsi(bootctl[7]),
+    nds_cart #(.QFE((RAM_MOVE & 2) != 0)) u_cart (.clk, .rst, .tick, .owner7(exmem_o7), .raw(bootctl[0]), .ir(bootctl[1]), .dsi(bootctl[7]),
         .save_type(bootctl[6:4]), .sv_loaded, .rom_size,
         .io_req(cart_req), .io_cpu, .io_we, .io_be, .io_reg(cart_reg), .io_wdata, .io_rdata(cart_rdata),
         .irq(cart_irq), .drq(cart_drq),
@@ -931,8 +1052,8 @@ module nds_top #(
     end endgenerate
     wire [31:0] ext7 = {7'd0, wf_irq, spi_irq, 3'd0, cart_irq && exmem_o7, 6'd0, irq_key7, 9'd0,
                         irq_vct[1], irq_hbl[1], irq_vbl[1]};
-    nds_sys #(.DMA_FAST(DMA_UNIT != 0), .PUMP(SYS_PUMP != 0)) u_sys (.clk, .clk2(clk_2x), .rst, .tick, .f1024(sys_f1024),
-        .io_req(sys_req), .io_pre, .tmr_oh(io_tmr_oh), .io_cpu, .io_we, .io_be, .io_addr(io_addr[20:2]), .io_wdata,
+    nds_sys #(.DMA_FAST(DMA_UNIT != 0), .DMA_FILL1(DMA_FILL1 != 0), .PUMP(SYS_PUMP != 0)) u_sys (.clk, .clk2(clk_2x), .rst, .tick, .f1024(sys_f1024),
+        .io_req(sys_req), .io_pre, .io_tmr, .tmr_oh(io_tmr_oh), .io_cpu, .io_we, .io_be, .io_addr(io_addr[20:2]), .io_wdata,
         .io_rdata(sys_rdata), .io_hit(),
         .dma_trig9({1'b0, 1'b0, cart_drq && !exmem_o7, 1'b0, dma_dst, dma_hbl, dma_vbl}),
         .dma_gx_low(gx_dma_low),
@@ -942,4 +1063,9 @@ module nds_top #(
         .m_wdata(dm_wdata), .m_ack(dm_ack), .m_rdata(dm_rdata), .dma_busy,
         .irq_ext9(ext9), .irq_ext7(ext7), .irq9, .irq7, .wake7,
         .math_late(), .dbg_dma_run(), .dma_lat_lost());
+`ifndef ALTERA_RESERVED_QIS
+  // simulation: the 3D engine's reset copy is rst on every clock (same release cycle)
+  always @(posedge clk)
+    if (rst_3d !== rst) $display("nds_top: ERROR: rst_3d %b, rst %b at %0t", rst_3d, rst, $time);
+`endif
 endmodule

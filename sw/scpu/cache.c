@@ -238,7 +238,7 @@ static void ctl_step(void)
         if (touch) {
             u32 g = IO(2) >> 18;
             if (c_act) {
-                if (c_step == (c_kind & 4 ? 12 : 15)) { c_step = 0; c_act = !(c_kind & 4) && (fb >> c_btn & 1); }
+                if (c_step == (c_kind & 4 ? 6 : 15)) { c_step = 0; c_act = !(c_kind & 4) && (fb >> c_btn & 1); }
                 else c_step++;
             } else {
                 for (u32 b = 0; b < 4; b++)         /* the first new press of a button that draws */
@@ -249,7 +249,7 @@ static void ctl_step(void)
     } else {                                        /* the gesture's point; the results */
         int dx = 0, dy = 0, k = (int)c_kind;
         if (!(k & 4)) { const signed char *t = c_sin + (k & 1) * 16; dx = t[c_step]; dy = -t[(c_step + 4) & 15]; }
-        else { int s = (int)c_step * 8; if (!(k & 2)) s = -s; if (k & 1) dx = s; else dy = s; }
+        else { int s = (int)c_step * 16; if (!(k & 2)) s = -s; if (k & 1) dx = s; else dy = s; }
         u32 w0 = c_x | c_y << 8 | c_add(c_x, dx, 255) << 16 | c_add(c_y, dy, 191) << 24;
         u32 w1 = c_w1 | c_act << 8 | (c_idle != 0) << 9;
         if (c_act) { IO(0) = w0; IO(1) = w1; }      /* (the point before a gesture starts, after it ends) */

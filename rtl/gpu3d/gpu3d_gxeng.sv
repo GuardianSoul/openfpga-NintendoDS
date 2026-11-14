@@ -43,6 +43,8 @@ module gpu3d_gxeng #(
     // dispatcher's COLOR / TEXCOORD / vertex commands, the vector MAC, the polygon unit (PU below; the control store
     // gpu3d_gxrom_uf)
     parameter bit FF = 1'b0,
+    parameter bit FF_VTX = 1'b0,       // FF: a vertex command is decoded into CurVertex's latch in the DISP clock and goes straight to
+                                       // the transform (SV1 with PU, else SUBV), without its microcode handler (docs/gx-speed-study.md C1)
     // VC_M10K (SMALL): the outcode unit's x, y, z (u_vc, 2 MLAB LABs in #886) in an M10K read two clocks
     // ahead (the stepper's position two clocks on, from the word in M) into its output register; 0: MLAB
     parameter bit VC_M10K = 1'b1,
@@ -51,7 +53,12 @@ module gpu3d_gxeng #(
     parameter bit STK_M10K = 1'b1,
     // VOC_M10K: the outcode table u_voc (1 MLAB LAB in #886) in an M10K: the same registered read at xr1
     // (old data on a same-address write, which the MLAB left undefined); 0: MLAB
-    parameter bit VOC_M10K = 1'b1
+    parameter bit VOC_M10K = 1'b1,
+    // GX_PAR (docs/geometry-engine-par.md "Step order"; with FF): the number of GX_PAR steps, cumulative; N runs the
+    // control store gpu3d_gxrom_up<N>. 0: today's engine. 1 VREF: a strip's reused pair are references to the slot
+    // groups that hold them instead of copies (the PU's list words for them are SLOT 4 and 5 as COMMIT writes them).
+    // 2 TEST: POS_TEST on the vector MAC, POS/VEC_TEST results shadowed for gpu3d_geom (tst_res)
+    parameter int PAR = 0
 ) (
     input  logic         clk,
     input  logic         clk_2x,        // DIV_P2X: 2 x clk, rising with it
@@ -83,6 +90,8 @@ module gpu3d_gxeng #(
     output logic         mrd_ack,
     output logic [31:0]  mrd_data,      // R: the result in the clock mrd_cap is high (gpu3d_geom captures it)
     output logic         mrd_cap,
+    input  logic [2:0]   tst_ra,        // GX_PAR TEST: the POS_TEST / VEC_TEST result word (POSTEST + tst_ra) to read
+    output logic [31:0]  tst_q,         //   as written (combinational: an MLAB)
     // polygon records: header beat then vertex beats (gpu3d_raster ps_* format)
     output logic         po_valid,
     input  logic         po_ready,
@@ -135,10 +144,25 @@ module gpu3d_gxeng #(
     // word's, k_* the fixed entry points'. The dictionaries are read at the old ROM's clock: ua, ub_q, ub_p
     // and t_imm are gpu3d_gxrom_uf's at every clock
     localparam bit DICT = FF && SMALL && STK_M10K;
+    localparam bit PAR_ON = FF && PAR != 0;
+    localparam bit VREF = PAR_ON && PAR >= 1;
+    localparam bit PTEST = PAR_ON && PAR >= 2;
     localparam int DX_W = 18;
     wire [DX_W-1:0] dx_n;
     logic [DX_W-1:0] dx_s, dx_t, dx_k, dx_h, dx_q, k_reset, k_dparam, k_subv, k_sv1;
-    generate if (DICT) begin : g_romd
+    generate if (DICT && PAR_ON) begin : g_romdp
+        // the GX_PAR images, one per step count (ucode.py PAR_MAX)
+        if (PAR == 1) begin : g_p1
+            gpu3d_gxrom_up1d #(.B2(SMALL)) u_rom (.clk, .s_addr(upc_n), .s_dx(dx_s), .dx(dx_n), .a_q(ua), .a_tdx(dx_t),
+                                                  .b_q(ub_q), .b_p(ub_p), .t_idx(imi_n), .t_imm(t_imm),
+                                                  .h(e_data[37:32]), .h_dx(dx_h), .k_reset, .k_dparam, .k_subv, .k_sv1);
+        end else begin : g_p2
+            gpu3d_gxrom_up2d #(.B2(SMALL)) u_rom (.clk, .s_addr(upc_n), .s_dx(dx_s), .dx(dx_n), .a_q(ua), .a_tdx(dx_t),
+                                                  .b_q(ub_q), .b_p(ub_p), .t_idx(imi_n), .t_imm(t_imm),
+                                                  .h(e_data[37:32]), .h_dx(dx_h), .k_reset, .k_dparam, .k_subv, .k_sv1);
+        end
+        always_ff @(posedge clk) dx_q <= dx_n;
+    end else if (DICT) begin : g_romd
         gpu3d_gxrom_ufd #(.B2(SMALL)) u_rom (.clk, .s_addr(upc_n), .s_dx(dx_s), .dx(dx_n), .a_q(ua), .a_tdx(dx_t),
                                              .b_q(ub_q), .b_p(ub_p), .t_idx(imi_n), .t_imm(t_imm),
                                              .h(e_data[37:32]), .h_dx(dx_h), .k_reset, .k_dparam, .k_subv, .k_sv1);
@@ -157,6 +181,10 @@ module gpu3d_gxeng #(
         end
         // synthesis translate_on
 `endif
+    end else if (PAR_ON && PAR == 1) begin : g_romp1
+        gpu3d_gxrom_up1 #(.B2(SMALL)) u_rom (.clk, .a_addr(upc_n), .a_q(ua), .b_addr(upc_n), .b_q(ub_q), .b_p(ub_p), .t_idx(imi_n), .t_imm(t_imm));
+    end else if (PAR_ON) begin : g_romp2
+        gpu3d_gxrom_up2 #(.B2(SMALL)) u_rom (.clk, .a_addr(upc_n), .a_q(ua), .b_addr(upc_n), .b_q(ub_q), .b_p(ub_p), .t_idx(imi_n), .t_imm(t_imm));
     end else if (FF) begin : g_romf
         gpu3d_gxrom_uf #(.B2(SMALL)) u_rom (.clk, .a_addr(upc_n), .a_q(ua), .b_addr(upc_n), .b_q(ub_q), .b_p(ub_p), .t_idx(imi_n), .t_imm(t_imm));
     end else if (VFIN == 2) begin : g_romw
@@ -232,11 +260,19 @@ module gpu3d_gxeng #(
         logic        fls;              // fl_sort (below)
         logic [9:0]  ro;               // one-hot result select (RO_*)
         logic [3:0]  lgt;              // RO_LG's truth table, indexed {x, y}
+        // the xsh-named sources of X, folded with their XS one-hot (#2276 1asR -0.460 ns: ROM b_q's xsh ->
+        // the accx / at_q / vx_q selects -> xo -> the shifter -> R; registered here, X is one AND-OR level):
+        // xa: ACCX's acc[31:0], acc[40:9], acc[43:12], acc[63:32] (xsh 0, bits 0-2: ORed, as accx was);
+        // xt (FF): ATR's at_c[0..2], at_t[0], at_t[1], pu_q; xv (FF): VXR's vx_l, acc[39:24] sign-extended, acc[43:12]
+        logic [3:0]  xa;
+        logic [5:0]  xt;
+        logic [2:0]  xv;
     } odec_t;
     function automatic odec_t odec(input [B_W-1:0] w);
         logic [3:0] xs;
         logic [1:0] ys;
         logic [4:0] op;
+        logic [2:0] xh;
         xs = fb(w, B_XS_LO, B_XS_W);
         ys = fb(w, B_YS_LO, B_YS_W);
         op = fb(w, B_AOP_LO, B_AOP_W);
@@ -249,6 +285,13 @@ module gpu3d_gxeng #(
         odec.sar  = op == 5'(AOP_SAR);
         odec.fsh  = op == 5'(AOP_FSH);
         odec.fls  = USORT && (xs == 4'(XS_SBL) || xs == 4'(XS_SCT) || xs == 4'(XS_SNX) || xs == 4'(XS_SYB));
+        xh = fb(w, B_XSH_LO, B_XSH_W);
+        odec.xa = {4{xs == 4'(XS_ACCX)}} & {xh[2], xh[1], xh[0], xh == 3'd0};
+        if (FF) begin
+            odec.xt = {6{xs == 4'(XS_ATR)}} & {PU && xh == 3'd7, xh == 3'd4 || xh == 3'd5 || xh == 3'd6 || (!PU && xh == 3'd7),
+                                               xh == 3'd3, xh == 3'd2, xh == 3'd1, xh == 3'd0};
+            odec.xv = {3{xs == 4'(XS_VXR)}} & {xh[1:0] == 2'd0 && !xh[2], xh[1:0] == 2'd0 && xh[2], xh[1:0] != 2'd0};
+        end
         case (op)
             5'(AOP_ADD), 5'(AOP_SUB), 5'(AOP_RSUB): odec.ro[RO_SUM] = 1'b1;
             5'(AOP_AND):  begin odec.ro[RO_LG] = 1'b1; odec.lgt = 4'b1000; end
@@ -302,6 +345,7 @@ module gpu3d_gxeng #(
     logic [31:0] at_q;                 // FF: the attribute latch named by xsh (O)
     logic [1:0]  at_m;                 // FF: TEXM's latch (the dispatcher's texture-mode test)
     logic [31:0] vx_q;                 // FF: the vector MAC lane named by xsh (O)
+    logic [31:0] x_c0, x_c1, x_c2, x_t0, x_t1, x_vl;   // FF: at_q's and vx_q's sources for xo's folded selects (od.xt, od.xv)
     logic [15:0] at_v [3];             // FF: CurVertex's latch (x, y, z)
     logic [2:0]  v_row;                // FF: the vector MAC's row of the instruction in O
     logic        v_opo;                // FF: a vector MAC step in O
@@ -437,7 +481,7 @@ module gpu3d_gxeng #(
     wire ff_nrm = FF && pop && !mp && e_hidx == LU_HNORMAL && at_m != 2'd2 && !ff_tm_busy;
     // FF: a vertex command (VTX_16 at its second parameter) is decoded into CurVertex's latch and goes
     // straight to SubmitVertex (SUBV)
-    wire ff_vtx = 1'b0;
+    wire ff_vtx = FF && FF_VTX && pop && ff_isv && (!mp || mp_last);
     wire ff_hw  = ff_col || ff_tex || ff_vtx;
     // PU: a vertex command goes straight to the transform (SV1) with X1 set to its slot group, unless it must
     // wait for the lighting unit or the clip matrix, or a TEXM write is in flight (the transform tests TEXM's
@@ -582,7 +626,12 @@ module gpu3d_gxeng #(
                 3'd4: begin ffv_d[0] = ffd_v[15:0]; ffv_d[1] = ffd_v[31:16]; end
                 3'd5: begin ffv_d[0] = ffd_v[15:0]; ffv_d[2] = ffd_v[31:16]; end
                 3'd6: begin ffv_d[1] = ffd_v[15:0]; ffv_d[2] = ffd_v[31:16]; end
+`ifdef GXENG_FFVTX_MUT
+                // mutant (simulation only): VTX_DIFF's offsets without their sign extension
+                3'd7: for (int k = 0; k < 3; k++) ffv_d[k] = at_v[k] + {6'd0, ffd_v[10 * k +: 10]};
+`else
                 3'd7: for (int k = 0; k < 3; k++) ffv_d[k] = at_v[k] + {{6{ffd_v[10 * k + 9]}}, ffd_v[10 * k +: 10]};
+`endif
                 default: ;
             endcase
         end
@@ -610,6 +659,8 @@ module gpu3d_gxeng #(
         end
         // xsh: 0-2 CURCOL, 3-4 TEXC (ucode.py ATR_ADDR); RawTexCoords lives in the vector MAC's lanes (row 7);
         // PU: 7 the polygon unit's register named by the immediate (asm.py PU_XSH)
+        assign x_c0 = {15'd0, at_c[0], 12'hFFF}, x_c1 = {15'd0, at_c[1], 12'hFFF}, x_c2 = {15'd0, at_c[2], 12'hFFF};
+        assign x_t0 = {{16{at_t[0][15]}}, at_t[0]}, x_t1 = {{16{at_t[1][15]}}, at_t[1]};
         always_comb case (b_xsh)
             3'd0:    at_q = {15'd0, at_c[0], 12'hFFF};
             3'd1:    at_q = {15'd0, at_c[1], 12'hFFF};
@@ -637,7 +688,7 @@ module gpu3d_gxeng #(
         // synthesis translate_on
 `endif
     end else begin : g_noff
-        assign at_q = '0; assign at_m = '0;
+        assign at_q = '0; assign at_m = '0; assign {x_c0, x_c1, x_c2, x_t0, x_t1} = '0;
         assign ffw_m = 1'b0; assign fft_m = 1'b0; assign ffv_m = 1'b0; assign ffd_m = '0;
         always_comb for (int k = 0; k < 3; k++) begin at_v[k] = '0; ffv_d[k] = '0; end
     end endgenerate
@@ -743,14 +794,16 @@ module gpu3d_gxeng #(
                ({32{b_xsh == 3'd0}} & acc[31:0]);
         imm = t_imm;
         // one-hot selects (od): an AND-OR, no decode
-        xo = ({32{od.xs[XS_QA]}} & qa) | ({32{od.xs[XS_R]}} & R) | ({32{od.xs[XS_ACCX]}} & accx) |
+        xo = ({32{od.xs[XS_QA]}} & qa) | ({32{od.xs[XS_R]}} & R) |
+             ({32{od.xa[0]}} & acc[31:0]) | ({32{od.xa[1]}} & acc[40:9]) | ({32{od.xa[2]}} & acc[43:12]) | ({32{od.xa[3]}} & acc[63:32]) |
              ({32{od.xs[XS_P]}} & P) | ({32{od.xs[XS_Q]}} & div_q) | ({32{od.xs[XS_ZDOT]}} & {8'd0, zerodot}) |
              ({32{od.xs[XS_MSEL]}} & {27'd0, mrd_sel}) | ({32{od.xs[XS_VOCW]}} & {26'd0, qv[5:0]}) |
              ({32{od.xs[XS_VOCS]}} & {26'd0, qv[11:6]});
         // SBL and SYB (sort RAM read data) only ever PASSX (asm.py checks): they join at the result
         // select below instead, off the adder and shifter (#677: -1.95 ns u_bl -> R)
         if (USORT) xo = xo | ({32{od.xs[XS_SCT]}} & s_ct) | ({32{od.xs[XS_SNX]}} & s_nx);
-        if (FF) xo = xo | ({32{od.xs[XS_ATR]}} & at_q) | ({32{od.xs[XS_VXR]}} & vx_q);
+        if (FF) xo = xo | ({32{od.xt[0]}} & x_c0) | ({32{od.xt[1]}} & x_c1) | ({32{od.xt[2]}} & x_c2) |
+                         ({32{od.xt[3]}} & x_t0) | ({32{od.xt[4]}} & x_t1) | ({32{od.xt[5]}} & pu_q) | ({32{od.xv[0]}} & x_vl) | ({32{od.xv[1]}} & {{16{acc[39]}}, acc[39:24]}) | ({32{od.xv[2]}} & acc[43:12]);
         yo = ({32{od.ys[YS_QB]}} & qb) | ({32{od.ys[YS_R]}} & R) | ({32{od.ys[YS_IMM]}} & imm);
     end
     // one adder: X + Y (ADD), X - Y (SUB, MAX, MIN, flags), Y - X (RSUB)
@@ -800,7 +853,28 @@ module gpu3d_gxeng #(
     wire [31:0] res_l1 = ({32{od.ro[RO_MAX]}} & yo) | ({32{od.ro[RO_MIN]}} & xo) | {31'd0, od.ro[RO_SLT]};
     wire [31:0] res_l0 = ({32{od.ro[RO_MAX]}} & xo) | ({32{od.ro[RO_MIN]}} & yo);
     assign res = res_e | (lt_s ? res_l1 : res_l0);
+    // N's sign bit beside the result's selects, in the style of aea5c1cc (the E result at the last
+    // mux): the RC6 1asR critical path is the ROM's b_q -> xo -> the funnel shifter -> res[31] -> fn
+    // (#2118 -0.214 ns, 11 levels; #2102 2asR -0.076 the same). fn_n is res[31]'s own expression at
+    // bit 31 - the one-hot AND-OR of res_e's terms, lt_s' MAX/MIN mux last - so the register's cone
+    // does not pass through the result's final OR: two LUTs after the shifter, not three.
+    // Quartus shares the cones; the fit decides, so the effect is the fit's to read.
+`ifdef GXENG_FN_MUT
+    wire fn_e = od.ro[RO_SUM] & sum[31];      // (mutant: only the adder's term kept)
+`else
+    wire fn_e = (od.ro[RO_SUM] & sum[31]) | (od.ro[RO_LG] & lg_res[31]) | (od.ro[RO_SH] & sh_res[31]) |
+                (od.ro[RO_SX16] & xo[15]) | (od.ro[RO_SX11] & xo[10]) |
+                (od.ro[RO_MABS] & (xo[31] ^ yo[31])) |
+                (USORT ? (od.xs[XS_SBL] & s_bl[31]) | (od.xs[XS_SYB] & s_yb[31]) : 1'b0);
+`endif
+    wire fn_n = fn_e | (lt_s ? (od.ro[RO_MAX] & yo[31]) | (od.ro[RO_MIN] & xo[31])
+                             : (od.ro[RO_MAX] & xo[31]) | (od.ro[RO_MIN] & yo[31]));
     logic signed [31:0] ma, mb;
+    // MB's next value (FF: MB3 is CurVertex's latch by row, then 0x1000 for rows 3 and 7); a1x's lane blocks take it
+    // into their own input registers, beside mb
+    wire  signed [31:0] ma_n = (FF && v_opo) ? vm0_q : b_ma ? R : qa;   // MA's next value (a4's blocks take it too)
+    wire  signed [31:0] mb_n = (b_mb == MB_R) ? R : (b_mb == MB_IMM) ? imm :
+                               (FF && b_mb == MB_MB3) ? (v_row[1:0] == 2'd3 ? 32'h1000 : {{16{at_v[v_row[1:0]][15]}}, at_v[v_row[1:0]]}) : qb;
     logic signed [63:0] pr;
     logic [2:0] acc_m, acc_a;
     always_ff @(posedge clk) begin
@@ -809,7 +883,7 @@ module gpu3d_gxeng #(
         fl_p <= b_fl && !fl_sort;
         fz_h <= fz;
         if (b_fl && !fl_sort) begin
-            fn <= res[31];
+            fn <= fn_n;
             fc <= !sum[32];            // ax < ay unsigned (a subtraction's borrow)
             flt <= lt_s;
         end
@@ -817,10 +891,9 @@ module gpu3d_gxeng #(
         // N straight from the table's sign, the other flags kept (#483: sort RAM -> fzb)
         if (b_fl && fl_sort) fn <= s_sign;
         // FF: the scalar MAC is the vector MAC's lane 0: a vector step multiplies lane 0's row
-        ma <= (FF && v_opo) ? vm0_q : b_ma ? R : qa;
+        ma <= ma_n;
         // FF: MB3 (vector MAC) is CurVertex's latch by row, then 0x1000 (rows 3 and 7)
-        mb <= (b_mb == MB_R) ? R : (b_mb == MB_IMM) ? imm :
-              (FF && b_mb == MB_MB3) ? (v_row[1:0] == 2'd3 ? 32'h1000 : {{16{at_v[v_row[1:0]][15]}}, at_v[v_row[1:0]]}) : qb;
+        mb <= mb_n;
         pr <= ma * mb;
         if (rst) begin acc_m <= ACC_NONE; acc_a <= ACC_NONE; we_m <= 1'b0; out_m <= O_NONE; end
         else begin acc_m <= b_acc; acc_a <= acc_m; we_m <= we_o; out_m <= b_out; end
@@ -896,8 +969,24 @@ module gpu3d_gxeng #(
             $error("gpu3d_gxeng: outcodes of group %0d read before they are ready", vg);
     // synthesis translate_on
 `endif
-    gpu3d_ram #(.W(12), .AW(5), .STYLE(VOC_M10K ? "M10K" : "MLAB")) u_voc (.clk, .we(vwe), .waddr(vg),
-                                         .wdata({vstrong & {6{vok}}, vweak}), .raddr(xr1[8:4]), .rdata(qv));
+    // The outcode table u_voc is read only through XS = VOCW / VOCS. With PU no reachable control-store word
+    // selects them: the polygon unit keeps groups 0..3's outcodes itself (oc, below), CULLOK is not assembled,
+    // and OCVH (ucode.py) has no caller (asm.py's reachability from RESET, the handler table and the fixed
+    // entries over the uf, up1 and up2 images: only OCVH's two words are unreached, and VOCW / VOCS appear in no
+    // other word). So with PU the table is not built and qv is 0 (1 M10K; docs/plan-next.md "RC12b 3D room")
+    generate if (!PU) begin : g_voc
+        gpu3d_ram #(.W(12), .AW(5), .STYLE(VOC_M10K ? "M10K" : "MLAB")) u_voc (.clk, .we(vwe), .waddr(vg),
+                                             .wdata({vstrong & {6{vok}}, vweak}), .raddr(xr1[8:4]), .rdata(qv));
+    end else begin : g_novoc
+        assign qv = 12'd0;
+`ifndef SYNTHESIS
+        // synthesis translate_off
+        always_ff @(posedge clk)
+            if (!rst && (od.xs[XS_VOCW] || od.xs[XS_VOCS]))
+                $error("gpu3d_gxeng: VOCW/VOCS executed with PU (u_voc is not built; upc %03x)", upc);
+        // synthesis translate_on
+`endif
+    end endgenerate
     always_ff @(posedge clk) begin
         if (rst) vst <= 4'd0;
         else begin
@@ -917,6 +1006,34 @@ module gpu3d_gxeng #(
         end
     end
 
+    // GX_PAR TEST: the test results' words shadowed from the register-file writes; gpu3d_geom serves POS_TEST and
+    // VEC_TEST reads from them once no test is in flight (its tpend), without the engine's MMIO service
+    // a3 (docs/gx-area-map.md): the six words in an MLAB (8 x 32; POSTEST is 8-aligned), read by gpu3d_geom's word
+    // address, in place of 192 registers and geom's word mux. The reset no longer clears them: the reset microcode's
+    // register-file clear (RCLR, 0x000-0x3FF) writes them 0 through the same snoop before any command runs
+    generate if (PTEST) begin : g_tres
+        wire tw = rf_we && rf_wa[10:3] == PX_A_POSTEST[10:3] && rf_wa[2:0] < 3'd6;
+`ifdef GXENG_A3_MUT
+        gpu3d_lram #(.W(32), .AW(3)) u_tst (.clk, .we(tw), .waddr(rf_wa[2:0] + 3'd1), .wdata(rf_wd), .raddr(tst_ra), .rdata(tst_q));   // (mutant: word + 1)
+`else
+        // (an M10K, read synchronously: gpu3d_geom holds tst_ra from the read's request and takes the word a clock or
+        // more later, once tpend is 0; its a3 check compares every word taken with the registers it replaced)
+        gpu3d_lram #(.W(32), .AW(3), .SY(1'b1)) u_tst (.clk, .we(tw), .waddr(rf_wa[2:0]), .wdata(rf_wd), .raddr(tst_ra), .rdata(tst_q));
+`endif
+`ifndef SYNTHESIS
+        // synthesis translate_off
+        // the registers it replaces, read the same way: equal whenever gpu3d_geom takes the word (dbg_tst_chk)
+        logic [191:0] tst_res;
+        always_ff @(posedge clk)
+            if (rst) tst_res <= '0;
+            else for (int k = 0; k < 6; k++) if (rf_we && rf_wa == PX_A_POSTEST + 11'(k)) tst_res[32 * k +: 32] <= rf_wd;
+        wire [31:0] tst_old = tst_res[32 * tst_ra +: 32];
+        // synthesis translate_on
+`endif
+    end else begin : g_notres
+        assign tst_q = '0;
+    end endgenerate
+
     // ------------------------------------------------------------------
     // PU: the polygon unit (docs/geometry-redesign.md "Polygon unit"; ucode.py PU). It keeps what the
     // microcode's VADV and SVSUB kept in the register file: VertexNumInPoly (vn), the slot order (s: slot ->
@@ -935,6 +1052,22 @@ module gpu3d_gxeng #(
         logic [1:0]  s [4];
         logic [1:0]  pl [4];
         logic [11:0] oc [4];
+        // VREF: the reused pair's list words (SLOT 4 and 5: references, or groups 4 and 5 as COPYV leaves them)
+        logic [10:0] r45 [2];
+        always_ff @(posedge clk)
+            if (rst) begin r45[0] <= 11'h240; r45[1] <= 11'h250; end
+            else if (rf_we && rf_wa == PU_A_SLOT + 11'd4) r45[0] <= rf_wd[10:0];
+            else if (rf_we && rf_wa == PU_A_SLOT + 11'd5) r45[1] <= rf_wd[10:0];
+`ifndef SYNTHESIS
+        // synthesis translate_off
+        // VREF: a referenced group is read only while the reuse is pending (the next strip vertex takes the oldest
+        // slot; the clip works on copies, NOTRIV)
+        always_ff @(posedge clk) if (VREF && !rst && lr && rf_we && rf_wa[10:9] == 2'b01 &&
+                                     (rf_wa[10:4] == r45[0][10:4] || rf_wa[10:4] == r45[1][10:4]) &&
+                                     !(rf_wa == PU_A_SLOT + 11'd4 || rf_wa == PU_A_SLOT + 11'd5))
+            $error("gpu3d_gxeng VREF: a write %03x into a referenced group", rf_wa);
+        // synthesis translate_on
+`endif
         function automatic [10:0] gb(input [1:0] g);     // a group's base (ucode.py grp)
             gb = 11'h200 + {5'd0, g, 4'd0};
         endfunction
@@ -964,8 +1097,8 @@ module gpu3d_gxeng #(
         end
         assign pu_triv = !cs && (sa & PU_TRIVM) != 6'd0;
         always_comb case (t_imm[3:0])
-            4'd0:    pu_q = {21'd0, cs ? 11'h240 : gb(pl[0])};
-            4'd1:    pu_q = {21'd0, cs ? 11'h250 : gb(pl[1])};
+            4'd0:    pu_q = {21'd0, cs ? (VREF ? r45[0] : 11'h240) : gb(pl[0])};
+            4'd1:    pu_q = {21'd0, cs ? (VREF ? r45[1] : 11'h250) : gb(pl[1])};
             4'd2:    pu_q = {21'd0, gb(pl[2])};
             4'd3:    pu_q = {21'd0, gb(pl[3])};
             4'd4:    pu_q = q4 ? 32'd4 : 32'd3;
@@ -991,7 +1124,11 @@ module gpu3d_gxeng #(
                 if (rf_wa == PU_A_LSREUSE) lr <= rf_wd[0];
                 for (int k = 0; k < 4; k++) if (rf_wa == PU_A_SLOT + 11'(k)) s[k] <= rf_wd[5:4];
             end
+`ifdef GXENG_VOC_MUT
+            if (vwe && vg < 5'd4) oc[vg[1:0]] <= qv;     // (mutant: the unit's outcodes from the table that is gone)
+`else
             if (vwe && vg < 5'd4) oc[vg[1:0]] <= {vstrong & {6{vok}}, vweak};
+`endif
         end
 `ifndef SYNTHESIS
         // synthesis translate_off
@@ -1033,6 +1170,51 @@ module gpu3d_gxeng #(
     wire        acc_en  = acc_a == ACC_LD || acc_a == ACC_ADD || acc_a == ACC_SUB || acc_a == ACC_ADDM ||
                           (FF && (acc_vl || acc_a == ACC_VADD));
     wire [63:0] acc_sum = (acc_ld ? 64'd0 : acc) + (acc_sub ? ~acc_opd : acc_opd) + {63'd0, acc_sub};
+    // a4 (docs/gx-area-map.md; FF with LUNIT, whose image has no ADDM): the scalar MAC's product and accumulator in its
+    // three DSP blocks. MA = Ah 2^16 + Al (Al the low half zero-extended), MB (negated for SUB: acc - A B = acc + A (-B),
+    // 33 bits) = Bh 2^16 + Bl. Three block accumulators step in M from the operand registers (as a1x's lanes): a32 the sum
+    // of Ah Bh, a16 of Ah Bl + Al Bh (one block, two products), a0 of Al Bl; LD/VLD/VLDT load, ADD/SUB/VADD accumulate.
+    // acc is (a32 << 32) + (a16 << 16) + a0 registered in A, the clock the soft accumulator took its sum: the same value
+    // at the same clock. The loads add the preload constant 2^63 (gpu3d_lmac): above a32's and a16's kept bits, and
+    // bit 63 of a0's, so the sum's bit 63 is flipped back
+    localparam bit A4 = SMALL && FF && LUNIT;
+    generate if (A4) begin : g_a4
+        wire        sub_o = b_acc == 3'(ACC_SUB);
+        wire        a_ld  = acc_m == 3'(ACC_LD) || acc_m == 3'(ACC_VLD) || acc_m == 3'(ACC_VLDT);
+        wire        a_en  = !rst && (a_ld || acc_m == 3'(ACC_ADD) || acc_m == 3'(ACC_SUB) || acc_m == 3'(ACC_VADD));
+        wire [32:0] nb    = sub_o ? -{mb_n[31], mb_n} : {mb_n[31], mb_n};
+        wire [16:0] bh    = nb[32:16];
+`ifdef GXENG_A4_MUT
+        wire [16:0] bl    = {nb[15], nb[15:0]};     // (mutant: Bl sign-extended)
+`else
+        wire [16:0] bl    = {1'b0, nb[15:0]};
+`endif
+        wire [16:0] al    = {1'b0, ma_n[15:0]};
+        wire [15:0] ah    = ma_n[31:16];
+        logic [31:0] a32;
+        logic [47:0] a16;
+        logic [63:0] a0;
+        // (A 20 bits wide, past the 18x19 modes, so a32 and a0 each get a 27x27 block with its accumulator, as a1x's lanes:
+        // #2356 with 16/17 bits packed them as two independent 18x18 with the accumulators in logic)
+        gpu3d_lmac  #(.WA(20), .WB(17), .WR(32)) u_m32 (.clk, .a(20'($signed(ah))), .b(bh), .en(a_en), .ld(a_ld), .q(a32));
+        gpu3d_lmac2 #(.WA(17), .WB(17), .WR(48)) u_m16 (.clk, .a0(17'($signed(ah))), .b0(bl), .a1(al), .b1(bh), .en(a_en), .ld(a_ld), .q(a16));
+        gpu3d_lmac  #(.WA(20), .WB(17), .WR(64)) u_m0  (.clk, .a({3'd0, al}), .b(bl), .en(a_en), .ld(a_ld), .q(a0));
+        always_ff @(posedge clk) acc <= ({a32, 32'd0} + {a16, 16'd0} + a0) ^ 64'h8000_0000_0000_0000;
+`ifndef SYNTHESIS
+        // synthesis translate_off
+        // the soft accumulator it replaces, beside it; equal at every clock after the first load
+        logic signed [63:0] acc_s;
+        logic a4_seen = 1'b0;
+        wire [63:0] acc_sum_s = (acc_ld ? 64'd0 : acc_s) + (acc_sub ? ~acc_opd : acc_opd) + {63'd0, acc_sub};
+        always_ff @(posedge clk) begin
+            if (acc_en) acc_s <= acc_sum_s;
+            if (acc_en && acc_ld) a4_seen <= 1'b1;
+            if (!rst && acc_a == ACC_ADDM) $error("gpu3d_gxeng a4: ADDM in an image built for the DSP accumulator");
+            if (!rst && a4_seen && acc != acc_s) $error("gpu3d_gxeng a4: acc %016x, soft %016x (upc %03x)", acc, acc_s, upc);
+        end
+        // synthesis translate_on
+`endif
+    end else begin : g_soft
     always_ff @(posedge clk) begin
         if (SMALL) begin
             if (acc_en) acc <= acc_sum;
@@ -1045,6 +1227,9 @@ module gpu3d_gxeng #(
             ACC_ADDM: acc <= acc + {44'd0, pr[19:0]};
             default: ;
         endcase
+    end
+    end endgenerate
+    always_ff @(posedge clk) begin
         a63 <= acc[63];
         az <= acc == 64'sd0;
         nfit <= acc[63:31] != {33{acc[63]}};
@@ -1064,9 +1249,16 @@ module gpu3d_gxeng #(
         assign v_row = b_acc == 3'(ACC_VLD) ? 3'd0 : b_acc == 3'(ACC_VLDT) ? 3'd4 : vcnt;
         logic signed [31:0] vm_q [4], vma [4];
         // lanes 1-3 keep bits 0..43 only: the readers take bits 12..43 and 24..39, which modulo 2^44
-        // sums give exactly
-        logic signed [43:0] vpr [4], vacc [4];
+        // sums give exactly. Each lane accumulates in its two DSP blocks (docs/gx-area-map.md a1): vah the sum of
+        // row[31:16] * MB (bits 16..43 of the lane), val the sum of row[15:0] * MB (the low half zero-extended), so
+        // the lane is (vah << 16) + val mod 2^44. They step at M from the operand registers (vma, mb), a clock
+        // before the A stage summed the product register: the DSP's multiply-accumulate with its own output
+        // register as the accumulator, no soft adders. vah/val after a clock hold what vacc held a clock later
+        logic [43:0] vah [4];          // a1x: the high sum's block keeps 44 bits too; bits 0..27 are read
+        logic [43:0] val [4];
         assign vm0_q = vm_q[0];
+        wire v_mvl = !rst && (acc_m == 3'(ACC_VLD) || acc_m == 3'(ACC_VLDT));
+        wire v_men = v_mvl || (!rst && acc_m == 3'(ACC_VADD));
         genvar vc;
         for (vc = 0; vc < 4; vc++) begin : g_lane
             wire rf_clip = rf_we && rf_wa[10:4] == FF_A_CLIP[10:4] && rf_wa[1:0] == 2'(vc);
@@ -1078,6 +1270,20 @@ module gpu3d_gxeng #(
             wire [31:0] wd_l = hw_raw ? {{4{hraw[15]}}, hraw, 12'd0} : rf_raw ? {rf_wd[19:0], 12'd0} : rf_wd;
             gpu3d_lram #(.W(32), .AW(3), .FE(1'b1)) u_vm (.clk, .we(rf_clip || rf_tex || rf_raw || hw_raw), .waddr(wa_l),
                                                .wdata(wd_l), .raddr(v_row), .rdata(vm_q[vc]));
+            // a1x: lanes 1-3's two sums in two DSP blocks each (gpu3d_lmac: altera_mult_add with its accumulator),
+            // operands taken as vma and mb are, stepped in M: VLD/VLDT load the products, VADD adds them
+            if (vc != 0) begin : g_mac
+                // (A 20 bits wide, past the 18x19 modes, so each sum gets a 27x27 block with its accumulator: #2306 with 16/17
+                // bits packed two products a block and built the accumulators in logic)
+                gpu3d_lmac #(.WA(20), .WB(16), .WR(44)) u_mh (.clk, .a(20'($signed(vm_q[vc][31:16]))), .b(mb_n[15:0]), .en(v_men), .ld(v_mvl), .q(vah[vc]));
+`ifdef GXENG_A1X_MUT
+                gpu3d_lmac #(.WA(20), .WB(16), .WR(44)) u_ml (.clk, .a({{4{vm_q[vc][15]}}, vm_q[vc][15:0]}), .b(mb_n[15:0]), .en(v_men), .ld(v_mvl), .q(val[vc]));   // (mutant: low half sign-extended)
+`else
+                gpu3d_lmac #(.WA(20), .WB(16), .WR(44)) u_ml (.clk, .a({4'd0, vm_q[vc][15:0]}), .b(mb_n[15:0]), .en(v_men), .ld(v_mvl), .q(val[vc]));
+`endif
+            end else begin : g_nomac
+                assign vah[vc] = '0; assign val[vc] = '0;
+            end
 `ifndef SYNTHESIS
             // synthesis translate_off
             always_ff @(posedge clk)
@@ -1089,26 +1295,43 @@ module gpu3d_gxeng #(
             if (v_op) vcnt <= v_row + 3'd1;
             for (int c = 1; c < 4; c++) begin      // lane 0: the scalar MAC (ma, pr, acc)
                 vma[c] <= vm_q[c];
-                vpr[c] <= 44'(vma[c] * $signed(mb[15:0]));
-                // VLD/VLDT: 0 + vpr, VADD: vacc + vpr, one adder behind a clock enable (#1685: 132 LEs of muxes)
-                if (acc_vl || acc_a == 3'(ACC_VADD)) vacc[c] <= (acc_vl ? 44'd0 : vacc[c]) + vpr[c];
             end
         end
         // vx_l: lanes 1-3's VXR word, registered a clock early: the lane ub_n's xsh names (ub_n: the word ub takes at
         // the next clock), as the lanes leave this clock, so the lane select and the word's form are off the O path
         // (vacc -> xo -> R); lane 0, the scalar MAC's acc, stays combinational
+        // (a1: the lane's sums as they leave this clock are vah/val's registers now; the lane is selected first,
+        // then its two halves combined, one 28-bit adder for the three lanes; xsh 0: lane 0, the scalar acc, not here)
         wire [2:0] xsh_n = fb(ub_n, B_XSH_LO, B_XSH_W);
-        logic signed [43:0] vacc_n [4];
-        logic [31:0] vx_l;
+        logic [27:0] vs_h;
+        logic [43:0] vs_l;
         always_comb begin
-            vacc_n[0] = '0;
-            for (int c = 1; c < 4; c++)
-                vacc_n[c] = (acc_vl || acc_a == 3'(ACC_VADD)) ? (acc_vl ? 44'd0 : vacc[c]) + vpr[c] : vacc[c];
+            vs_h = '0; vs_l = '0;
+            for (int c = 1; c < 4; c++) if (xsh_n[1:0] == 2'(c)) begin vs_h = vah[c]; vs_l = val[c]; end
         end
-        always_ff @(posedge clk) vx_l <= xsh_n[2] ? {{16{vacc_n[xsh_n[1:0]][39]}}, vacc_n[xsh_n[1:0]][39:24]} : vacc_n[xsh_n[1:0]][43:12];
+        wire  [43:0] vs = {vs_h + vs_l[43:16], vs_l[15:0]};
+        logic [31:0] vx_l;
+        always_ff @(posedge clk) vx_l <= xsh_n[2] ? {{16{vs[39]}}, vs[39:24]} : vs[43:12];
         assign vx_q = b_xsh[1:0] != 2'd0 ? vx_l : b_xsh[2] ? {{16{acc[39]}}, acc[39:24]} : acc[43:12];
+        assign x_vl = vx_l;
 `ifndef SYNTHESIS
         // synthesis translate_off
+        // a1: the lanes as they were (vpr in M, vacc in A, 44 bits), beside the DSP form: vacc after a clock equals
+        // the halves combined after the clock before, at every clock after the first reset
+        logic signed [43:0] vpr [4], vacc [4];
+        logic va_seen = 1'b0;
+        always_ff @(posedge clk) begin
+            for (int c = 1; c < 4; c++) begin
+                vpr[c] <= 44'(vma[c] * $signed(mb[15:0]));
+                if (acc_vl || acc_a == 3'(ACC_VADD)) vacc[c] <= (acc_vl ? 44'd0 : vacc[c]) + vpr[c];
+            end
+            if (rst) va_seen <= 1'b1;
+        end
+        logic [43:0] va_q [4];
+        always_ff @(posedge clk) for (int c = 1; c < 4; c++) va_q[c] <= 44'({vah[c], 16'd0} + 44'(val[c]));
+        always_ff @(posedge clk)
+            if (va_seen && !rst) for (int c = 1; c < 4; c++)
+                if (vacc[c] != va_q[c]) $error("gpu3d_gxeng a1: lane %0d DSP sums %011x, vacc %011x (upc %03x)", c, va_q[c], vacc[c], upc);
         // the select it replaces (vacc's lane at ub's xsh, this clock): equal at every clock after the first reset
         wire [43:0] o_vsel = b_xsh[1:0] == 2'd0 ? acc[43:0] : vacc[b_xsh[1:0]];
         wire [31:0] o_vxq  = b_xsh[2] ? {{16{o_vsel[39]}}, o_vsel[39:24]} : o_vsel[43:12];
@@ -1127,6 +1350,7 @@ module gpu3d_gxeng #(
         // synthesis translate_on
 `endif
     end else begin : g_novx
+        assign x_vl = '0;
         assign vx_q = '0; assign v_row = '0; assign v_opo = 1'b0; assign vm0_q = '0;
     end endgenerate
 
@@ -1189,6 +1413,23 @@ module gpu3d_gxeng #(
     // the registered decodes are ub's (od, above)
     always_ff @(posedge clk)
         if (!rst && od != odec(ub)) $error("gpu3d_gxeng: operand decode od != odec(ub) (upc %03x)", upc);
+    // xo's folded xsh selects (od.xa/xt/xv) against the selects they replace (od.xs with ub's xsh): equal X
+    // at every clock after the first reset
+    wire [31:0] o_xo_xsh = ({32{od.xs[XS_ACCX]}} & accx) | (FF ? ({32{od.xs[XS_ATR]}} & at_q) | ({32{od.xs[XS_VXR]}} & vx_q) : 32'd0);
+    wire [31:0] n_xo_xsh = ({32{od.xa[0]}} & acc[31:0]) | ({32{od.xa[1]}} & acc[40:9]) | ({32{od.xa[2]}} & acc[43:12]) | ({32{od.xa[3]}} & acc[63:32]) |
+                           (FF ? ({32{od.xt[0]}} & x_c0) | ({32{od.xt[1]}} & x_c1) | ({32{od.xt[2]}} & x_c2) | ({32{od.xt[3]}} & x_t0) |
+                                 ({32{od.xt[4]}} & x_t1) | ({32{od.xt[5]}} & pu_q) | ({32{od.xv[0]}} & x_vl) |
+                                 ({32{od.xv[1]}} & {{16{acc[39]}}, acc[39:24]}) | ({32{od.xv[2]}} & acc[43:12]) : 32'd0);
+    logic xo_seen = 1'b0;
+    always_ff @(posedge clk) begin
+        if (rst) xo_seen <= 1'b1;
+        else if (xo_seen && o_xo_xsh !== n_xo_xsh) $error("gpu3d_gxeng XSH: upc %03x xs %0d xsh %0d xo %08x/%08x", upc, b_xs, b_xsh, n_xo_xsh, o_xo_xsh);
+    end
+    // N's sign select beside the result's muxes is the result's sign bit (fn_n == res[31] at every
+    // flag-setting clock; the mutant GXENG_FN_MUT is caught here)
+    always_ff @(posedge clk)
+        if (!rst && b_fl && !fl_sort && fn_n !== res[31])
+            $error("gpu3d_gxeng: fn_n %b != res[31] %b (upc %03x)", fn_n, res[31], upc);
     // the shifter takes kreg as K4 leaves it (0, 4, .., 32): bit 5 alone means 32
     always_ff @(posedge clk)
         if (!rst && od.ro[RO_SH] && od.fsh && kreg[5] && kreg[4:0] != 5'd0) $error("gpu3d_gxeng: FSH with kreg %0d", kreg);

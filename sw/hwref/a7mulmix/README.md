@@ -2,7 +2,7 @@
 
 The SDK pair and Census23 functional/completion gates now pass in the
 [SDK/software packet](../../../docs/results/a7mulmix-sdk-20261102/README.md).
-This is **not staged or DS-timing-qualified**. It continues the accepted [bounded service proposal](../../../docs/cpu-a7mul-service-proposal-20261102.md).
+This is **not staged or DS-timing-qualified**. It continues the accepted [bounded service proposal](../../../docs/archive/cpu-a7mul-service-proposal-20261102.md).
 Root coordinates with hwref before any trip, card or deployment. This directory is separate from `a7mulphase`;
 no historical producer, accepted WRAM/Thumb scope, top-level probe menu,
 trip list, card path, CPU/P7 RTL or timing default changes.

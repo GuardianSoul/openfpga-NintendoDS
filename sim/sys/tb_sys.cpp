@@ -111,7 +111,7 @@ static void step(bool req = false, u32 cpu = 0, bool we = false, u32 be = 0, u32
                 fill_pending = false;
             } else {
                 io_by_dma = true;
-                top->io_req = 1; top->io_pre = 1; top->tmr_oh = 0; top->io_cpu = 0; top->io_we = 0; top->io_be = 0xF;
+                top->io_req = 1; top->io_pre = 1; top->io_tmr = ((a >> 12) & 0x1FF) == 0 && ((a >> 4) & 0xFF) == 0x10; top->tmr_oh = 0; top->io_cpu = 0; top->io_we = 0; top->io_be = 0xF;
                 top->io_addr = (a & 0x1FFFFF) >> 2; top->io_wdata = 0;
             }
         } else {
@@ -129,12 +129,12 @@ static void step(bool req = false, u32 cpu = 0, bool we = false, u32 be = 0, u32
         for (int i = 0; i < 32; i++) { if (ext9 >> i & 1) G.SetIRQ(0, i); if (ext7 >> i & 1) G.SetIRQ(1, i); }
     }
     if (!io_by_dma) {
-        top->io_req = req; top->io_pre = req; top->io_cpu = cpu; top->tmr_oh = (req && we && ((addr >> 12) & 0x1FF) == 0 && ((addr >> 4) & 0xFF) == 0x10) ? 1u << ((cpu << 2) | ((addr >> 2) & 3)) : 0; top->io_we = we; top->io_be = be;
+        top->io_req = req; top->io_pre = req; top->io_tmr = req && ((addr >> 12) & 0x1FF) == 0 && ((addr >> 4) & 0xFF) == 0x10; top->io_cpu = cpu; top->tmr_oh = (req && we && ((addr >> 12) & 0x1FF) == 0 && ((addr >> 4) & 0xFF) == 0x10) ? 1u << ((cpu << 2) | ((addr >> 2) & 3)) : 0; top->io_we = we; top->io_be = be;
         top->io_addr = addr >> 2; top->io_wdata = wd;
     }
     eval_edge();
     if (io_by_dma) { fill_pending = true; fill_data = top->io_rdata; }
-    top->io_req = 0; top->io_pre = 0; top->tmr_oh = 0; ext9 = 0; ext7 = 0;
+    top->io_req = 0; top->io_pre = 0; top->io_tmr = 0; top->tmr_oh = 0; ext9 = 0; ext7 = 0;
 }
 
 // A CPU register access at the current cycle, mirrored in the golden model.
@@ -190,6 +190,14 @@ static void test_div(int n) {
 }
 static void test_sqrt(int n) {
     phase = "sqrt";
+    // Independent constant: the old RTL and reference both wrapped their
+    // trial term here and incorrectly returned 0x80000001.
+    io(0, 0x2B0, true, 0x3, 1);
+    io(0, 0x2B8, true, 0xF, 1);
+    io(0, 0x2BC, true, 0xF, 0x40000000);
+    idle(28);
+    u32 boundary_root = io(0, 0x2B4, false);
+    CHECK(boundary_root == 0x80000000u, "64-bit sqrt trial overflow: %08x", boundary_root);
     for (int i = 0; i < n; i++) {
         int k = rnd(4);
         if (k == 0) io(0, 0x2B0, true, 0x3, rnd(2));
@@ -215,9 +223,18 @@ static void test_sqrt(int n) {
             else if (i < 128) { u64 s = (u64)(0xFFFFFFFFu - (i - 64)); v = s * s + (i & 1 ? 1 : -1); }
             else { u64 s = r64() >> rnd(33); v = s * s + rnd(3) - 1; }
             if (!mode) v &= 0xFFFFFFFF;
-            io(0, 0x2B8, true, 0xF, (u32)v); io(0, 0x2BC, true, 0xF, (u32)(v >> 32));
+            // In 32-bit mode, the high parameter word must be ignored.
+            io(0, 0x2B8, true, 0xF, (u32)v);
+            io(0, 0x2BC, true, 0xF, mode ? (u32)(v >> 32) : 0xA5A5A5A5u);
             idle(26);
-            io(0, 0x2B4, false); io(0, 0x2B0, false);
+            u32 root = io(0, 0x2B4, false);
+            // Independent of the RTL and golden recurrence: the root must
+            // bracket v between consecutive squares. The next square is
+            // beyond u64 only for the largest possible u32 root.
+            u64 square = u64(root) * root, next = u64(root) + 1;
+            CHECK(square <= v && (root == 0xFFFFFFFFu || v < next * next),
+                  "sqrt floor bound: n=%016llx root=%08x", (unsigned long long)v, root);
+            io(0, 0x2B0, false);
         }
     }
 }

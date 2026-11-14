@@ -68,7 +68,7 @@ creating output. A partial/stale linked core must not silently label new
 references as the current mode. Build information is an identity receipt;
 DS comparisons separately establish rule behavior.
 
-[FullCLI23 qualification](../../docs/census23-cli.md) binds the frozen source,
+[FullCLI23 qualification](../../docs/archive/census23-cli.md) binds the frozen source,
 actual compile flags/binary, caught linked-mode fault and all38 real-DS
 capture comparisons. Existing game references remain separate until the
 combined game gate runs with this explicit mode.
@@ -295,13 +295,13 @@ catches a separately compiled disabled-charge fault. Flag-off, stock and
 bit23 fallback outputs equal the previous reference. This qualifies the
 shared2D component and wiring; a new complete Census CLI/game reference
 still requires coordinator qualification. See
-[the core evidence](../../docs/objwork-closure31.md).
+[the core evidence](../../docs/archive/objwork-closure31.md).
 
 Incremental reference builds must verify the complete original patched-source and
 header hash snapshot after every host mirror. The first terminal binary1472c341
 was withdrawn after unpatched headers shifted the idle predicate by32 bytes.
 Repaired2ff70684 uses the same core, restores clean0:193/all21 original exports,
-and retains the failure and guards in the [qualification](../../docs/census23-cli.md).
+and retains the failure and guards in the [qualification](../../docs/archive/census23-cli.md).
 
 ### Read-only clean runtime export
 

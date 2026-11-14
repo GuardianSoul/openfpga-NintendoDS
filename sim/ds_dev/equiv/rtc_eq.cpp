@@ -59,8 +59,8 @@ static void step() {
         if (bad == 0) for (int i = hn > 12 ? hn - 12 : 0; i < hn; i++) printf("    %s\n", hist[i % 64]);
         if (bad < 5) printf("  cycle %llu: new %08x ref %08x\n", cyc, t->q_new, t->q_ref);
 #ifdef RTC_VALID
-        if (bad == 0) { auto& R = *t->rootp; printf("  new hr %02x mo %02x yr %02x s1 %d ref hr %02x pm %d mo %02x yr %02x s1 %d\n",
-            (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__hr, (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__mo, (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__yr, (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__s1,
+        if (bad == 0) { auto& R = *t->rootp; printf("  new hr %02x mo %02x yr %02x (RAM) s1 %d ref hr %02x pm %d mo %02x yr %02x s1 %d\n",
+            (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__rm[15], (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__rm[11], (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__rm[7], (unsigned)R.tb_rtc_eq__DOT__u_new__DOT__s1,
             (unsigned)R.tb_rtc_eq__DOT__u_ref__DOT__hr, (unsigned)R.tb_rtc_eq__DOT__u_ref__DOT__pm, (unsigned)R.tb_rtc_eq__DOT__u_ref__DOT__mo, (unsigned)R.tb_rtc_eq__DOT__u_ref__DOT__yr, (unsigned)R.tb_rtc_eq__DOT__u_ref__DOT__s1); }
 #endif
         bad++;

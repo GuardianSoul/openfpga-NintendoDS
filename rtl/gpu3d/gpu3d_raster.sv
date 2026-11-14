@@ -20,6 +20,7 @@
 // each entry {attr[31:0], depth[23:0], color[22:0]}; color is
 // r[5:0] g[11:6] b[17:12] a[22:18]; attr uses melonDS's AttrBuffer layout.
 module gpu3d_raster #(
+    parameter bit QFE = 1'b0,        // u_tq/u_pq in M10K, read on the falling edge (core_top_ds RAM_MOVE 8)
     // 0 (the default): full rate, eight divider stages, a divider each.
     // 1: half-rate pixel pipeline with the four-stage folded divider, one
     // divider shared by the edge unit and the span stage (make
@@ -246,7 +247,8 @@ module gpu3d_raster #(
     input  logic         ps_valid,
     output logic         ps_ready,
     input  logic [1:0]   ps_type,      // 0 header, 1 vertex, 3 end of line
-    input  logic [127:0] ps_data,
+    input  logic [127:0] ps_data,      // a header beat's data (type 0)
+    input  logic [127:0] ps_vdata,     // a vertex beat's data (type 1; nds_g3d_store sends each on its own port)
     // texture and palette VRAM (16-bit word at addr & ~1, any latency)
     output logic         tex_req,
     output logic [18:0]  tex_addr,
@@ -502,7 +504,7 @@ module gpu3d_raster #(
                   .DS_YPERSP(DS_YPERSP), .DS_XPERSP16(DS_XPERSP16), .DS_AACOV(DS_AACOV), .DS_AAYCOV(DS_AAYCOV), .DS_TEXRND(DS_TEXRND),
                   .FEAT_TOON(FEAT_TOON), .FEAT_SHADOW(FEAT_SHADOW), .VREG(VREG), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .TOONR(TR), .YNW(YNW), .YP16(YP16)) u_front (
         .clk, .rst, .dispcnt(dcnt), .fill_all(dispcnt[4] || dispcnt[5]), .alpharef(aref), .frame_start,
-        .ps_line_req, .ps_line_y, .ps_valid, .ps_ready, .ps_type, .ps_data,
+        .ps_line_req, .ps_line_y, .ps_valid, .ps_ready, .ps_type, .ps_data, .ps_vdata,
         .fe_desc, .fe_wr, .nx_full(nx_hold), .pipe_idle, .pipe_lp,
         .y, .y3, .clr_x, .clr_we, .st_clr, .lines_done, .lines_go(r_go), .frame_go, .fp_done, .fp_run,
         .busy, .dbg_phase, .dbg_span);
@@ -634,7 +636,7 @@ module gpu3d_raster #(
     // values as the MLAB rings they were, ~1 LAB per 20 bits); dly_en is
     // the clocks dly_wp moves on
     wire         dly_en = adv && !rst;
-    gpu3d_dring #(.W(12), .AW(5), .D((AREA ? 17 : 21) + TXD + PXD), .K(2)) u_dt20 (
+    gpu3d_dring #(.W(12), .AW(5), .D((AREA ? 17 : 21) + TXD + PXD), .K(2), .STYLE("M10K")) u_dt20 (
         .clk, .we(adv), .en(dly_en), .wp(dly_wp), .wdata({LOV && wk_tag.lp, wk_tag.covrst, wk_tag.part, wk_tag.x}),
         .rdata(dt_x20));
     // RMERGE: u_dt10 shares an M10K with u_dz (g_rmz)
@@ -1340,11 +1342,13 @@ module gpu3d_raster #(
     logic [QA-1:0] tq_rd, tq_wr, pq_rd, pq_wr;
     logic [QA:0]   tq_n, pq_n;
     logic       tq_pop, pq_pop;
+    logic [QA-1:0] tq_rd_a, tq_rd_s, pq_rd_a, pq_rd_s;   // the pointers and counts after this cycle's pops, advancing or not
+    logic [QA:0]   tq_n_a, tq_n_s, pq_n_a, pq_n_s;
     logic [15:0] tq_h0, pq_h0;
     wire        fq_rst = rst || frame_go;
-    gpu3d_lram #(.W(16), .AW(QA)) u_tq (
+    gpu3d_lram #(.W(16), .AW(QA), .FE(QFE)) u_tq (
         .clk, .we(tex_valid && !fq_rst), .waddr(tq_wr), .wdata(tex_data), .raddr(tq_rd), .rdata(tq_h0));
-    gpu3d_lram #(.W(16), .AW(QA)) u_pq (
+    gpu3d_lram #(.W(16), .AW(QA), .FE(QFE)) u_pq (
         .clk, .we(pal_valid && !fq_rst), .waddr(pq_wr), .wdata(pal_data), .raddr(pq_rd), .rdata(pq_h0));
     // a pixel that needs two entries takes the first one a cycle early
     logic        p17_w0v, p19_w0v;    // first entry held
@@ -1356,10 +1360,12 @@ module gpu3d_raster #(
         end else begin
             if (tex_valid) tq_wr <= tq_wr + 1'b1;
             if (pal_valid) pq_wr <= pq_wr + 1'b1;
-            tq_rd <= tq_rd + QA'(tq_pop);
-            pq_rd <= pq_rd + QA'(pq_pop);
-            tq_n <= tq_n + QN'(tex_valid) - QN'(tq_pop);
-            pq_n <= pq_n + QN'(pal_valid) - QN'(pq_pop);
+            // (the pops with adv, the late signal, at the last mux: #2095/#2100 p17_ntex -> wait17 -> adv -> pq_rd's
+            // MLAB read address -1.76 ns; the same values as rd + pop, n + valid - pop)
+            tq_rd <= adv ? tq_rd_a : tq_rd_s;
+            pq_rd <= adv ? pq_rd_a : pq_rd_s;
+            tq_n <= adv ? tq_n_a : tq_n_s;
+            pq_n <= adv ? pq_n_a : pq_n_s;
 `ifndef SYNTHESIS
             if (tq_n + QN'(tex_valid) > QN'(1 << QA) || pq_n + QN'(pal_valid) > QN'(1 << QA)) $error("gpu3d_raster: response FIFO overflow");
 `endif
@@ -1846,6 +1852,17 @@ module gpu3d_raster #(
     assign adv = !lin_hold && (!AREA || hr_t) && !(hold15 || wait17 || take17 || hold17 || wait19 || take19 || hz20 || ll20);
     assign tq_pop = take17 || (adv && p17_rd);
     assign pq_pop = take19 || (adv && p19_need);
+    // the queues' next pointers and counts with adv and without (take17/take19 only when not advancing)
+`ifdef G3D_RDQ_MUT
+    wire tq_pa = take17;                                    // (mutant: the advancing pop lost)
+`else
+    wire tq_pa = take17 || p17_rd;
+`endif
+    wire pq_pa = take19 || p19_need;
+    assign tq_rd_a = tq_rd + QA'(tq_pa);  assign tq_rd_s = tq_rd + QA'(take17);
+    assign pq_rd_a = pq_rd + QA'(pq_pa);  assign pq_rd_s = pq_rd + QA'(take19);
+    assign tq_n_a = tq_n + QN'(tex_valid) - QN'(tq_pa);  assign tq_n_s = tq_n + QN'(tex_valid) - QN'(take17);
+    assign pq_n_a = pq_n + QN'(pal_valid) - QN'(pq_pa);  assign pq_n_s = pq_n + QN'(pal_valid) - QN'(take19);
 
     // ---------------- stage registers ----------------
     // texture/palette requests are the ones the main FSM used to make

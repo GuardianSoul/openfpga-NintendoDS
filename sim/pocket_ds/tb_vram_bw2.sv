@@ -93,9 +93,9 @@ module tb_vram_bw2 #(parameter integer OPEN = 0);
     wire [1:0] dram_ba, dram_dqm;
     wire dram_clk, dram_cke, dram_ras_n, dram_cas_n, dram_we_n;
     parameter integer OPEN_ROW = 0;
-    nds_sdram_bus #(.N(NP), .OPEN(OPEN)) sdram (.m_hurry('0), .clk(clk_mem), .init(rst_bus), .ready(sdram_ready),
+    nds_sdram_bus #(.N(NP), .OPEN(OPEN)) sdram (.m_hurry('0), .m_cut('1), .m_first('0), .clk(clk_mem), .init(rst_bus), .ready(sdram_ready),
         .m_valid(p_valid), .m_we(p_we), .m_addr(p_addr), .m_n(p_n), .m_wdata(p_wdata), .m_be(p_be), .m_take(p_take),
-        .w_valid(p_w), .w_data(p_wd), .bw_valid(1'b0), .bw_addr(24'd0), .bw_data(32'd0), .bw_read(),
+        .w_valid(p_w), .w_data(p_wd), .bw_valid(1'b0), .bw_addr(24'd0), .bw_data(32'd0), .bw_he(2'b11), .bw_read(),
         .SDRAM_DQ(dram_dq), .SDRAM_A(dram_a), .SDRAM_BA(dram_ba), .SDRAM_DQML(dram_dqm[0]), .SDRAM_DQMH(dram_dqm[1]),
         .SDRAM_nWE(dram_we_n), .SDRAM_nRAS(dram_ras_n), .SDRAM_nCAS(dram_cas_n), .SDRAM_CKE(dram_cke), .SDRAM_CLK(dram_clk));
     nds_sdram_bport bp2 (.clk_bus, .clk_mem, .reset(rst_bus),

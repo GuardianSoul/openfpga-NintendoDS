@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nds_cart AUX SPI equivalence (docs/ndsplay16.md): tb_cart_spi_eq runs a
+"""nds_cart AUX SPI equivalence (docs/archive/ndsplay16.md): tb_cart_spi_eq runs a
 reference nds_cart (REF, a git revision; module renamed nds_cart_ref) and this
 tree's side by side on random SPI save scripts for every save type, IR on and
 off. Each must print RESULT SAME.
@@ -54,7 +54,7 @@ def script(rng, kind, ir):
         elif c < 0.70: tx([rng.choice([0x02, 0x0A])] + addr() + [rng.randrange(256) for _ in range(rng.randrange(1, 12))])
         elif c < 0.74 and kind == 3:
             tx([0x06]); tx([rng.choice([0xDB, 0xDB, 0xD8])] + addr())
-            ops += [0x5000, 0x1004, 0x7000 | ir]   # as games: poll the status until the erase ends (docs/ndsplay16.md)
+            ops += [0x5000, 0x1004, 0x7000 | ir]   # as games: poll the status until the erase ends (docs/archive/ndsplay16.md)
         elif c < 0.78: tx([0x9F, 0, 0, 0])
         elif c < 0.84: tx([rng.randrange(256) for _ in range(rng.randrange(1, 6))])
         elif c < 0.88: ops.append(0x5000)

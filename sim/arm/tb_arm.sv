@@ -22,7 +22,7 @@
 // to bit 0, or with bit 31 set raises it N = bits 30:0 cycles later. An ARM7
 // that keeps retiring while halted (more than the instructions already in its
 // pipeline) fails the run.
-module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, parameter int A9_OPT = 0, parameter bit EVB = 1'b0, parameter bit EVBW = 1'b0, parameter int A9_XD = 0, parameter int A9_XI = 0, parameter bit SLOW = 1'b0, parameter bit A7_DS = 1'b0, parameter bit EARLYD = 1'b0);   // (obj2: -GARM9_WAYS=2, the DS build's)
+module tb_arm #(parameter int ARM9_WAYS = 4, parameter int ARM9_IWAYS = 0, parameter bit A9_SOLO = 1'b0, parameter int A9_OPT = 0, parameter bit EVB = 1'b0, parameter bit EVBW = 1'b0, parameter int A9_XD = 0, parameter int A9_XI = 0, parameter bit SLOW = 1'b0, parameter bit A7_DS = 1'b0, parameter bit EARLYD = 1'b0, parameter bit A9_CORE = 1'b0, parameter A9_RF = "M10K");   // (obj2: -GARM9_WAYS=2, the DS build's)
   logic clk = 1'b0;
   logic rst = 1'b1;
 
@@ -72,8 +72,8 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
   logic [5:0]  dbg_wa;
   logic [31:0] dbg_wd, dbg_pc, dbg_cpsr;
 
-  arm_cpu #(.ARM9_WAYS(ARM9_WAYS), .A9_SOLO(A9_SOLO), .A9_OPT(A9_OPT), .ARM9_EVB(EVB), .ARM9_EVBW(EVBW), .A9_XD(A9_XD), .A9_XI(A9_XI), .SLOW(SLOW), .A7_DS(A7_DS), .ARM9_EARLYD(EARLYD)) dut (
-    .clk(clk), .rst(rst), .run(run), .reset_pc0(pc0), .reset_pc1(pc1),
+  arm_cpu #(.SEP_RST(1), .ARM9_WAYS(ARM9_WAYS), .ARM9_IWAYS(ARM9_IWAYS), .A9_SOLO(A9_SOLO), .A9_OPT(A9_OPT), .ARM9_EVB(EVB), .ARM9_EVBW(EVBW), .A9_XD(A9_XD), .A9_XI(A9_XI), .SLOW(SLOW), .A7_DS(A7_DS), .ARM9_EARLYD(EARLYD), .A9_CORE(A9_CORE), .A9_RF(A9_RF)) dut (
+    .clk(clk), .rst(rst), .rst9(rst), .rst7(rst), .run(run), .reset_pc0(pc0), .reset_pc1(pc1),
     .hivecs7(1'b0), .irq(irq), .fiq(2'b00), .wake7(wake7),
     .b9_req(b9_req), .b9_we(b9_we), .b9_addr(b9_addr), .b9_wdata(b9_wdata), .b9_be(b9_be),
     .b9_ack(b9_ack), .b9_rdata(b9_rdata),
@@ -130,6 +130,9 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
     end
     if ($value$plusargs("img0=%s", img0)) $readmemh(img0, mem0);
     if ($value$plusargs("img1=%s", img1)) $readmemh(img1, mem1);
+    // the D-cache form with half-line dirty bits (arm9_mem MEM1: SLOW and A9_OPT bit 19) marks itself at 0x0203FFFC for
+    // sim/arm/tests/hdirty.s
+    if (SLOW && (A9_OPT & 524288) != 0) mem0[midx(32'h0203FFFC)] = 32'h48444952;
     if (!$value$plusargs("pc0=%h", pc0)) pc0 = 32'h0;
     if (!$value$plusargs("pc1=%h", pc1)) pc1 = 32'h0;
     if (!$value$plusargs("run=%d", v)) v = 3;
@@ -275,6 +278,23 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
     if (dbg_wen) $display("%0d RF  [%0d] <= %08x", cycle, dbg_wa, dbg_wd);
   end
 
+  // per-CPU trace lanes: with A7_DS the two CPUs' own streams (arm_cpu's merged port keeps one of two
+  // retires in the same clock), else the merged port split by dbg_tid
+  logic        l9_wen, l7_wen, l9_ret, l7_ret;
+  logic [4:0]  l9_wa, l7_wa;
+  logic [31:0] l9_wd, l7_wd, l9_pc, l7_pc, l9_cpsr, l7_cpsr;
+  generate if (A7_DS) begin : g_lanes
+    assign l9_wen = dut.c_dbg_wen; assign l9_wa = dut.c_dbg_wa[4:0]; assign l9_wd = dut.c_dbg_wd;
+    assign l9_ret = dut.c_dbg_retire; assign l9_pc = dut.c_dbg_pc; assign l9_cpsr = dut.c_dbg_cpsr;
+    assign l7_wen = dut.g_a7ds.l_wen; assign l7_wa = dut.g_a7ds.l_wa; assign l7_wd = dut.g_a7ds.l_wd;
+    assign l7_ret = dut.g_a7ds.l_ret; assign l7_pc = dut.g_a7ds.l_pc; assign l7_cpsr = dut.g_a7ds.l_cpsr;
+  end else begin : g_lanes1
+    assign l9_wen = dbg_wen && !dbg_wa[5]; assign l7_wen = dbg_wen && dbg_wa[5];
+    assign l9_wa = dbg_wa[4:0]; assign l7_wa = dbg_wa[4:0]; assign l9_wd = dbg_wd; assign l7_wd = dbg_wd;
+    assign l9_ret = dbg_retire && !dbg_tid; assign l7_ret = dbg_retire && dbg_tid;
+    assign l9_pc = dbg_pc; assign l7_pc = dbg_pc; assign l9_cpsr = dbg_cpsr; assign l7_cpsr = dbg_cpsr;
+  end endgenerate
+
   // Trace, lockstep compare and test monitors
   always @(posedge clk) begin
     if (!rst) begin
@@ -283,22 +303,26 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
       cycle = cycle + 1;
       if (wake_at >= 0 && cycle >= wake_at) begin wake7 = 1'b1; wake_at = -1; end
       if (wake7) halted7 = 1'b0;
-      if (dbg_wen) shadow[dbg_wa[5]][dbg_wa[4:0]] = dbg_wd;
-      if (dbg_retire) begin
-        t = dbg_tid;
+      // (A7_DS: each CPU's own trace, so two in one clock are both seen)
+      if (l9_wen) shadow[0][l9_wa] = l9_wd;
+      if (l7_wen) shadow[1][l7_wa] = l7_wd;
+      for (int k = 1; k >= 0; k--) if (k != 0 ? l7_ret : l9_ret) begin
+        logic [31:0] rpc;
+        t = k[0];
+        rpc = k ? l7_pc : l9_pc;
         if (t && halted7) begin
           halt_ret = halt_ret + 1;
           if (halt_ret > 6 && !halt_err) begin
-            $display("ctx1: still retiring while halted (pc %08x)", dbg_pc);
+            $display("ctx1: still retiring while halted (pc %08x)", rpc);
             halt_err = 1'b1;
           end
         end
-        cp = dbg_cpsr;
+        cp = k ? l7_cpsr : l9_cpsr;
         retired[t] = retired[t] + 1;
         if (opf[t] != 0)
-          $fwrite(opf[t], "%08x %08x %08x %0d\n", dbg_pc, rd_mem(t, dbg_pc), cp, cycle);
+          $fwrite(opf[t], "%08x %08x %08x %0d\n", rpc, rd_mem(t, rpc), cp, cycle);
         if (trf[t] != 0) begin
-          $fwrite(trf[t], "%08x,%08x", dbg_pc, cp);
+          $fwrite(trf[t], "%08x,%08x", rpc, cp);
           for (int r = 0; r < 15; r++) $fwrite(trf[t], ",%08x", logical_reg(t, r, cp));
           $fwrite(trf[t], "\n");
         end
@@ -310,11 +334,11 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
                       rv[9], rv[10], rv[11], rv[12], rv[13], rv[14], rv[15], rv[16]);
           if (n == 17) begin
             logic bad;
-            bad = (rv[0] != dbg_pc) || (rv[1] != cp);
+            bad = (rv[0] != rpc) || (rv[1] != cp);
             for (int r = 0; r < 15; r++) if (rv[r + 2] != logical_reg(t, r, cp)) bad = 1'b1;
             if (bad) begin
               $display("LOCKSTEP MISMATCH ctx%0d at retire %0d: ref pc=%08x cpsr=%08x, dut pc=%08x cpsr=%08x",
-                       t, retired[t], rv[0], rv[1], dbg_pc, cp);
+                       t, retired[t], rv[0], rv[1], rpc, cp);
               for (int r = 0; r < 15; r++)
                 if (rv[r + 2] != logical_reg(t, r, cp))
                   $display("  r%0d ref=%08x dut=%08x", r, rv[r + 2], logical_reg(t, r, cp));
@@ -326,35 +350,35 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
         end
 
         // idle loop (branch to self)
-        if (dbg_pc == last_pc[t]) same_cnt[t] = same_cnt[t] + 1;
+        if (rpc == last_pc[t]) same_cnt[t] = same_cnt[t] + 1;
         else same_cnt[t] = 0;
-        last_pc[t] = dbg_pc;
+        last_pc[t] = rpc;
 
         if ((t ? mode1 : mode0) == "jsmolka" && same_cnt[t] > 8 && !done[t]) begin
-          if (dbg_pc[31:24] != 8'h08) $display("ctx%0d: idle loop outside ROM at %08x", t, dbg_pc);
-          result[t] = (dbg_pc[31:24] == 8'h08) ? logical_reg(t, 12, cp) : 32'hDEAD0003;
+          if (rpc[31:24] != 8'h08) $display("ctx%0d: idle loop outside ROM at %08x", t, rpc);
+          result[t] = (rpc[31:24] == 8'h08) ? logical_reg(t, 12, cp) : 32'hDEAD0003;
           done[t] = 1'b1;
         end
         if ((t ? mode1 : mode0) == "exit" && same_cnt[t] > 64 && !done[t]) begin
-          $display("ctx%0d: stuck in a loop at %08x without an exit code", t, dbg_pc);
+          $display("ctx%0d: stuck in a loop at %08x without an exit code", t, rpc);
           result[t] = 32'hDEAD0002;
           done[t] = 1'b1;
         end
 
         if ((t ? mode1 : mode0) == "armwrestler" && !done[t]) begin
-          if (dbg_pc == hook[0] || dbg_pc == hook[2]) begin
+          if (rpc == hook[0] || rpc == hook[2]) begin
             logic [31:0] mask;
-            mask = (dbg_pc == hook[0]) ? (logical_reg(t, 1, cp) & 32'hFF) : logical_reg(t, 6, cp);
+            mask = (rpc == hook[0]) ? (logical_reg(t, 1, cp) & 32'hFF) : logical_reg(t, 6, cp);
             aw_results = aw_results + 1;
             if (mask != 0) begin
               aw_fail = aw_fail + 1;
               $display("armwrestler %s test %0d: %-8s BAD mask=%02x",
-                       (dbg_pc == hook[0]) ? "ARM" : "THUMB",
-                       (dbg_pc == hook[0]) ? aw_step - 1 : aw_step - 6,
+                       (rpc == hook[0]) ? "ARM" : "THUMB",
+                       (rpc == hook[0]) ? aw_step - 1 : aw_step - 6,
                        cstr(t, logical_reg(t, 0, cp)), mask);
             end
           end
-          if (dbg_pc == hook[1]) begin
+          if (rpc == hook[1]) begin
             // ARM menu loop: run tests 0-4, then the Thumb tests (menu item 3)
             if (aw_step < 5) begin
               wr_mem(t, 32'h03000008, aw_step, 4'hF);
@@ -364,7 +388,7 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter bit A9_SOLO = 1'b0, param
             end
             aw_step = aw_step + 1;
           end
-          if (dbg_pc == hook[3]) begin
+          if (rpc == hook[3]) begin
             if (aw_step < 8) begin
               wr_mem(t, 32'h03000008, aw_step - 5, 4'hF);
               aw_step = aw_step + 1;

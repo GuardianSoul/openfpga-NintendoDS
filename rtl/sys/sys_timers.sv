@@ -28,7 +28,9 @@ module sys_timers (
     logic       rst_q;              // (the reset walks the RAM; a register of its own, the chip's reset comes from far)
     logic [3:0] tg [0:7];           // the armed overflow's tick
     logic [7:0] av, ch, en, fd;     // armed; chained to the timer below; IRQ enable; fired, not yet wrapped
-    wire  [2:0] i = rst_q ? slot : acc ? acc_i : slot;
+    // acc (nds_fabric io_tmr) is a register with !rst in it, so acc implies !rst_q (one reset net): rst_q is not in the
+    // address select (RC11 #2451 1asR: rst_q -> i -> the RAM's read -> the update -> the write, -1.99 ns); checked below
+    wire  [2:0] i = acc ? acc_i : slot;
     wire  [W-1:0] e = mem[i];
     wire  [15:0] ctr = e[15:0], reload = e[31:16];
     wire  [4:0]  cn  = e[36:32];    // {start, irq enable, cascade, prescale}
@@ -123,5 +125,7 @@ module sys_timers (
         if (late && !wl) miss <= miss + 1;
         if (wl) wlate <= wlate + 1;
     end
+    always_ff @(posedge clk)
+        if (acc && rst_q) $display("sys_timers: ERROR: a timer access during the reset walk at %0t", $time);
     // synthesis translate_on
 endmodule

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Geometry-engine cost per command body on the RTL (docs/unit-scorecard.md).
+"""Geometry-engine cost per command body on the RTL (docs/archive/unit-scorecard.md).
 
     tools/scorecard/gxbodies.py TB OUTDIR
 

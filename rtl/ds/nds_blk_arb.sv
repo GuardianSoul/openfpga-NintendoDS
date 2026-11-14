@@ -12,6 +12,7 @@ module nds_blk_arb
     input  logic rst,
     input  logic a_req,
     input  blk_t a_blk,
+    input  logic [1:0] a_word,   // a's first 64-bit word (gpu2d CWF; b's blocks start at 0)
     output logic a_ack,
     output logic a_rvalid,
     input  logic b_req,
@@ -20,12 +21,14 @@ module nds_blk_arb
     output logic b_rvalid,
     output logic g_req,
     output blk_t g_blk,
+    output logic [1:0] g_word,
     input  logic g_ack,
     input  logic g_rvalid
 );
     wire pick_b = !a_req;
     assign g_req = a_req || b_req;
     assign g_blk = pick_b ? b_blk : a_blk;
+    assign g_word = pick_b ? 2'd0 : a_word;
     assign a_ack = g_ack && !pick_b;
     assign b_ack = g_ack && pick_b;
     // owners of the blocks acknowledged and not yet delivered

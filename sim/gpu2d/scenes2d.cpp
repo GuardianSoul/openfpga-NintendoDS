@@ -466,6 +466,28 @@ std::vector<Segment> builtin_scenes()
         };
         add(b);
     }
+    // display capture with a VRAM display (display mode 2: engine A shows an LCDC bank; disp() sets mode 1)
+    // and capture source B from VRAM: the display and capture B read the same bank at the same {line, x}
+    // (gpu2d_bg CBD takes capture B from the display's lookup)
+    for (u32 seed = 0; seed < 3; seed++)
+    {
+        B b("capture-vdisp-" + std::to_string(seed), 120 + seed);
+        b.memory(); b.text_maps(0);
+        b.st.lcdc = 0xF;
+        b.st.cap_enable = 1;
+        b.w32(0, 0, (disp(0, 0x1F, 1u << 3 | 1u << 4) & ~(3u << 16)) | 2u << 16 | b.rng.r(4) << 18);
+        for (int bg = 0; bg < 4; bg++) b.bgcnt_rand(0, bg, true);
+        b.oam(0, 2, 1, 0, 0);
+        b.blend_rand(0);
+        b.st.capcnt = b.rng.r(20) | b.rng.r(20) << 8 | b.rng.r(4) << 16 | b.rng.r(4) << 18 | (seed % 4) << 20
+                    | b.rng.r(2) << 24 | (1u + seed % 3) << 29 | 1u << 31;
+        b.perline = [](u32 y, B& b) {
+            if (y % 16 == 3) b.st.capcnt = (b.st.capcnt & ~0x6300001Fu) | b.rng.r(20) | b.rng.r(2) << 24
+                                           | (1u + b.rng.r(3)) << 29;
+            if (y % 8 == 0) b.l3d_rand(40);
+        };
+        add(b);
+    }
     // everything at once, random
     for (u32 seed = 0; seed < 4; seed++)
     {

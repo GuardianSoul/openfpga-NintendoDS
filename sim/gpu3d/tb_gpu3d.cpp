@@ -255,7 +255,7 @@ RtlResult render_rtl(const Scene& sc, int maxlat, bool all_polys, uint32_t seed)
         if (!q.empty())
         {
             m->ps_type = q.front().type;
-            for (int i = 0; i < 4; i++) m->ps_data[i] = q.front().w[i];
+            for (int i = 0; i < 4; i++) { m->ps_data[i] = q.front().w[i]; m->ps_vdata[i] = q.front().w[i]; }
         }
 #ifdef RCACHE
         // the block port: beats of the blocks accepted so far, in order
@@ -414,7 +414,7 @@ int main(int argc, char** argv)
     int maxlat = 3;
     bool all_polys = false, profile = false, line_profile = false;
     std::string feat_off;   // --feat-off aa,toon,fog,atest,edge,shadow,lower: the raster was built with those FEAT_* = 0
-    int nrandom = 0;
+    int nrandom = 0, npixrules = 0;   // --pixrules N: N rounds of the extreme-value scenes
     uint32_t seed0 = 100;
     for (int i = 1; i < argc; i++)
     {
@@ -444,10 +444,12 @@ int main(int argc, char** argv)
         else if (a == "--dump-scenes" && i + 1 < argc) dumpdir = argv[++i];
         else if (a == "--random" && i + 1 < argc) nrandom = atoi(argv[++i]);
         else if (a == "--seed" && i + 1 < argc) seed0 = strtoul(argv[++i], nullptr, 0);
+        else if (a == "--pixrules" && i + 1 < argc) npixrules = atoi(argv[++i]);
     }
 
     std::vector<Scene> scenes;
-    if (nrandom)
+    if (npixrules) scenes = pixrules_scenes(npixrules);
+    else if (nrandom)
         for (int i = 0; i < nrandom; i++) scenes.push_back(random_mix_scene(seed0 + i));
     else if (files.empty()) scenes = builtin_scenes();
     for (auto& f : files)
@@ -526,9 +528,9 @@ int main(int argc, char** argv)
             }
         if (profile && r.tw_n)
             printf("     texel wait %.2f (max %llu) over %llu requests\n", (double)r.tw_sum / r.tw_n, (unsigned long long)r.tw_max, (unsigned long long)r.tw_n);
-        if (bad || r.timeout)
+        if (bad || r.timeout || getenv("G3D_PPM"))   // G3D_PPM: the images of passing scenes too
         {
-            fails++;
+            fails += bad || r.timeout;
             Frame d(256 * 192);
             for (int i = 0; i < 256 * 192; i++) d[i] = g[i] == r.f[i] ? 0 : 0x003F3F3F;
             write_ppm(outdir + "/" + sc.name + "_golden.ppm", g);

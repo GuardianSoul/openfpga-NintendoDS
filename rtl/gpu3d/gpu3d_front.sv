@@ -73,7 +73,8 @@ module gpu3d_front #(
     input  logic         ps_valid,
     output logic         ps_ready,
     input  logic [1:0]   ps_type,
-    input  logic [127:0] ps_data,
+    input  logic [127:0] ps_data,      // header fields (type 0 beats)
+    input  logic [127:0] ps_vdata,     // vertex fields (type 1 beats)
     // span descriptors to the pixel pipeline
     output gpu3d_pkg::span_t fe_desc,
     output logic         fe_wr,
@@ -176,12 +177,12 @@ module gpu3d_front #(
     generate if (VYS_M10K) begin : g_vysm
         wire [VBW-1:0] vb_wn = (rst || !EP2) ? '0 : QB ? vb_e : a_rel ? VBW'(!vb_w) : vb_w;   // the walk's bank after this clock
         gpu3d_ram #(.W(8), .AW(VBW + 4), .STYLE("M10K, no_rw_check")) u_vys (
-            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_data[16:9]), .raddr({vb_wn, vys_ra_n}), .rdata(vys_q));
+            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_vdata[16:9]), .raddr({vb_wn, vys_ra_n}), .rdata(vys_q));
 `ifndef SYNTHESIS
         // synthesis translate_off
         logic [7:0] vys_s;
         gpu3d_lram #(.W(8), .AW(VBW + 4)) s_vys (
-            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_data[16:9]), .raddr({QB ? vb_s : vb_w, vys_ra}), .rdata(vys_s));
+            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_vdata[16:9]), .raddr({QB ? vb_s : vb_w, vys_ra}), .rdata(vys_s));
         always_ff @(posedge clk)
             if (!rst && int'(u_edge.xs) == 1 && vys_q != vys_s)   // (1: X_WALK, the walk's read)
                 $error("gpu3d_front VYS_M10K: {%0d, %0d}: M10K %02x, MLAB %02x", vb_w, vys_ra, vys_q, vys_s);
@@ -189,7 +190,7 @@ module gpu3d_front #(
 `endif
     end else begin : g_vys
         gpu3d_lram #(.W(8), .AW(VBW + 4)) u_vys (
-            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_data[16:9]), .raddr({QB ? vb_s : vb_w, vys_ra}), .rdata(vys_q));
+            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_vdata[16:9]), .raddr({QB ? vb_s : vb_w, vys_ra}), .rdata(vys_q));
     end endgenerate
     wire  [VBW+3:0]   vm_waddr = {vb_w, vcnt};
     // QB: the stage 1s' polygon header, latched at a_tk (p_* then load the next)
@@ -245,7 +246,7 @@ module gpu3d_front #(
     gpu3d_edge #(.DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ), .DS_YPERSP(DS_YPERSP), .DS_TEXRND(DS_TEXRND),
                  .EXT_LROM(LROM2), .EXT_ROM(LROM2), .VREG(VREG), .STAGE(EP2 ? 1 : 0), .WL0(EP2 && FDB && !PP2), .HW(EW), .TOONR(TOONR), .YNW(YNW), .YP16(YP16), .BKW(VBW)) u_edge (
         .clk, .rst, .lr_addr(e_lr_addr), .lr_qx(e_lr_q), .rom_ao(e_rom_a), .rom_qx(e_rom_q),
-        .vm_we, .vm_waddr, .vm_wdata(ps_data[115:0]),
+        .vm_we, .vm_waddr, .vm_wdata(ps_vdata[115:0]),
         .start(e_start), .side(e_start_side), .bank(vb_e), .y, .wbuf(k_wbuf), .aa(dispcnt[4]),
         .facing(k_facing), .dummy(k_dummy), .toon(DS_TOON && k_toon),
         .nv(k_nv), .vtop(k_vtop), .vbot(k_vbot),
@@ -267,7 +268,7 @@ module gpu3d_front #(
         logic [3:0]  vys1_ra;
         logic [7:0]  vys1_q;
         gpu3d_lram #(.W(8), .AW(4)) u_vys1 (
-            .clk, .we(vm_we), .waddr(vcnt), .wdata(ps_data[16:9]), .raddr(vys1_ra), .rdata(vys1_q));
+            .clk, .we(vm_we), .waddr(vcnt), .wdata(ps_vdata[16:9]), .raddr(vys1_ra), .rdata(vys1_q));
         logic        d1_start, d1_busy, d1_done, d1_req, d1_hold, d1_mode;
         logic [31+YNW:0] d1_num;
         logic [24:0] d1_den, d1_r;
@@ -279,7 +280,7 @@ module gpu3d_front #(
         gpu3d_edge #(.DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ), .DS_YPERSP(DS_YPERSP), .DS_TEXRND(DS_TEXRND),
                      .EXT_LROM(1'b0), .EXT_ROM(1'b0), .VREG(VREG), .TOONR(TOONR), .YNW(YNW), .YP16(YP16)) u_edge1 (
             .clk, .rst, .lr_addr(), .lr_qx('0), .rom_ao(), .rom_qx('0),
-            .vm_we, .vm_waddr, .vm_wdata(ps_data[115:0]),
+            .vm_we, .vm_waddr, .vm_wdata(ps_vdata[115:0]),
             .start(e_go), .side(1'b1), .bank(1'b0), .y, .wbuf(p_wbuf), .aa(dispcnt[4]),
             .facing(p_facing), .dummy(p_ytop == p_ybot), .toon(DS_TOON && p_toon),
             .nv(p_nv), .vtop(p_vtop), .vbot(p_vbot), .dv(p_dvr),
@@ -316,7 +317,7 @@ module gpu3d_front #(
         gpu3d_edge #(.DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ), .DS_YPERSP(DS_YPERSP), .DS_TEXRND(DS_TEXRND),
                      .EXT_LROM(1'b1), .EXT_ROM(1'b1), .VREG(VREG), .STAGE(2), .PFE(FDB && !PP2), .HW(EW), .TOONR(TOONR), .YNW(YNW), .YP16(YP16), .BKW(VBW)) u_edgeb (
             .clk, .rst, .lr_addr(), .lr_qx('0), .rom_ao(), .rom_qx('0),
-            .vm_we, .vm_waddr, .vm_wdata(ps_data[115:0]),
+            .vm_we, .vm_waddr, .vm_wdata(ps_vdata[115:0]),
             .start(1'b0), .side(1'b0), .bank(1'b0), .y, .wbuf(1'b0), .aa(1'b0),
             .facing(1'b0), .dummy(1'b0), .toon(1'b0), .nv('0), .vtop('0), .vbot('0), .dv('0),
             .dv_start(eb_dv_start), .dv_num(eb_dv_num), .dv_den(eb_dv_den), .dv_req(eb_dv_req), .dv_hold(eb_dv_hold),
@@ -349,7 +350,7 @@ module gpu3d_front #(
         logic [3:0]  vys2_ra;
         logic [7:0]  vys2_q;
         gpu3d_lram #(.W(8), .AW(VBW + 4)) u_vys2 (
-            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_data[16:9]), .raddr({vb_s, vys2_ra}), .rdata(vys2_q));
+            .clk, .we(vm_we), .waddr({vb_w, vcnt}), .wdata(ps_vdata[16:9]), .raddr({vb_s, vys2_ra}), .rdata(vys2_q));
         logic        d2a_start, d2a_req, d2a_hold, d2a_mode, d2b_start, d2b_req, d2b_hold, d2b_mode, d2_busy, d2_done;
         logic [31+YNW:0] d2a_num, d2b_num;
         logic [24:0] d2a_den, d2b_den, d2_r;
@@ -361,7 +362,7 @@ module gpu3d_front #(
         gpu3d_edge #(.DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ), .DS_YPERSP(DS_YPERSP), .DS_TEXRND(DS_TEXRND),
                      .EXT_LROM(1'b0), .EXT_ROM(1'b0), .VREG(VREG), .STAGE(1), .HW(EW), .TOONR(TOONR), .YNW(YNW), .YP16(YP16), .BKW(VBW)) u_edge2a (
             .clk, .rst, .lr_addr(), .lr_qx('0), .rom_ao(), .rom_qx('0),
-            .vm_we, .vm_waddr, .vm_wdata(ps_data[115:0]),
+            .vm_we, .vm_waddr, .vm_wdata(ps_vdata[115:0]),
             .start(a_go), .side(1'b1), .bank(vb_e), .y, .wbuf(k_wbuf), .aa(dispcnt[4]),
             .facing(k_facing), .dummy(k_dummy), .toon(DS_TOON && k_toon),
             .nv(k_nv), .vtop(k_vtop), .vbot(k_vbot), .dv(k_dvr),
@@ -373,7 +374,7 @@ module gpu3d_front #(
         gpu3d_edge #(.DS_LIN17(DS_LIN17), .DS_LINZ(DS_LINZ), .DS_YPERSP(DS_YPERSP), .DS_TEXRND(DS_TEXRND),
                      .EXT_LROM(1'b1), .EXT_ROM(1'b1), .VREG(VREG), .STAGE(2), .HW(EW), .TOONR(TOONR), .YNW(YNW), .YP16(YP16), .BKW(VBW)) u_edge2b (
             .clk, .rst, .lr_addr(), .lr_qx('0), .rom_ao(), .rom_qx('0),
-            .vm_we, .vm_waddr, .vm_wdata(ps_data[115:0]),
+            .vm_we, .vm_waddr, .vm_wdata(ps_vdata[115:0]),
             .start(1'b0), .side(1'b0), .bank(1'b0), .y, .wbuf(1'b0), .aa(1'b0),
             .facing(1'b0), .dummy(1'b0), .toon(1'b0), .nv('0), .vtop('0), .vbot('0), .dv('0),
             .dv_start(d2b_start), .dv_num(d2b_num), .dv_den(d2b_den), .dv_req(d2b_req), .dv_hold(d2b_hold),
@@ -1316,9 +1317,9 @@ module gpu3d_front #(
             end
         end
         S_VTX: if (ps_valid && ps_type == 2'd1) begin
-            if (vcnt == 4'd0) vx0 <= ps_data[8:0];
-            if (vcnt == 4'd1) vx1 <= ps_data[8:0];
-            vxl <= ps_data[8:0];
+            if (vcnt == 4'd0) vx0 <= ps_vdata[8:0];
+            if (vcnt == 4'd1) vx1 <= ps_vdata[8:0];
+            vxl <= ps_vdata[8:0];
             vcnt <= vcnt + 4'd1;
             if (vcnt + 4'd1 == p_nv) st <= S_PCHK;
         end

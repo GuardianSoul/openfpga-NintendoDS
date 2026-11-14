@@ -23,6 +23,8 @@
 module nds_gpu3d
     import gpu2d_pkg::*;
 #(
+    parameter bit RING3 = 0,        // RING: nds_g3d_ring RING3, three read slots (line mod 3), the line after the needed one read early
+    parameter int RAM_MOVE = 0,     // core_top_ds RAM_MOVE: 4 GX spill, 8 raster queues, 16 cache queues to M10K
     parameter int PW = 10,      // log2 polygons per bank (HG title: 626)
     parameter int VW = 11,      // log2 vertices per bank (HG title: 1,679)
     parameter int RB = 3,       // log2 lines in the 3D ring
@@ -101,12 +103,14 @@ module nds_gpu3d
     parameter bit GX_LUNIT = 1'b0, // gpu3d_geom LUNIT: the lighting unit
     parameter int GX_VFIN  = 0,    // gpu3d_geom VFIN (2: VFIN-lite)
     parameter bit GX_FF    = 1'b0, // gpu3d_geom FF: the geometry redesign (with GX_USORT, GX_LUNIT, GX_VFIN 1)
+    parameter int GX_PAR = 0,      // gpu3d_geom GX_PAR: the number of GX_PAR steps, cumulative (docs/geometry-engine-par.md); 0: today's engine
     // STORE_SD (with GX_SPILL): the polygon store's records in SDRAM at word 0x0F0000 (byte 0x3C0000, 256 KiB; the GX spill ends at 0x380000) through the
     // rg_* ports, not in PSRAM: 4 word writes a record into the write chain, reads as 8-word blocks (the 4 words of the
     // record kept). The PSRAM goes to the CPUs and DMA: ~23K word writes and ~5.7K 4-word reads less a game frame on mkds-pack
     parameter bit STORE_SD = 1'b0,
     parameter bit GX_SPILL = 1'b0, // gpu3d_geom SPILL: GX entries beyond the on-chip 512 spill to SDRAM (shares the rg_* ports)
     parameter bit GX_GATH16 = 1'b0, // gpu3d_gxfront GATH16: the spill's gather 16 entries deep
+    parameter bit GX_FFVTX = 1'b0,  // gpu3d_geom FF_VTX: vertex commands decoded in hardware (with GX_FF; docs/gx-speed-study.md C1)
     parameter bit GX_ENGM10K = 1'b1, // gpu3d_geom ENG_TM10K: the engine's VC and VOC tables in M10K (0: MLAB, -2 M10K)
     parameter bit VYS_M10K = 1'b1,   // gpu3d_front VYS_M10K: the vertex y table in an M10K (0: MLAB, -1 M10K)
     parameter int GX_SPAW = 12,     // gpu3d_gxfront SP_AW: the spill ring 2^GX_SPAW entries (8 bytes each) in SDRAM
@@ -375,7 +379,7 @@ module nds_gpu3d
     logic [23:0] q_waddr, q_raddr;
     logic [31:0] q_wdata;
     // the divider on clk_2x where clk_2x runs (PUMP)
-    gpu3d_geom #(.USORT(GX_USORT), .LUNIT(GX_LUNIT), .VFIN(GX_VFIN), .FF(GX_FF), .GX_PRE(1'b1), .DIV_P2X(1'b0), .SPILL(GX_SPILL), .GATH16(GX_GATH16), .SP_AW(GX_SPAW), .ENG_TM10K(GX_ENGM10K)) u_geom (
+    gpu3d_geom #(.GAT_FE((RAM_MOVE & 4) != 0), .USORT(GX_USORT), .LUNIT(GX_LUNIT), .VFIN(GX_VFIN), .FF(GX_FF), .FF_VTX(GX_FFVTX), .GX_PAR(GX_PAR), .GX_PRE(1'b1), .DIV_P2X(1'b0), .SPILL(GX_SPILL), .GATH16(GX_GATH16), .SP_AW(GX_SPAW), .ENG_TM10K(GX_ENGM10K)) u_geom (
         .clk, .clk_2x, .rst, .tick, .geom_en, .vblank,
         .io_req(g_req), .io_we(g_we), .io_be(g_be), .io_addr(g_addr), .io_wdata(g_wdata), .io_wpre(g_wpre),
         .io_rdata(g_rdata), .io_ack(g_ack), .io_wait(g_wait),
@@ -391,7 +395,7 @@ module nds_gpu3d
     logic         ps_line_req, ps_valid, ps_ready;
     logic [7:0]   ps_line_y;
     logic [1:0]   ps_type;
-    logic [127:0] ps_data;
+    logic [127:0] ps_data, ps_vdata;     // header beats' data, vertex beats' data (nds_g3d_store: own ports)
     // the 3D ring: line y may be streamed once it is at most 2^RB - 2 lines
     // ahead of the line the 2D engine composes
     logic [7:0]   dline;
@@ -411,7 +415,7 @@ module nds_gpu3d
         nds_g3d_store #(.SL(SSL), .CL(SCL), .DROP(SDROP)) u_store (.clk, .rst,
             .po_valid, .po_ready, .po_type, .po_data, .po_index, .po_wv, .po_wk, .po_wd,
             .so_we, .so_pos, .so_idx, .so_done, .so_count, .drawing(st_draw), .lists_bld(st_bld),
-            .frame_go, .abort(r_abort), .diag_ld(st_diag), .ps_line_req, .ps_line_y, .y_lim, .ps_valid, .ps_ready, .ps_type, .ps_data,
+            .frame_go, .abort(r_abort), .diag_ld(st_diag), .ps_line_req, .ps_line_y, .y_lim, .ps_valid, .ps_ready, .ps_type, .ps_data, .ps_vdata,
             .p_req(sm_req), .p_we(sm_we), .p_addr(sm_addr), .p_wdata(sm_wdata), .p_ack(sm_ack), .p_rvalid(sm_rvalid), .p_rdata(sm_rdata),
             .p_wdrained(!STORE_SD || rg_wdrained));
 `ifdef G3D_EQ
@@ -438,10 +442,10 @@ module nds_gpu3d
                     if (eq_bad < 5) $display("G3D_EQ: beat %0d (line %0d) with no reference beat", eq_beats, ps_line_y);
                 end else begin
                     e = rq[rq_rp]; rq_rp <= rq_rp + 13'd1;
-                    if (e != {ps_type, ps_type == 2'd3 ? 128'd0 : ps_data}) begin
+                    if (e != {ps_type, ps_type == 2'd3 ? 128'd0 : ps_type == 2'd1 ? ps_vdata : ps_data}) begin
                         eq_bad <= eq_bad + 1;
                         if (eq_bad < 5) $display("G3D_EQ: beat %0d differs: type %0d %h, reference type %0d %h",
-                                                 eq_beats, ps_type, ps_data, e[129:128], e[127:0]);
+                                                 eq_beats, ps_type, ps_type == 2'd1 ? ps_vdata : ps_data, e[129:128], e[127:0]);
                     end
                 end
             end
@@ -456,6 +460,7 @@ module nds_gpu3d
             .po_valid, .po_ready, .po_type, .po_data, .po_index,
             .so_we, .so_pos, .so_idx, .so_done, .so_count,
             .ps_line_req, .ps_line_y, .y_lim, .ps_valid, .ps_ready, .ps_type, .ps_data);
+        assign ps_vdata = ps_data;
     end endgenerate
 
     // ---------------------------------------------- render state and tables
@@ -587,7 +592,7 @@ module nds_gpu3d
     assign r_ps_valid = ps_valid && stall_en;
     assign ps_ready   = r_ps_ready && stall_en;
     // AREA=0: full rate; the half-rate option measured no area gain (#187)
-    gpu3d_raster #(.AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
+    gpu3d_raster #(.QFE((RAM_MOVE & 8) != 0), .AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
                    .FEAT_EDGE(FEAT_EDGE), .FEAT_SHADOW(FEAT_SHADOW), .FEAT_LOWER(FEAT_LOWER), .TR3(TR3 && !FEAT_EDGE && !LB2), .VYS_M10K(VYS_M10K)) u_raster (
         .clk, .rst(rst || r_abort),
         .dispcnt(r_dispcnt), .alpharef(r_alpharef), .clear_attr1(r_clear_attr1), .clear_depth(r_clear_depth),
@@ -595,7 +600,7 @@ module nds_gpu3d
         .tbl_we, .tbl_sel, .tbl_addr, .tbl_data,
         .frame_start(frame_go), .busy(r_busy), .frame_done(), .px_hold(fp_hold), .fp_line, .fp_act(r_fp_act), .r_go(r_front_go),
         .ll_rd, .ll_slot, .ll_x, .ll_ack, .ll_q,
-        .ps_line_req, .ps_line_y, .ps_valid(r_ps_valid), .ps_ready(r_ps_ready), .ps_type, .ps_data,
+        .ps_line_req, .ps_line_y, .ps_valid(r_ps_valid), .ps_ready(r_ps_ready), .ps_type, .ps_data, .ps_vdata,
         .tex_req, .tex_addr, .tex_inval(vram_wr), .tex_valid, .tex_data,
         .pal_req, .pal_addr, .pal_valid, .pal_data,
         .px_valid, .px_x, .px_y, .px_color,
@@ -606,10 +611,10 @@ module nds_gpu3d
     logic [13:0] tc_blk, pc_blk;
     localparam int CQL = TXD == 0 || 2 * (TXD + 3) <= 16 ? 4 : 5;
     generate if (TC_V2) begin : g_c2
-        nds_g3d_cache2 #(.AW(19), .LW(TL), .QL(CQL), .NF(TC_NF), .PUMP(PUMP), .WAYS(TC_V2W)) u_tc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
+        nds_g3d_cache2 #(.QFE((RAM_MOVE & 16) != 0), .AW(19), .LW(TL), .QL(CQL), .NF(TC_NF), .PUMP(PUMP), .WAYS(TC_V2W)) u_tc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
             .req(tex_req), .addr(tex_addr), .valid(tc_v), .data(tex_data),
             .b_req(tc_req), .b_blk(tc_blk), .b_ack(tc_ack), .b_rvalid(tc_rv), .b_rdata(t_rdata));
-        nds_g3d_cache2 #(.AW(17), .LW(PL), .QL(CQL), .SCAN(TC_PSCAN), .PUMP(PUMP)) u_pc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
+        nds_g3d_cache2 #(.QFE((RAM_MOVE & 16) != 0), .AW(17), .LW(PL), .QL(CQL), .SCAN(TC_PSCAN), .PUMP(PUMP)) u_pc (.clk, .clk2(clk_2x), .rst, .flush(vram_wr), .pf_v(1'b0), .pf_a('0),
             .req(pal_req), .addr(pal_addr), .valid(pc_v), .data(pal_data),
             .b_req(pc_req), .b_blk(pc_blk), .b_ack(pc_ack), .b_rvalid(pc_rv), .b_rdata(t_rdata));
     end else begin : g_c1
@@ -685,7 +690,7 @@ module nds_gpu3d
         end
 `endif
     generate if (RING) begin : g_ring
-        nds_g3d_ring #(.YLAG(YLIM2 ? 2 : 0), .LLR(LLR), .RPRI(RPRI), .NX2(NX2), .RH_AT(RH_AT), .TR3(TR3 && !FEAT_EDGE && !LB2), .LEAD(RLEAD)) u_ringx (.rg_hurry, .clk, .rst, .frame_go, .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata(ring_q),
+        nds_g3d_ring #(.YLAG(YLIM2 ? 2 : 0), .LLR(LLR), .COPY_SHARE(1'b1), .RING3(RING3), .RPRI(RPRI), .NX2(NX2), .RH_AT(RH_AT), .TR3(TR3 && !FEAT_EDGE && !LB2), .LEAD(RLEAD)) u_ringx (.rg_hurry, .clk, .rst, .frame_go, .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata(ring_q),
             .y_lim(y_lim_rg), .px_valid, .px_x, .px_y, .px_color,
             .rg_wreq(q_wreq), .rg_waddr(q_waddr), .rg_wdata(q_wdata), .rg_wack(q_wack), .rg_rreq(q_rreq), .rg_raddr(q_raddr),
             .rg_rack(q_rack), .rg_rvalid(q_rvalid), .rg_rdata, .rg_wdrained,
@@ -822,6 +827,19 @@ module nds_gpu3d
     // ---- raster diagnostics (docs/diag.md)
     wire         lv_late  = lv_go && lv_on && {1'b0, l3d_line} >= lv_fin && !(px_valid && px_x == 8'hFF && px_y == l3d_line);
     wire         lv_under = lv_go && lv_on && RING && !ring_have;
+`ifndef ALTERA_RESERVED_QIS
+    // Late-line census (simulation only): per frame, composed 3D lines the raster had not finished (render-late,
+    // lv_late) and lines it had finished that the ring had not delivered (delivery-late: lv_under, not lv_late)
+    integer lc_r = 0, lc_d = 0;
+    always_ff @(posedge clk) if (!rst) begin
+        if (frame_go) begin
+            if (lc_r != 0 || lc_d != 0) $display("g3d LATECOUNT: render-late %0d delivery-late %0d in the last frame", lc_r, lc_d);
+            lc_r = 0; lc_d = 0;
+        end
+        if (lv_late) lc_r = lc_r + 1;
+        else if (lv_under) lc_d = lc_d + 1;
+    end
+`endif
     assign diag_r_ev = {lv_under, tex_req, r_pixel, pc_ack, tc_ack, r_abort, lv_late,
                         r_phase == 3'd6, r_phase == 3'd5, r_phase == 3'd3, r_phase == 3'd2};
     assign diag_t_start  = t_req && t_ack;
@@ -1343,6 +1361,7 @@ endmodule
 //   - lookups: one a clock while requests are queued (FAST), and a request
 //     with none queued before it is looked up (from addr) as it comes.
 module nds_g3d_cache2 #(
+    parameter bit QFE = 1'b0,          // the request queue copies in M10K, read on the falling edge (RAM_MOVE 16)
     parameter int AW = 19,
     parameter int LW = 6,
     parameter int QL = 4,               // log2 request queue entries
@@ -1391,8 +1410,8 @@ module nds_g3d_cache2 #(
     // the request queue, one MLAB copy per read: the head, the one behind it,
     // the scanner's (a register file read at three addresses costs a mux each)
     logic [AW-1:1] h, h1, hs;
-    gpu3d_lram #(.W(AW - 1), .AW(QL)) u_q0 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(rp), .rdata(h));
-    gpu3d_lram #(.W(AW - 1), .AW(QL)) u_q1 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(QL'(rp + 1'b1)), .rdata(h1));
+    gpu3d_lram #(.W(AW - 1), .AW(QL), .FE(QFE)) u_q0 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(rp), .rdata(h));
+    gpu3d_lram #(.W(AW - 1), .AW(QL), .FE(QFE)) u_q1 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(QL'(rp + 1'b1)), .rdata(h1));
     wire  [BW-1:0] hb = h[AW-1:5];
     wire  [SB-1:0] line = h[SB+4:5];    // the head's set
     logic [WAYS-1:0] vld_q, tc_bw, mk_q, s_vw, hit_w;   // per way: valid, tag store busy, being filled
@@ -1460,7 +1479,7 @@ module nds_g3d_cache2 #(
     logic          s_q;
     logic [AW-1:1] sa;
     generate if (SCAN) begin : g_qs
-        gpu3d_lram #(.W(AW - 1), .AW(QL)) u_q2 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(sq), .rdata(hs));
+        gpu3d_lram #(.W(AW - 1), .AW(QL), .FE(QFE)) u_q2 (.clk, .we(req && !rst), .waddr(wp), .wdata(addr[AW-1:1]), .raddr(sq), .rdata(hs));
     end else begin : g_nqs
         assign hs = '0;
     end endgenerate
@@ -1496,6 +1515,17 @@ module nds_g3d_cache2 #(
     wire           s_req = s_qx && s_free && !s_hit &&
                            sx[SB+4:5] != line && !lbusy(sx[SB+4:5]);
 
+    // DW7 (WAYS 2 or 4): the ways' data in one byte-enabled RAM, 3.5 M10K a way instead of 4 (gpu3d_ram_w7): the
+    // ways are written at one address ({f_line, fb}, the fill's way enabled) and read together at one ({ha set,
+    // ha[4:3]}), so their 64-bit rows pack into 10-bit bytes with no mux (docs/plan-next.md "RC12b 3D room")
+    localparam bit DW7 = WAYS == 2 || WAYS == 4;
+    logic [WAYS-1:0] d_we;
+    generate if (DW7) begin : g_dw7
+        logic [WAYS-1:0][63:0] q;
+        gpu3d_ram_w7 #(.N(WAYS), .AW(SB + 2)) u_d (.clk, .we(d_we), .waddr({f_line, fb}), .wdata(b_rdata),
+            .raddr({ha[SB+4:5], ha[4:3]}), .rdata(q));
+        always_comb for (int w = 0; w < WAYS; w++) d_w[w] = q[w];
+    end endgenerate
     genvar gw;
     generate for (gw = 0; gw < WAYS; gw = gw + 1) begin : g_way
         wire mine = WAYS == 1 || f_w[0] == WN'(gw);     // the block being filled goes into this way
@@ -1505,8 +1535,11 @@ module nds_g3d_cache2 #(
 `else
         wire dmine = mine;
 `endif
-        gpu3d_ram #(.W(64), .AW(SB + 2)) u_d (.clk, .we(b_rvalid && dmine), .waddr({f_line, fb}), .wdata(b_rdata),
-            .raddr({ha[SB+4:5], ha[4:3]}), .rdata(d_w[gw]));
+        assign d_we[gw] = b_rvalid && dmine;
+        if (!DW7) begin : g_d
+            gpu3d_ram #(.W(64), .AW(SB + 2)) u_d (.clk, .we(d_we[gw]), .waddr({f_line, fb}), .wdata(b_rdata),
+                .raddr({ha[SB+4:5], ha[4:3]}), .rdata(d_w[gw]));
+        end
         if (!(WAYS > 1 && TSHARE && SCAN)) begin : g_t
         nds_lcache #(.LB(SB), .TW(TW), .G(3), .CHECK(SCAN ? 1 : 0), .PUMP(PUMP && SCAN)) u_t (.clk, .clk2, .rst,
             .l_en, .l_idx(ha[SB+4:5]), .l_v(), .l_vn(vld_q[gw]), .l_tag(tag_q[gw]),

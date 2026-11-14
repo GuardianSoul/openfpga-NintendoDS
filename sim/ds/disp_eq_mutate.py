@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deliberate bugs in the docs/space-2d.md changes that the nds_disp lockstep
+"""Deliberate bugs in the docs/archive/space-2d.md changes that the nds_disp lockstep
 (sim/ds/disp_eq.sh, against 669c40c9) must catch: each mutation in a copy of
 the RTL, the release configuration, one seed.
   disp_eq_mutate.py VERILATOR BUILD_DIR [NAME_SUBSTRING]

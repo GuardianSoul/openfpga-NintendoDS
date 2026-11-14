@@ -1,0 +1,62 @@
+{
+  "scope": "Pinned source intent only, not native mapping/physical acceptance.",
+  "combined_source": "492132a42885d6c39d78e917275824c1be69ed28",
+  "CPU_production": "53ebf2917e9d347d920e2f7d128a39f7fe984b08",
+  "source_bindings": {
+    "rtl/arm/arm9_mem.sv": "4409944bd2a23b71686a23bb55d84a71eec9da8f5a92bfdd84c6284f32be748f",
+    "rtl/arm/arm9_ram.sv": "ecda1593281195fb2651427a5d09b066ad71854ec2adc9b3675809a5e375bea6"
+  },
+  "intent": {
+    "guard": "WAYS==2&&DSB==8&&ISB==8&&SLOW&&EVB&&!EVBW&&EARLYD&&OPT==1711268835",
+    "banks": {
+      "d": {
+        "instance": "u_packed_d",
+        "depth": 256,
+        "logical_width": 32,
+        "minimum_used_width": 21,
+        "clock": "clk",
+        "source_ports": {
+          "clk": "clk",
+          "a_addr": "dt_aa",
+          "a_we": "|dt_we",
+          "a_d": "{11'd0,packed_d_word}",
+          "a_q": "packed_d_aq",
+          "b_addr": "d_addr[12:5]",
+          "b_q": "packed_d_bq"
+        }
+      },
+      "i": {
+        "instance": "u_packed_i",
+        "depth": 256,
+        "logical_width": 32,
+        "minimum_used_width": 25,
+        "clock": "clk",
+        "source_ports": {
+          "clk": "clk",
+          "a_addr": "it_aa",
+          "a_we": "|it_we",
+          "a_d": "{7'd0,packed_i_word}",
+          "a_q": "packed_i_aq",
+          "b_addr": "i_addr[12:5]",
+          "b_q": "packed_i_bq"
+        }
+      }
+    },
+    "selected_native_branch": "lane[0].one.u_ram",
+    "mode": "True Dual Port",
+    "clock_mode": "Single Clock",
+    "RDW": {
+      "mixed": "dont care",
+      "A": "new data",
+      "B": "new data"
+    }
+  },
+  "Root_fit_context": {
+    "queue": 8859,
+    "card": "rc053room",
+    "family": "compact-experiment",
+    "seed": "3asR",
+    "CLOCK_NS_parameter": 10,
+    "fetch_queue_and_games_owned_by": "Root"
+  }
+}

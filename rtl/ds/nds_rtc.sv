@@ -11,10 +11,17 @@
 // bit order reversed, or the register form `rrrr0110` (bit 7 = read)
 // directly. Registers: status 1 and 2, date+time (7 bytes), time (3), INT1
 // (1 or 3 bytes by status 2 bit 2), INT2 (3), clock adjust, free register;
-// written date and time fields are taken as sent, without melonDS's range
-// checks, and the clock always counts 24 hours: status 1's 12/24-hour bit only
-// reads back, as games keep 24-hour mode (docs/ds-rules.md). The hour's pm bit
-// is its value's, as a 24-hour read shows it.
+// written date and time fields are masked and sanitized as the DS does
+// (rtcprobe v1, 2026-11-12, R121; after Jello's port of melonDS's
+// WriteDateTime, GuardianSoul/openfpga-NintendoDS PR 7): a bad BCD digit or a
+// value out of range becomes the field's minimum (year 00, month 01, day 01,
+// weekday 0, hour and minute 00), except the second, which keeps any valid
+// BCD value (the DS reads a written 60 back as 60); a day past the month's end
+// becomes 01 and carries into the month (and year). The clock counts a
+// canonical 24-hour hour; status 1's 12/24-hour bit converts the hour on
+// writes and reads (12-hour: 00-11 plus the PM bit, 0x40; an invalid 12-hour
+// hour is 00 with no PM bit, as on the DS). The hour's PM bit reads as the
+// hour's (>= 12) in both modes, as the DS shows it.
 //
 // Not modelled: interrupts (INT1/INT2 settings and the alarm registers are
 // stored and read back, but nothing fires and status 1 bits 4-6 stay 0),
@@ -34,7 +41,7 @@
 // due during a clear or a count waits (up to two are held). Behaviour is the
 // same as the all-flop version (b4eb578), cycle for cycle at the register,
 // for accesses at least 3 clocks apart (nds_fabric's IO path takes 4)
-// (docs/mlab-tables.md: sim/ds_dev/equiv/rtc_eq.sh).
+// (docs/archive/mlab-tables.md: sim/ds_dev/equiv/rtc_eq.sh).
 //
 // Time: the boot program sets it (sw/boot/boot7.s rtcset, 2026-10-28): it
 // reads the APF bridge's date and time from core registers 0xF20/0xF24 and
@@ -77,28 +84,57 @@ module nds_rtc #(
         endcase
     endfunction
 
+    // A bad BCD digit or a value outside lo..hi gives lo (after the field's mask)
+    function automatic logic [7:0] sanitize(input logic [7:0] v, input logic [7:0] lo, input logic [7:0] hi);
+        return (v[3:0] > 4'd9 || v[7:4] > 4'd9 || v < lo || v > hi) ? lo : v;
+    endfunction
+    // a written hour to the canonical 24-hour BCD hour: 12-hour mode adds 12 with the PM bit (BCD: +0x12, or +0x18
+    // when the low digit is 8 or 9); an invalid hour is 00 without the PM bit (DS rtcprobe: 59 in 12-hour mode -> 00)
+    function automatic logic [5:0] hour24(input logic [7:0] v, input logic mode24);
+        logic [7:0] h;
+        logic       bad;
+        h = v & 8'h3f;
+        bad = h[3:0] > 4'd9 || h > (mode24 ? 8'h23 : 8'h11);
+`ifdef RTC_SAN_MUT2
+        if (bad) h = 8'h00;                             // (mutant: the PM bit still adds 12 to an invalid hour)
+        if (!mode24 && v[6]) h = h + (h[3:0] >= 4'd8 ? 8'h18 : 8'h12);
+`else
+        if (bad) h = 8'h00;
+        else if (!mode24 && v[6]) h = h + (h[3:0] >= 4'd8 ? 8'h18 : 8'h12);
+`endif
+        return h[5:0];
+    endfunction
+    // the canonical hour as a 12-hour read shows it (BCD -12: -0x12, or -0x18 when the low digit is 0 or 1)
+    function automatic logic [5:0] hour12(input logic [5:0] h);
+        return h >= 6'h12 ? h - (h[3:0] < 4'd2 ? 6'h18 : 6'h12) : h;
+    endfunction
+
     // ---- state
     logic [7:0]  io;
-    logic [7:0]  yr;
-    logic [4:0]  mo;
-    logic [5:0]  hr;
-    wire         pm = hr >= 6'h12;
+    // the year, month and hour are RAM bytes too (R_YR, R_MO, R_HR; RC11 card 3b room: they were 19 flops with a
+    // second BCD incrementer); the day's end of month needs the month and the year's leap bit, read and latched
+    // ahead of the day (mo_l, lp) in the count; a date write latches its own month and the year's leap bit there
+    // too, for the written day's end of month (no count runs inside a transfer: counts start with CS low)
+    logic [4:0]  mo_l;
+    logic        lp;
     logic        poc;           // status 1 bit 7
     logic [3:1]  s1;            // status 1 bits 3:1 (bit 1: 24-hour mode)
     logic        s2_2;          // status 2 bit 2 (INT1 layout), a copy of the RAM's
     // RAM: 0 second, 1 minute, 2 day, 3 day of week, 4 status 2, 5 clock
-    // adjust, 6 free, 8-10 INT1 alarm, 12-14 INT2 alarm
+    // adjust, 6 free, 7 year, 8-10 INT1 alarm, 11 month (5 bits), 12-14 INT2 alarm, 15 hour (6 bits)
     localparam logic [3:0] R_SE = 4'd0, R_MI = 4'd1, R_DY = 4'd2, R_DW = 4'd3, R_S2 = 4'd4,
-                           R_ADJ = 4'd5, R_FRE = 4'd6, R_AL1 = 4'd8, R_AL2 = 4'd12;
+                           R_ADJ = 4'd5, R_FRE = 4'd6, R_YR = 4'd7, R_AL1 = 4'd8, R_MO = 4'd11, R_AL2 = 4'd12,
+                           R_HR = 4'd15;
     logic        rm_we;
     logic [3:0]  rm_wa, rm_ra;
     logic [7:0]  rm_wd, rq;
     (* ramstyle = "M10K" *) logic [7:0] rm [0:15];   // (M10K: the chip is short of LABs)
-    // sequences: the second count (K_*), the reset clear
-    // K_HR, K_MO, K_YR: the flops' arithmetic, one shared BCD incrementer
-    // (the hour after the minute, the month and year after the day)
+    // sequences: the second count (K_*), the reset clear; every field a RAM byte, one BCD incrementer (k_inc)
+    // on the byte read in the step before: second, minute, hour, then on a new day the month and year read
+    // for the month's length (K_MOR, K_YRR), day of week, day, month, year
+    // K_DCR: a written day past the month's end reads the month for the carry (then K_MOW, K_YRW as the count's)
     typedef enum logic [3:0] { K_IDLE, K_SE, K_SEW, K_MIW, K_DWW, K_DYW, K_CLR,
-                               K_HR, K_MO, K_YR } kst_t;
+                               K_HRW, K_MOR, K_YRR, K_MOW, K_YRW, K_DCR } kst_t;
     kst_t        ks;
     logic [3:0]  kc;            // clear step
     logic [6:0]  in_b;
@@ -181,17 +217,17 @@ module nds_rtc #(
             3'd0: if (out_pos == 3'd0) obf = {poc, 3'd0, s1, 1'b0};
             3'd4: if (out_pos == 3'd0) begin ob_ram = 1'b1; ob_a = R_S2; end
             3'd2: case (out_pos)
-                3'd0: obf = yr;
-                3'd1: obf = {3'd0, mo};
+                3'd0: begin ob_ram = 1'b1; ob_a = R_YR; end
+                3'd1: begin ob_ram = 1'b1; ob_a = R_MO; end
                 3'd2: begin ob_ram = 1'b1; ob_a = R_DY; end
                 3'd3: begin ob_ram = 1'b1; ob_a = R_DW; end
-                3'd4: obf = {1'b0, pm, hr};
+                3'd4: begin ob_ram = 1'b1; ob_a = R_HR; end
                 3'd5: begin ob_ram = 1'b1; ob_a = R_MI; end
                 3'd6: begin ob_ram = 1'b1; ob_a = R_SE; end
                 default: ;
             endcase
             3'd6: case (out_pos)
-                3'd0: obf = {1'b0, pm, hr};
+                3'd0: begin ob_ram = 1'b1; ob_a = R_HR; end
                 3'd1: begin ob_ram = 1'b1; ob_a = R_MI; end
                 3'd2: begin ob_ram = 1'b1; ob_a = R_SE; end
                 default: ;
@@ -202,7 +238,13 @@ module nds_rtc #(
             3'd3: if (out_pos == 3'd0) begin ob_ram = 1'b1; ob_a = R_ADJ; end
             3'd7: if (out_pos == 3'd0) begin ob_ram = 1'b1; ob_a = R_FRE; end
         endcase
-        ob0 = ob_ram ? rq : obf;
+        // (the hour byte with its PM bit, bit 6, as the chip reads it out; 12-hour mode (status 1 bit 1 clear) reads
+        // the hour as 00-11)
+`ifdef RTC_RAM_MUT
+        ob0 = ob_ram ? (ob_a == R_HR ? {1'b0, rq[5:0] > 6'h12, s1[1] ? rq[5:0] : hour12(rq[5:0])} : rq) : obf;   // (mutant: noon read as AM)
+`else
+        ob0 = ob_ram ? (ob_a == R_HR ? {1'b0, rq[5:0] >= 6'h12, s1[1] ? rq[5:0] : hour12(rq[5:0])} : rq) : obf;
+`endif
     end
 
     // ---- one second later (melonDS's CountSecond chain), one field per step:
@@ -210,14 +252,12 @@ module nds_rtc #(
     // next: second, minute (if the second wrapped), day of week and day (if
     // the hour wrapped the day)
     wire [7:0] k_inc = binc(rq);
-    // the flops' incrementer: the month in K_MO, the year in K_YR, else the hour
-    wire [7:0] f_inc = binc(ks == K_MO ? {3'b0, mo} : ks == K_YR ? yr : {2'b0, hr});
-    wire        n_day = f_inc == 8'h24;  // the hour when the minute wraps (K_HR)
+    wire        n_day = k_inc == 8'h24;  // the hour when the minute wraps (K_HRW)
     // end of month for the counted day
     // (a count never runs while a data byte comes in: a byte takes 16
-    // register writes, a count 5 clocks, and counts start with CS low)
-    wire       eom    = k_inc > dim(mo, leap(yr));      // the counted day
-    wire       yr_inc = f_inc == 8'h13;                 // in K_MO
+    // register writes, a count at most 11 clocks, and counts start with CS low)
+    wire       eom    = k_inc > dim(mo_l, lp);          // the counted day (K_DYW)
+    wire       yr_inc = k_inc == 8'h13;                 // in K_MOW
 
     wire [7:0] ob = ob0;
 
@@ -228,6 +268,11 @@ module nds_rtc #(
     logic [3:0] dat_a;                  // RAM byte a command data byte writes
     logic [7:0] dat_d;
     logic       dat_wr;                 // the byte would write (dat_w without dat_in)
+    // the written date's sanitized fields; the day against its month's end (mo_l, lp latched from this write)
+    wire [7:0]  yr_in = sanitize(ib, 8'h00, 8'h99);
+    wire [7:0]  mo_in = sanitize(ib & 8'h1f, 8'h01, 8'h12);
+    wire [7:0]  dy_in = sanitize(ib & 8'h3f, 8'h01, 8'h31);
+    wire        dy_carry = dy_in > dim(mo_l, lp);
     always_comb begin
         dat_wr = 1'b0; dat_a = R_SE; dat_d = ib;
         case (c_reg)
@@ -240,10 +285,18 @@ module nds_rtc #(
             default: ;
         endcase
         case (fld_r)
-            3'd3: begin dat_wr = 1'b1; dat_a = R_DY; end
-            3'd4: begin dat_wr = 1'b1; dat_a = R_DW; end
-            3'd6: begin dat_wr = 1'b1; dat_a = R_MI; end
-            3'd7: begin dat_wr = 1'b1; dat_a = R_SE; end
+            3'd1: begin dat_wr = 1'b1; dat_a = R_YR; dat_d = yr_in; end
+            3'd2: begin dat_wr = 1'b1; dat_a = R_MO; dat_d = mo_in; end
+            3'd5: begin dat_wr = 1'b1; dat_a = R_HR; dat_d = {2'd0, hour24(ib, s1[1])}; end
+            3'd3: begin dat_wr = 1'b1; dat_a = R_DY; dat_d = dy_carry ? 8'h01 : dy_in; end
+            3'd4: begin dat_wr = 1'b1; dat_a = R_DW; dat_d = sanitize(ib & 8'h07, 8'h00, 8'h06); end
+            3'd6: begin dat_wr = 1'b1; dat_a = R_MI; dat_d = sanitize(ib & 8'h7f, 8'h00, 8'h59); end
+`ifdef RTC_SAN_MUT1
+            3'd7: begin dat_wr = 1'b1; dat_a = R_SE; dat_d = sanitize(ib & 8'h7f, 8'h00, 8'h59); end   // (mutant: melonDS's range)
+`else
+            // the second keeps any valid BCD value: the DS reads a written 60 back as 60 (rtcprobe v1)
+            3'd7: begin dat_wr = 1'b1; dat_a = R_SE; dat_d = sanitize(ib & 8'h7f, 8'h00, 8'h79); end
+`endif
             default: ;
         endcase
     end
@@ -257,18 +310,23 @@ module nds_rtc #(
     // the command's byte (dat_*) or the sequence's (rm_wa/rm_wd): rm_sel,
     // the one choice that waits for the I/O request, is registered beside
     // both and applied after the registers
-    wire rm_sel = !(ks == K_SEW || ks == K_MIW || ks == K_DWW || ks == K_DYW || ks == K_CLR);
+    wire rm_sel = !(ks == K_SEW || ks == K_MIW || ks == K_HRW || ks == K_DWW || ks == K_DYW || ks == K_MOW || ks == K_YRW || ks == K_CLR);
     always_comb begin
         rm_we = 1'b0; rm_wa = dat_a; rm_wd = dat_d;
         rm_ra = ob_a;
         case (ks)
             K_SE: rm_ra = R_SE;
             K_SEW: begin rm_we = 1'b1; rm_wa = R_SE; rm_wd = k_inc == 8'h60 ? 8'h00 : k_inc; rm_ra = R_MI; end
-            K_MIW: begin rm_we = 1'b1; rm_wa = R_MI; rm_wd = k_inc == 8'h60 ? 8'h00 : k_inc; rm_ra = R_DW; end
-            K_HR:  rm_ra = R_DW;            // the day of week stays fetched for K_DWW
+            K_MIW: begin rm_we = 1'b1; rm_wa = R_MI; rm_wd = k_inc == 8'h60 ? 8'h00 : k_inc; rm_ra = R_HR; end
+            K_HRW: begin rm_we = 1'b1; rm_wa = R_HR; rm_wd = n_day ? 8'h00 : k_inc; rm_ra = R_MO; end
+            K_MOR: rm_ra = R_YR;            // (mo_l takes the month)
+            K_YRR: rm_ra = R_DW;            // (lp takes the year's leap bit)
             K_DWW: begin rm_we = 1'b1; rm_wa = R_DW; rm_wd = {5'd0, rq[2:0] >= 3'd6 ? 3'd0 : rq[2:0] + 3'd1}; rm_ra = R_DY; end
-            K_DYW: begin rm_we = 1'b1; rm_wa = R_DY; rm_wd = eom ? 8'h01 : k_inc; end
-            K_CLR: begin rm_we = 1'b1; rm_wa = kc; rm_wd = kc == R_DY ? 8'h01 : 8'h00; end
+            K_DYW: begin rm_we = 1'b1; rm_wa = R_DY; rm_wd = eom ? 8'h01 : k_inc; rm_ra = R_MO; end
+            K_MOW: begin rm_we = 1'b1; rm_wa = R_MO; rm_wd = yr_inc ? 8'h01 : {3'd0, k_inc[4:0]}; rm_ra = R_YR; end
+            K_YRW: begin rm_we = 1'b1; rm_wa = R_YR; rm_wd = k_inc; end
+            K_DCR: rm_ra = R_MO;            // (a written day's carry: the month, then K_MOW)
+            K_CLR: begin rm_we = 1'b1; rm_wa = kc; rm_wd = (kc == R_DY || kc == R_MO) ? 8'h01 : 8'h00; end
             default: rm_we = dat_w;
         endcase
     end
@@ -290,7 +348,7 @@ module nds_rtc #(
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            io <= '0; yr <= 8'h00; mo <= 5'h01; hr <= '0;
+            io <= '0;
             poc <= 1'b1; s1 <= 3'b001; s2_2 <= 1'b0;
             in_b <= '0; in_bit <= '0; out_bit <= '0; out_pos <= '0; in_pos <= '0;
             c_ok <= 1'b0; c_rd <= 1'b0; c_reg <= '0;
@@ -304,18 +362,15 @@ module nds_rtc #(
                 K_IDLE: if (k_start) ks <= K_SE;
                 K_SE:  ks <= K_SEW;
                 K_SEW: ks <= k_inc == 8'h60 ? K_MIW : K_IDLE;
-                K_MIW: ks <= k_inc == 8'h60 ? K_HR : K_IDLE;
-                K_HR: begin
-                        hr <= n_day ? 6'h00 : f_inc[5:0];
-                        ks <= n_day ? K_DWW : K_IDLE;
-                    end
+                K_MIW: ks <= k_inc == 8'h60 ? K_HRW : K_IDLE;
+                K_HRW: ks <= n_day ? K_MOR : K_IDLE;
+                K_MOR: begin mo_l <= rq[4:0]; ks <= K_YRR; end
+                K_YRR: begin lp <= leap(rq); ks <= K_DWW; end
                 K_DWW: ks <= K_DYW;
-                K_DYW: ks <= eom ? K_MO : K_IDLE;
-                K_MO: begin
-                        mo <= yr_inc ? 5'h01 : f_inc[4:0];
-                        ks <= yr_inc ? K_YR : K_IDLE;
-                    end
-                K_YR: begin yr <= f_inc; ks <= K_IDLE; end
+                K_DYW: ks <= eom ? K_MOW : K_IDLE;
+                K_MOW: ks <= yr_inc ? K_YRW : K_IDLE;
+                K_YRW: ks <= K_IDLE;
+                K_DCR: ks <= K_MOW;
                 K_CLR: begin
                         kc <= kc + 4'd1;
                         if (kc == 4'd15) ks <= K_IDLE;
@@ -358,7 +413,6 @@ module nds_rtc #(
                     s1 <= ib[3:1];
                     if (ib[0]) begin
                         poc <= 1'b0; s2_2 <= 1'b0;
-                        yr <= 8'h00; mo <= 5'h01; hr <= '0;
                         ks <= K_CLR; kc <= '0;
                         k_n <= '0;   // a second committed before this was counted, then cleared
                     end
@@ -366,10 +420,11 @@ module nds_rtc #(
                 3'd4: if (p1) s2_2 <= ib[2];
                 default: ;
             endcase
+            // the date's month and leap year for the written day's end of month, and its carry into the month
             case (fld)
-                3'd1: yr <= ib;
-                3'd2: mo <= ib[4:0];
-                3'd5: hr <= ib[5:0];
+                3'd1: lp <= leap(yr_in);
+                3'd2: mo_l <= mo_in[4:0];
+                3'd3: if (dy_carry) ks <= K_DCR;
                 default: ;
             endcase
         end

@@ -40,7 +40,7 @@ struct Rtl
     u32 jrng = 12345;
     u32 jnext() { jrng ^= jrng << 13; jrng ^= jrng >> 17; jrng ^= jrng << 5; return jrng; }
     // VRAM block model: accepted blocks with their beat times
-    struct VReq { u32 blk; u64 beat[4]; int next = 0; };
+    struct VReq { u32 blk; u64 beat[4]; int next = 0; int w0 = 0; };   // w0: the first 64-bit word (CWF: vr_word)
     std::deque<VReq> vq;
     u64 vend = 0;                       // end of the last scheduled block's data
     int vstate = 0;                     // for the timeout message: blocks in flight
@@ -89,12 +89,13 @@ struct Rtl
         m->vr_ack = m->vr_req && (int)vq.size() < maxq;
         bool beat = !vq.empty() && vq.front().beat[vq.front().next] == cyc;
         m->vr_rvalid = beat;
-        if (beat) { u64 w; memcpy(&w, vptr(vq.front().blk) + vq.front().next * 8, 8); m->vr_rdata = w; }
+        if (beat) { u64 w; memcpy(&w, vptr(vq.front().blk) + ((vq.front().next + vq.front().w0) & 3) * 8, 8); m->vr_rdata = w; }
         m->cap_ready = 1;
         m->eval();
         // sample at the edge
         bool acc = m->vr_req && m->vr_ack;
         u32 blk = m->vr_blk;
+        int w0 = m->vr_word;
         if (m->out_valid)
         {
             px[m->out_eng][m->out_x] = (m->out_rgb & 0x3F) | (((m->out_rgb >> 6) & 0x3F) << 8) | (((m->out_rgb >> 12) & 0x3F) << 16);
@@ -119,7 +120,7 @@ struct Rtl
         if (beat && ++vq.front().next == 4) vq.pop_front();
         if (acc)
         {
-            VReq r; r.blk = blk;
+            VReq r; r.blk = blk; r.w0 = w0;
             u64 extra = 0;
             if (jitter) { extra = jnext() % (jitter + 1); if (jnext() % 16 == 0) extra += 30 + jnext() % 16; }
             u64 st = std::max<u64>(cyc + lat + extra, vend);

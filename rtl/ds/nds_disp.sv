@@ -35,9 +35,17 @@ module nds_disp
     import gpu2d_pkg::*;
 #(
     parameter bit AR_RAM = 1,
+    // HBD: the ARM9 HBlank DMA starts once the line's BG jobs have read their VRAM (else at HBlank, as before). The core
+    // composes line y after its HBlank (the register snapshot is there, R133), so an HBlank DMA into BG VRAM raced the
+    // job: Golden Sun's title (a row DMA'd per line) showed it on line y in some frames and y + 1 in others (the
+    // picture jumped a line), its battle's engine B always on y. On the DS line y is drawn before its HBlank, so the
+    // DMA's data shows from line y + 1 (melonDS the same; ds-rules R396). The DISPSTAT flag and the HBlank IRQ stay at
+    // HBlank; a DMA still pending at the next HBlank starts then
+    parameter bit HBD = 1'b1,
     parameter bit WH_RAM = 1,         // with AR_RAM: WIN0H/WIN1H in u_ar (above)
     parameter bit WST_RF = 1,         // gpu2d: per-pass state words read from its register file
     parameter int TEX_IDXW = 6,       // gpu2d: log2 blocks in the BG texel cache
+    parameter int OTEX_IDXW = 6,      // gpu2d: log2 blocks in the OBJ texel cache
     parameter bit MOSAIC   = 1,       // 0: no BG/OBJ mosaic (fit setting): MOSAIC reads as size 0
     parameter bit CAPTURE  = 1,       // 0: no display capture (gpu2d CAPTURE, a temporary fit setting): DISPCAPCNT bit 31 still clears at the frame's end
     parameter bit OAM_CPU  = 0,       // gpu2d OAM_CPU: CPU OAM reads through the 2D engine's OAM
@@ -47,9 +55,19 @@ module nds_disp
     // serve its blocks before other ports' and to end a write chain early
     // (capture writes and texel blocks otherwise delay it: mkds-intro-cut's
     // late lines). 0: never
-    parameter int HURRY_AT = 0
+    parameter int HURRY_AT = 0,
+    parameter bit ER = 0,             // gpu2d ER (nds_top G2D_ER)
+    parameter bit CBD = 0,            // gpu2d CBD (nds_top G2D_CBD)
+    parameter bit REFS_FE = 0,        // nds_disp_refs FE: the CPU port's copy in M10K, read on the falling edge (nds_top RAM_MOVE 64)
+    parameter bit REFS_FE_S = 0,      // nds_disp_refs FE_S: the sequencer's copy the same way (RAM_MOVE 128; its step adder path is half a cycle)
+    parameter bit CFL = 0,            // gpu2d CFL (nds_top G2D_CFL)
+    parameter int THASH = 1,          // gpu2d THASH (nds_top G2D_THASH)
+    parameter bit CWF = 0,            // gpu2d CWF (nds_top G2D_CWF)
+    parameter int AMF = 0             // gpu2d AMF (nds_top G2D_CFL 2: 1, 3: 2)
 ) (
     input  logic        vram_wr,        // VRAM or VRAMCNT written (the 2D engine's caches)
+    input  logic        vw_v,           // G2D_CFL 2: a CPU/DMA write through a BG/OBJ view, its 2D block
+    input  logic [17:0] vw_blk,
     // 3D layer (nds_gpu3d): engine A's BG job for l3d_line reads x = l3d_raddr
     output logic        l3d_go,
     output logic [7:0]  l3d_line,
@@ -83,6 +101,7 @@ module nds_disp
     // the 2D engine's VRAM block port and capture writes
     output logic        vr_req,
     output blk_t        vr_blk,
+    output logic [1:0]  vr_word,        // gpu2d CWF: the block's first 64-bit word
     input  logic        vr_ack,
     input  logic        vr_rvalid,
     input  logic [63:0] vr_rdata,
@@ -362,6 +381,7 @@ module nds_disp
 
     // ---------------------------------------------------------------- line sequencer state
     typedef enum logic [2:0] { Q_IDLE, Q_WAIT, Q_PRE, Q_LOAD, Q_RUN, Q_POST } q_t;
+    logic        hb_pend, hb_seen;      // HBD: the HBlank DMA waits; this line's BG run has started
     logic        ld_v, ld_eng;          // state word read last cycle (u_pr answers now)
     logic [4:0]  ld_word;
     logic [31:0] ld_d;
@@ -409,7 +429,7 @@ module nds_disp
     assign ref_pw  = q_reset && q == Q_POST ? pr_q : ref_sq + (pk_b[0] ? {{16{pr_q[31]}}, pr_q[31:16]} : {{16{pr_q[15]}}, pr_q[15:0]});
     // Q_POST writes every other clock, so a CPU write (always >= 2 clocks
     // apart) waits at most one clock: one queue entry is enough
-    nds_disp_refs #(.QD(1)) u_refs (.clk, .rst,
+    nds_disp_refs #(.QD(1), .FE(REFS_FE), .FE_S(REFS_FE_S)) u_refs (.clk, .rst,
         .c_a({e, w[2], w[0]}), .c_q(ref_cq), .c_we(ref_cwe), .c_wd(ref_cw),
         // the sequencer's reads: the Q_POST step, Q_LOAD's BGxRefInternal (words 7-10), the Q_PRE step
         .s_a(q == Q_POST ? {1'b0, pk_b} : q == Q_LOAD ? {1'b1, q_eng, 2'(q_word + 5'd1)} : {1'b0, 3'(pc - 4'd1)}),
@@ -486,7 +506,7 @@ module nds_disp
             hc <= 13'd0; vc <= 9'd0;
             dstat[0] <= 16'd0; dstat[1] <= 16'd0; vmatch[0] <= 9'd0; vmatch[1] <= 9'd0;
             capcnt <= 32'd0; cap_enable <= 1'b0;
-            q <= Q_IDLE; q_pend <= 1'b0;
+            q <= Q_IDLE; q_pend <= 1'b0; hb_pend <= 1'b0; hb_seen <= 1'b0;
             for (int x = 0; x < 2; x++) begin
                 dispcnt[x] <= 32'd0; bldcnt[x] <= 14'd0; bldalpha[x] <= 13'd0;
                 dsh[x] <= 8'd0; bg6[x] <= 2'd0;
@@ -558,7 +578,7 @@ module nds_disp
                 dstat[0][1] <= 1'b1; dstat[1][1] <= 1'b1;
                 if (dstat[0][4]) irq_hblank[0] <= 1'b1;
                 if (dstat[1][4]) irq_hblank[1] <= 1'b1;
-                if (vc < 9'd192) dma_hblank <= 1'b1;
+                if (vc < 9'd192 && !HBD) dma_hblank <= 1'b1;
             end
 
             // ---- I/O writes
@@ -768,6 +788,19 @@ module nds_disp
                 end
             endcase
 
+            // HBD: this line's HBlank DMA waits for its BG jobs (hb_seen: the line's run started; the queue takes the line
+            // queued at this HBlank next). A pending one goes at the next HBlank at the latest
+            if (HBD) begin
+                if (q == Q_RUN) hb_seen <= 1'b1;
+`ifdef HBD_MUT
+                if (hb_pend) begin dma_hblank <= 1'b1; hb_pend <= 1'b0; end      // mutant: at once (the race again)
+`else
+                if (hb_pend && (t_hbl || (hb_seen && q != Q_RUN && !bg_busy && !bg_start))) begin
+                    dma_hblank <= 1'b1; hb_pend <= 1'b0;
+                end
+`endif
+                if (t_hbl && vc < 9'd192) begin hb_pend <= 1'b1; hb_seen <= 1'b0; end
+            end
             // queue this HBlank's register work (after the sequencer, so a
             // new HBlank wins over the one Q_IDLE takes this cycle)
             if (t_hbl) begin
@@ -787,15 +820,15 @@ module nds_disp
     logic [7:0]  fifo_raddr;
     // PERSIST: the 2D engine keeps its VRAM block caches across lines until
     // VRAM or VRAMCNT is written (a 4-bit tile block serves eight lines)
-    gpu2d #(.PERSIST(1), .OAM_CPU(OAM_CPU), .WST_RF(WST_RF), .TEX_IDXW(TEX_IDXW), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .TAG_MLAB(TAG_MLAB)) u_gpu2d (
-        .clk, .rst, .vram_wr,
+    gpu2d #(.PERSIST(1), .OAM_CPU(OAM_CPU), .WST_RF(WST_RF), .TEX_IDXW(TEX_IDXW), .OTEX_IDXW(OTEX_IDXW), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .TAG_MLAB(TAG_MLAB), .CFL(CFL), .AMF(AMF), .THASH(THASH), .CBD(CBD), .ER(ER), .CWF(CWF)) u_gpu2d (
+        .clk, .rst, .vram_wr, .vw_v, .vw_blk,
         .st_we, .st_eng, .st_addr, .st_data,
         .pal_we, .pal_waddr(po_waddr), .pal_wdata(po_wdata), .pal_be(po_be), .pal_cq,
         .oam_cre, .oam_cra(po_waddr), .oam_cgnt, .oam_cq,
         .oam_we, .oam_waddr(po_waddr), .oam_wdata(po_wdata), .oam_be(po_be),
         .bg_start, .bg_eng, .bg_line, .bg_slot, .bg_busy, .bg_done,
         .obj_start, .obj_eng, .obj_line, .obj_slot, .obj_busy, .obj_done,
-        .vr_req, .vr_blk, .vr_ack, .vr_rvalid, .vr_rdata,
+        .vr_req, .vr_blk, .vr_word, .vr_ack, .vr_rvalid, .vr_rdata,
         .cap_we, .cap_addr, .cap_data, .cap_ready,
         .l3d_raddr, .l3d_rdata, .fifo_raddr, .fifo_rdata(16'd0),
         .out_valid, .out_eng, .out_x, .out_rgb,

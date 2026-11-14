@@ -48,6 +48,12 @@ assert USORT and LUNIT and VFIN == 2 or not FF
 # reject (PTRIV) joins it, and the list words (LA, LN, CS, OCM, SA) are written only for polygons the cull
 # keeps
 PU = FF and LUNIT
+# PAR (gpu3d_gxeng PAR; docs/geometry-engine-par.md "Step order"): the FF image with the first PAR GX_PAR steps
+# (cumulative, coordinator 2026-11-07); one image per step count, gpu3d_gxrom_up<PAR>.sv, built after FF's with the
+# same entry points (SUBV, SV1), so the package is FF's. PAR_MAX: the steps built so far
+PAR = int(os.environ.get("GX_PAR") or 0)
+PAR_MAX = 2
+assert FF or not PAR
 FF_VM = True
 P_.precise_ret = USORT                 # asm.py: the USORT image takes the exact return sites (fewer hazard NOPs)
 
@@ -1511,6 +1517,23 @@ I(ra(SA), op("AND", "QA", TRIVM, fl=True))
 I()
 I(jnc("Z", "PREJ"))
 L("NOTRIV")
+if PAR >= 1 and not os.environ.get("GX_PAR_MUT"):
+    # VREF: a reused pair (clipstart 2) is copied into groups 4 and 5 as COMMIT did without it (Position[3] = W24),
+    # so the clip reads and masks copies, never the slot groups (GX_PAR_MUT=1: the mutant without the copy)
+    I(*ld(CS, fl=True))
+    I()
+    I(jc("Z", "NTCP"))
+    I(*ld(LA))
+    I(li(grp(4)))
+    I(setx(1))                         # R two back: LA[0]
+    I(setx(2), call("COPYV"))          # R two back: group 4
+    I(*ld(LA + 1))
+    I(li(grp(5)))
+    I(setx(1))
+    I(setx(2), call("COPYV"))
+    I(li(grp(4)), w(LA))
+    I(li(grp(5)), w(LA + 1))
+    L("NTCP")
 I(li(grp(NSLOTGRP)), w(POOL))
 I(li(1), w(ATT))
 I(call("CLIP"))
@@ -2237,7 +2260,15 @@ I(ra(T + 1), op("SLT", "QA", grp(NSLOTGRP)))
 I(rb(T + 2), op("AND", "R", "QB"))
 I()
 I(jnc("BIT", "CMEND", bit=0))
-if FF:
+if PAR >= 1:
+    # VREF (step 1): the next polygon's reused pair are references to the slot groups that hold them (no 16-word
+    # copies): the slot groups keep the two newest strip vertices until the next polygon (a strip's next vertex
+    # takes the oldest's slot). Nothing but the clip reads a reused vertex's Position[3] (the bounds, beats and
+    # zero-dot rule read G_W, already W masked to 24 bits) or writes the vertex (the clip's colour masks), so a
+    # reused polygon that is clipped takes COPYV's copies first (NOTRIV)
+    I(*ld(T), w(SLOT + 4))
+    I(*ld(T + 1), w(SLOT + 5))
+elif FF:
     I(*ld(T))
     I(*ld(SLOT + 4))
     I(setx(1))                         # R two back: T
@@ -2655,11 +2686,27 @@ I(ra(PARAM + 1), op("SX16", "QA"), w(CURV + 2))
 I(jnc("DIRTY", "PT1"))
 I(call("CLIPUPD"))
 L("PT1")
-scope("pt")
-for parts in xform_to(POSTEST, 0, CURV):
-    I(*parts)
-scope(None)
-I(out("TDONE"), jmp("D1"))
+if PAR >= 2:
+    # TEST (step 2): the transform on the vector MAC, as a vertex's (four steps of the clip-matrix rows times
+    # CurVertex's latch, which the CURV writes above fill; the lanes read 3 after the last step); the results go
+    # to POSTEST, which gpu3d_gxeng shadows for gpu3d_geom's reads (no MMIO service)
+    I()                                # the last CURV write reaches the latch before the third step reads it
+    scope("ptv")
+    ins = [[nh()] for _ in range(10)]
+    for k in range(4):
+        ins[k] += [vmac("VLD" if k == 0 else "VADD", "MB3")]
+    for c in range(4):
+        ins[6 + c] += [op("PASSX", vxr(c)), w(POSTEST + c)]
+    for parts in ins:
+        I(*parts)
+    scope(None)
+    I(out("TDONE"), jmp("D1"))
+else:
+    scope("pt")
+    for parts in xform_to(POSTEST, 0, CURV):
+        I(*parts)
+    scope(None)
+    I(out("TDONE"), jmp("D1"))
 
 # VecTest: (normal * vector matrix) >> 9 as 16 bits, bit 12 extended to 15..12
 L("VECTEST")
@@ -3049,6 +3096,7 @@ if __name__ == "__main__":
     lu += [f"    localparam logic [10:0] FF_A_SUBV = 11'h{P_.labels['SUBV'] if FF else 0:03X};"]
     # PU: the polygon unit's snooped words, the dispatcher's fast vertex entry and the trivial-reject planes
     lu += [f"    localparam logic [10:0] PU_A_{k} = 11'h{globals()[k]:03X};" for k in ("PMODE", "VNIP", "NCONS", "LSREUSE", "SLOT")]
+    lu += [f"    localparam logic [10:0] PX_A_POSTEST = 11'h{POSTEST:03X};"]     # GX_PAR TEST: the test results' words
     lu += [f"    localparam logic [10:0] PU_A_SV1 = 11'h{P_.labels['SV1'] if PU else 0:03X};",
            f"    localparam logic [5:0] PU_TRIVM = 6'h{TRIVM:02X};"]
     lu += [f"    localparam logic [5:0] FF_HCOLOR = 6'd{HT[0x20]};", f"    localparam logic [5:0] FF_HTEXC = 6'd{HT[0x22]};"]
@@ -3059,8 +3107,17 @@ if __name__ == "__main__":
                    [("B", f) for f in ("xs", "ys", "aop", "ma", "xsh", "out", "dv")],
                    [("A", f) for f in ("nx", "cond", "rbx", "wx", "xop", "xarg")] +
                    [("B", f) for f in ("fl", "imi", "mb", "acc")]]
-    isa.gen_pkg(os.path.join(root, "rtl/gpu3d/gpu3d_gxu_pkg.sv"), lu)
-    us = "_uf" if FF else "_uw" if VFIN == 2 else "_uv" if VFIN else "_ul" if LUNIT else "_us" if USORT else ""
+    if PAR:
+        # the package and the test bench's addresses are FF's: the entry points must match its image
+        ffl = {}
+        for ln_ in open(os.path.join(root, "build/geom/ucode_uf.labels")):
+            a_, k_ = ln_.split()
+            ffl.setdefault(k_, int(a_))
+        for k_ in ("SUBV", "SV1"):
+            assert P_.labels[k_] == ffl[k_], f"PAR image: {k_} at {P_.labels[k_]:#x}, FF's at {ffl[k_]:#x}"
+    else:
+        isa.gen_pkg(os.path.join(root, "rtl/gpu3d/gpu3d_gxu_pkg.sv"), lu)
+    us = f"_up{PAR}" if PAR else "_uf" if FF else "_uw" if VFIN == 2 else "_uv" if VFIN else "_ul" if LUNIT else "_us" if USORT else ""
     n, pads = P_.emit(os.path.join(root, f"rtl/gpu3d/gpu3d_gxrom{us}.sv"), depth=int(os.environ.get("GX_DEPTH", 2048)),
                       module=f"gpu3d_gxrom{us}",
                       # FF: also as an index ROM plus dictionaries (gpu3d_gxrom_ufd, docs/space-gxdict.md) with
@@ -3076,11 +3133,11 @@ if __name__ == "__main__":
         for k, v in sorted(P_.labels.items(), key=lambda x: x[1]):
             f.write(f"{v} {k}\n")
     # register-file addresses for the test bench
-    with open(os.path.join(root, "build/geom/ucode.h"), "w") as f:
+    with open(os.path.join(root, "build/geom/ucode.h" if not PAR else f"build/geom/ucode_up{PAR}.h"), "w") as f:
         for k in ("IDENT", "CURV", "SLOT", "GRP", "PMODE", "MMODE", "CATTR", "VNIP", "NCONS", "LSREUSE",
                   "NP", "NV", "LA", "LN", "CS", "CURCOL", "TEXC"):
             f.write(f"#define RF_{k} {globals()[k]:#x}\n")
-    print(f"{'FF: ' if FF else 'VFIN-lite: ' if VFIN == 2 else 'VFIN: ' if VFIN else 'LUNIT: ' if LUNIT else 'USORT: ' if USORT else ''}{n} microinstructions ({pads} hazard NOPs), last address {max(P_.at):#x}, {len(P_.imm_tab)} distinct immediates")
+    print(f"{'PAR: ' if PAR else 'FF: ' if FF else 'VFIN-lite: ' if VFIN == 2 else 'VFIN: ' if VFIN else 'LUNIT: ' if LUNIT else 'USORT: ' if USORT else ''}{n} microinstructions ({pads} hazard NOPs), last address {max(P_.at):#x}, {len(P_.imm_tab)} distinct immediates")
     if not FF and VFIN != 2:
         import subprocess
         subprocess.run([sys.executable, __file__], env=dict(os.environ, GX_USORT="1", GX_LUNIT="1" if USORT else "0",
@@ -3091,3 +3148,7 @@ if __name__ == "__main__":
         import subprocess
         subprocess.run([sys.executable, __file__], env=dict(os.environ, GX_USORT="1", GX_LUNIT="1", GX_VFIN="2",
                                                             GX_FF="1"), check=True)
+        # then the GX_PAR images, one per step count (FF's entry points and package)
+        for n_ in range(1, PAR_MAX + 1):
+            subprocess.run([sys.executable, __file__], env=dict(os.environ, GX_USORT="1", GX_LUNIT="1", GX_VFIN="2",
+                                                                GX_FF="1", GX_PAR=str(n_)), check=True)

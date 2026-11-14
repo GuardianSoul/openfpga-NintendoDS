@@ -6,6 +6,9 @@
 // often of the reference the sequencer writes in the same clock; resets,
 // each followed by the owner's clear (z_we for 8 clocks, no other access).
 //   +cycles=N  +seed=S  +gap=CPU_GAP
+// +define+TB_FE: the DUT with FE=1 (its copies in M10K, read on the falling edge; +define+TB_FES0: only the CPU
+// port's copy, FE_S 0); the compare then waits 1 ns
+// past the falling edge for that read (the addresses still change after it, as nds_disp's do after the rising edge)
 module tb_disp_refs;
     logic clk = 0;
     always #5 clk = !clk;
@@ -16,7 +19,15 @@ module tb_disp_refs;
     int          zc = 8;              // clear clocks left after a reset
     logic [31:0] c_wd = 0, p_wd = 0;
     logic [31:0] c_q, s_q;
+`ifdef TB_FE
+  `ifdef TB_FES0
+    nds_disp_refs #(.FE(1'b1), .FE_S(1'b0)) dut (.*);   // the card's: the CPU copy in M10K, the sequencer's in MLAB
+  `else
+    nds_disp_refs #(.FE(1'b1)) dut (.*);
+  `endif
+`else
     nds_disp_refs dut (.*);
+`endif
 
     logic [31:0] r [8];                 // the registers
     int unsigned seed = 1;
@@ -32,6 +43,9 @@ module tb_disp_refs;
         rst = 0;
         while (cyc < cycles) begin
             @(negedge clk);
+`ifdef TB_FE
+            #1;
+`endif
             // compare (the value now, before this edge's writes)
             if (!rst && zc == 0) begin
                 if (c_q !== r[c_a]) begin errs++; if (errs < 8) $display("cycle %0d: c_q[%0d] %h, the register %h", cyc, c_a, c_q, r[c_a]); end

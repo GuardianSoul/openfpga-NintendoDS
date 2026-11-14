@@ -28,8 +28,18 @@
 module nds_sdram_bus #(parameter integer N = 6,
     parameter integer OPEN = 0,          // nds_sdram_mc OPEN: reads leave their rows open
     parameter integer OUT_REG = 0,       // nds_sdram_mc OUT_REG: a register stage before the pins
-    parameter integer HURRY = 0) (       // 1: m_hurry promotes a port (above)
+    parameter integer HURRY = 0,
+    parameter integer SOFT_MIN = 0,
+    parameter integer WURG = 0,
+    parameter integer WRAP = 0,          // ports (a bit each) whose reads wrap within their 8-word group (nds_sdram_mc c_wrap: a block read from its needed word)
+    parameter integer WOPEN = 0,         // nds_sdram_mc WOPEN: write chains leave their rows open (bit 0), no pause in a chain (bit 1)          // nds_sdram_mc WURG: a nearly full write FIFO (bw_urg) ahead of waiting reads
+    // RV: port RV's waiting flag is a register, m_valid & ~m_take a clock late:
+    // its request is seen one clk_mem later, its take at once (RC8p4 #2314:
+    // m_take[6] / x_rg take_t -> g_rb -0.511 ns); -1: none
+    parameter integer RV = -1) (    // a hurried port outside m_cut ends a write chain once it has this many words       // 1: m_hurry promotes a port (above)
     input  wire [N-1:0]      m_hurry,       // HURRY: the port's client is near its deadline (clk_mem, synchronised)
+    input  wire [N-1:0]      m_cut,         // HURRY: ... and a waiting request of it ends a write chain early
+    input  wire [N-1:0]      m_first,       // HURRY: a hurried port here goes before the other hurried ports
     input  wire              clk,           // clk_mem
     input  wire              init,
     output wire              ready,
@@ -47,7 +57,9 @@ module nds_sdram_bus #(parameter integer N = 6,
     input  wire              bw_valid,
     input  wire [23:0]       bw_addr,
     input  wire [31:0]       bw_data,
+    input  wire [1:0]        bw_he,         // the word's halves to write {high, low} (VRAM halfword posts)
     output wire              bw_read,
+    input  wire              bw_urg,        // nds_sdram_mc WURG (unconnected: 0)
     inout  wire [15:0]       SDRAM_DQ,
     output wire [12:0]       SDRAM_A,
     output wire [1:0]        SDRAM_BA,
@@ -55,7 +67,19 @@ module nds_sdram_bus #(parameter integer N = 6,
 );
     reg [$clog2(N)-1:0] pick;
     reg any;
-    wire [N-1:0] wait_p = m_valid & ~m_take;
+    // RV: v_q(t+1) = wait(t) and not taken at t: it never runs ahead of m_valid
+    // (m_valid falls only on a take, which clears it the same edge as m_take)
+    reg  v_q = 0;
+    wire [N-1:0] wait_c = m_valid & ~m_take;
+    wire [N-1:0] wait_p;
+    genvar wi;
+    generate for (wi = 0; wi < N; wi = wi + 1) begin : g_wp
+        if (wi == RV) begin : g_r
+            assign wait_p[wi] = v_q;
+        end else begin : g_c
+            assign wait_p[wi] = wait_c[wi];
+        end
+    end endgenerate
     wire [N-1:0] hot = HURRY != 0 ? wait_p & (m_hurry | N'(1)) : {N{1'b0}};   // port 0 or a hurried port waits
     always @* begin
         pick = 0; any = 0;
@@ -64,6 +88,9 @@ module nds_sdram_bus #(parameter integer N = 6,
         if (hot != 0)
             for (integer i = N - 1; i >= 0; i = i - 1)
                 if (hot[i]) pick = i[$clog2(N)-1:0];
+        if ((hot & m_first) != 0)
+            for (integer i = N - 1; i >= 0; i = i - 1)
+                if (hot[i] && m_first[i]) pick = i[$clog2(N)-1:0];
     end
     // the grant: one port held until the controller has taken its request
     reg g_v = 0;
@@ -73,6 +100,27 @@ module nds_sdram_bus #(parameter integer N = 6,
     // m_addr[g]'s while g_v (checked below); the controller's ACTIVE takes
     // them from here instead of through the port mux
     reg [14:0] g_rb = 0;
+    // the granted port's bank/row through a one-hot AND-OR, not the encoded pick's indexed mux: the same port (the
+    // lowest-numbered of the first hot tier with one: hot & m_first, then hot, then waiting), one select level less
+    // (every chip fit #2393-#2402: hz2_s / hzr_s / v_q / m_take -> pick -> g_rb, -0.01..-0.18 ns at 100 MHz)
+    wire [N-1:0] p_hf = hot & m_first;
+    wire [N-1:0] p_c  = p_hf != 0 ? p_hf : hot != 0 ? hot : wait_p;
+`ifdef SDBUS_PK_MUT
+    wire [N-1:0] p_k  = p_c & ~(p_c << 1);
+`else
+    wire [N-1:0] p_k  = p_c & ~(p_c - 1'b1);
+`endif
+    reg  [14:0] g_rb_n;
+    always @* begin
+        g_rb_n = 15'd0;
+        for (integer i = 0; i < N; i = i + 1)
+            g_rb_n = g_rb_n | ({15{p_k[i]}} & m_addr[i*24+8 +: 15]);
+    end
+`ifndef ALTERA_RESERVED_QIS
+    always @(posedge clk)
+        if (!g_v && any && g_rb_n !== m_addr[pick*24+8 +: 15])
+            $display("nds_sdram_bus: ERROR: one-hot bank/row %h is not the pick's (port %0d) %h", g_rb_n, pick, m_addr[pick*24+8 +: 15]);
+`endif
 `ifndef ALTERA_RESERVED_QIS
     always @(posedge clk)
         if (g_v && g_rb !== m_addr[g*24+8 +: 15])
@@ -80,10 +128,11 @@ module nds_sdram_bus #(parameter integer N = 6,
 `endif
     wire c_ready, r_valid, r_last;
     wire [31:0] r_data;
-    nds_sdram_mc #(.OPEN(OPEN), .OUT_REG(OUT_REG)) mc (.clk, .init, .ready,
-        .c_valid(g_v && !c_ready), .c_hurry(wait_p[0] || (HURRY != 0 && (wait_p & m_hurry) != 0)), .c_we(m_we[g]), .c_addr(m_addr[g*24 +: 24]), .c_rb(g_rb), .c_n(m_n[g*4 +: 4]),
+    nds_sdram_mc #(.OPEN(OPEN), .OUT_REG(OUT_REG), .SOFT_MIN(SOFT_MIN), .WURG(WURG), .WOPEN(WOPEN)) mc (.clk, .init, .ready,
+        .c_soft(HURRY != 0 && (wait_p & m_hurry & ~m_cut) != 0),
+        .c_valid(g_v && !c_ready), .c_hurry(wait_p[0] || (HURRY != 0 && (wait_p & m_hurry & m_cut) != 0)), .c_we(m_we[g]), .c_wrap(((WRAP >> g) & 1) != 0), .c_addr(m_addr[g*24 +: 24]), .c_rb(g_rb), .c_n(m_n[g*4 +: 4]),
         .c_wdata(m_wdata[g*32 +: 32]), .c_be(m_be[g*4 +: 4]), .c_ready,
-        .r_valid, .r_data, .r_last, .bw_valid, .bw_addr, .bw_data, .bw_read, .ref_late,
+        .r_valid, .r_data, .r_last, .bw_valid, .bw_addr, .bw_data, .bw_he, .bw_read, .bw_urg, .ref_late,
         .SDRAM_DQ, .SDRAM_A, .SDRAM_BA, .SDRAM_DQML, .SDRAM_DQMH, .SDRAM_nWE, .SDRAM_nRAS, .SDRAM_nCAS,
         .SDRAM_CKE, .SDRAM_CLK);
     // owners of the reads in flight, in order (the controller serves one
@@ -92,10 +141,11 @@ module nds_sdram_bus #(parameter integer N = 6,
     reg [1:0] own_r = 0, own_w = 0;
     always @(posedge clk) begin
         m_take <= 0; w_valid <= 0;
+        if (RV >= 0) v_q <= !init && wait_c[RV >= 0 ? RV : 0] && !(c_ready && g == RV);
         if (c_ready) begin
             g_v <= 1'b0; m_take[g] <= 1'b1;
             if (!m_we[g]) begin own[own_w] <= g; own_w <= own_w + 1'b1; end
-        end else if (!g_v && any) begin g_v <= 1'b1; g <= pick; g_rb <= m_addr[pick*24+8 +: 15]; end
+        end else if (!g_v && any) begin g_v <= 1'b1; g <= pick; g_rb <= g_rb_n; end
         if (r_valid) begin
             w_valid[own[own_r]] <= 1'b1; w_data <= r_data;
             if (r_last) own_r <= own_r + 1'b1;
@@ -109,6 +159,7 @@ module nds_sdram_xport #(parameter integer QW = 4, parameter bit SHARED = 0) (
     input  wire        clk_sys, clk_mem, reset,     // reset on clk_sys
     // clk_sys: nds_x2b's contract
     input  wire        s_req, s_we, s_quad,
+    input  wire        s_hot,           // (TX_HURRY) taken with the request; m_hot is its view, held as m_addr is
     input  wire [23:0] s_addr,
     input  wire [31:0] s_wdata,
     input  wire [3:0]  s_be,
@@ -117,6 +168,7 @@ module nds_sdram_xport #(parameter integer QW = 4, parameter bit SHARED = 0) (
     output reg  [31:0] s_rdata = 0,
     // clk_mem: to the arbiter
     output wire        m_valid,
+    output wire        m_hot,
     // the request itself: views of the held b_* (see the mem side)
     output wire        m_we,
     output wire [23:0] m_addr,
@@ -130,7 +182,7 @@ module nds_sdram_xport #(parameter integer QW = 4, parameter bit SHARED = 0) (
     // sys side: one request held in b_* until the mem side has taken it
     reg req_t = 0, busy = 0, take_seen = 0;
     reg take_t = 0;
-    reg b_we = 0, b_quad = 0;
+    reg b_we = 0, b_quad = 0, b_hot = 0;
     reg [23:0] b_addr = 0;
     reg [31:0] b_wdata = 0;
     reg [3:0] b_be = 0;
@@ -141,7 +193,7 @@ module nds_sdram_xport #(parameter integer QW = 4, parameter bit SHARED = 0) (
             if (busy && take_t != take_seen) begin busy <= 0; take_seen <= take_t; end
             if (!busy && s_req && !s_ack) begin
                 busy <= 1; s_ack <= 1; req_t <= !req_t;
-                b_we <= s_we; b_quad <= s_quad; b_addr <= s_addr; b_wdata <= s_wdata; b_be <= s_be;
+                b_we <= s_we; b_quad <= s_quad; b_addr <= s_addr; b_wdata <= s_wdata; b_be <= s_be; b_hot <= s_hot;
             end
         end
     end
@@ -163,6 +215,7 @@ module nds_sdram_xport #(parameter integer QW = 4, parameter bit SHARED = 0) (
         if (m_take) take_t <= !take_t;
     end
     assign m_valid = req_s != take_t;
+    assign m_hot = b_hot;
     assign m_we = b_we; assign m_addr = b_addr; assign m_n = b_we ? 4'd1 : b_quad ? 4'(QW) : 4'd1;
     assign m_wdata = b_wdata; assign m_be = b_be;
     // read words back to clk_sys
@@ -227,12 +280,18 @@ module nds_sdram_bport #(parameter bit SHARED = 0, parameter bit SYNC_TAKE = 0) 
     end
 `ifndef ALTERA_RESERVED_QIS
     // the client contract the copies could rely on: c_* unchanged from the
-    // capture until c_ready (simulation check; the copies stay meanwhile)
+    // capture until c_ready (simulation check; the copies stay meanwhile).
+    // c_be and c_wdata only count on a write: nds_sdram_mc drives DQM from
+    // the byte enables on WRITEs only (a read's DQM is 0) and m_n ignores
+    // them, so a read's c_be is free. nds_bport_share passes client A's
+    // c_be through while B's single reads own the port (bp_cache at cold
+    // boot: the save reader's reads with the cache's next write's be).
     always @(posedge clk_bus)
         if (!reset && busy && take_b == take_seen &&
-            (!c_valid || c_write != b_we || c_quad != b_quad || c_addr != b_addr || c_be != b_be ||
-             (b_we && c_wdata != b_wdata)))
-            $display("nds_sdram_bport: ERROR: the client's request changed before c_ready (%m) at %0t", $time);
+            (!c_valid || c_write != b_we || c_quad != b_quad || c_addr != b_addr ||
+             (b_we && (c_be != b_be || c_wdata != b_wdata))))
+            $display("nds_sdram_bport: ERROR: the client's request changed before c_ready (%m) at %0t: valid %b we %b/%b quad %b/%b addr %h/%h be %h/%h wdata %h/%h",
+                     $time, c_valid, c_write, b_we, c_quad, b_quad, c_addr, b_addr, c_be, b_be, c_wdata, b_wdata);
 `endif
     // The arbiter reads a request only once it has granted it: m_valid rises
     // on the first clk_mem edge after req_t flips, the grant (g_v) one edge

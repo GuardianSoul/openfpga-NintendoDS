@@ -211,7 +211,7 @@ module nds_cart_scpu #(
         if (reset || !start) begin
             st <= H_IDLE; m_valid <= 0; mem_busy <= 0; mem_sv <= 0; sv_fly <= 0;
             ready <= 0; fail <= 0; miss <= 0; last_v <= 0; pf_seen <= 0; mk_v <= 0; hold <= 0; pf_due <= 0; pf_fly <= 0; pf_any <= 0;
-        end else if (!mem_busy) begin
+        end else if (!mem_busy && !m_valid) begin
             case (st)
                 H_IDLE: if (ready && c_valid && !hold) begin
                     c_ready <= 1; qaddr <= {c_addr[31:4], 4'b0}; st <= H_LOOK;

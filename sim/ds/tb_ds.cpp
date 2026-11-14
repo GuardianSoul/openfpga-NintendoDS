@@ -282,7 +282,7 @@ int main(int argc, char** argv)
     }
 
     Vnds_top* t = new Vnds_top;
-    t->clk = 0; t->rst = 1; t->go = 0; t->rom_size = romsize;
+    t->clk = 0; t->rst = 1; t->rst_3d = 1; t->go = 0; t->rom_size = romsize;
     t->mem_dirty = 0;       // the memory models start zeroed, as melonDS's
     t->sv_loaded = 0; t->save_info = 0;
     if (!sav_in.empty())
@@ -497,7 +497,7 @@ int main(int argc, char** argv)
             if (t->wx_power != wifi.enabled) { wifi.enabled = t->wx_power; wifi.update_power_on(); }
             wifi.clock(33513982.0 * 2);
         }
-        if (cyc == 20) t->rst = 0;
+        if (cyc == 20) { t->rst = 0; t->rst_3d = 0; }
         if (cyc == 40) t->go = 1;
         u32 keys = 0;
         t->pen = 0;

@@ -280,7 +280,7 @@ module core_top #(
     nds_sdram #(.N(NC)) sdram (.clk_bus(clk_bus), .clk_mem(clk_mem), .reset(rst_bus), .ready(sdram_ready),
         .c_valid(c_valid), .c_write(c_write), .c_quad(c_quad), .c_addr(c_addr), .c_wdata(c_wdata), .c_be(c_be),
         .c_ready(c_ready), .r_valid(r_valid), .r_data(r_data),
-        .bw_valid(1'b0), .bw_addr(24'd0), .bw_data(32'd0), .bw_read(),
+        .bw_valid(1'b0), .bw_addr(24'd0), .bw_data(32'd0), .bw_he(2'b11), .bw_read(),
         .dram_dq(dram_dq), .dram_a(dram_a), .dram_ba(dram_ba), .dram_dqm(dram_dqm), .dram_clk(dram_clk),
         .dram_cke(dram_cke), .dram_ras_n(dram_ras_n), .dram_cas_n(dram_cas_n), .dram_we_n(dram_we_n));
 

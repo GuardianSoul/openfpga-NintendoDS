@@ -17,9 +17,12 @@ SRCS = ['sim/phase1/sim_prims.sv', 'sim/phase1/sdram_chip_model.sv', 'rtl/pocket
         'sim/pocket_ds/tb_sdram_mc.sv']
 F = 'rtl/pocket/nds_sdram_mc.sv'
 OPEN = os.environ.get('OPEN') == '1'
-OUTR = os.environ.get('OUT_REG') == '1'     # OUT_REG=1: the pins' register stage (with or without OPEN)
+OUTR = os.environ.get('OUT_REG') == '1'
+WOPEN = os.environ.get('WOPEN', '0')
+WRAP = os.environ.get('WRAP') == '1'     # WRAP=1: 8-word reads from a random word with c_wrap (+wrap)       # WOPEN=1/2/3 (nds_sdram_mc WOPEN; bit 0 needs OPEN=1)     # OUT_REG=1: the pins' register stage (with or without OPEN)
 BASES = ([("    parameter integer OPEN = 0", "    parameter integer OPEN = 1")] if OPEN else []) + \
-        ([("    parameter integer OUT_REG = 0", "    parameter integer OUT_REG = 1")] if OUTR else [])
+        ([("    parameter integer OUT_REG = 0", "    parameter integer OUT_REG = 1")] if OUTR else []) + \
+        ([("    parameter integer WOPEN = 0,", f"    parameter integer WOPEN = {WOPEN},")] if WOPEN != '0' else [])
 # (old, new): each must make the test fail
 MUTANTS = [
     ("parameter integer RD_LAT = 4,", "parameter integer RD_LAT = 5,"),                       # capture a beat late
@@ -29,16 +32,30 @@ MUTANTS = [
     ("dq_out <= q_wdata[31:16]; dqm <= ~q_be[3:2];", "dq_out <= q_wdata[31:16]; dqm <= ~q_be[1:0];"),  # high half's lanes
     ("cmd <= C_REF; ref_owed <= ref_owed - 1'b1; gap <= 4'd9;",
      "cmd <= C_REF; ref_owed <= ref_owed - 1'b1; gap <= 4'd3;"),                                # tRFC
+    ("dqm <= {2{ch_hi ? !q_he : !bw_he[0]}};", "dqm <= 2'b00;"),                                # chain half enables ignored
+    ("q_he <= bw_he[1];", "q_he <= bw_he[0];"),                                                 # the high half takes the low's
 ]
 
 
 if OPEN:   # with open rows, "reads never precharge" is the design: its own faults instead
     MUTANTS = [m for m in MUTANTS if 'never precharge' not in m[1] and "1'b0);" not in m[1]] + [
-        ("ob_row[cb] == c_rb[12:0] && ", ""),                                                   # any open row is a hit
-        ("wire       pre_ok = rd_age <= 3'd3 && act_age >= 3'd5;", "wire       pre_ok = 1'b1;"),  # PRECHARGE too early
+        ("ob_rc == c_rb[12:0] && ", ""),                                                   # any open row is a hit
+        ("wire       pre_ok = rd_age <= 3'd3 && act_age >= 3'd5 && ((WOPEN & 1) == 0 || wr_age >= 2'd2);", "wire       pre_ok = 1'b1;"),  # PRECHARGE too early
         ("c_valid && c_we) && rd_age != 0) begin", "c_valid && c_we) && 1'b0) begin"),             # a write over read data
         ("if (OPEN != 0 && ref_owed != 0 && ob_v != 0) begin", "if (1'b0) begin"),              # refresh with rows open
     ]
+
+
+if int(WOPEN) & 1:   # write rows left open: their own faults
+    MUTANTS = MUTANTS + [
+        ("ob_v[wb] && ob_rw == row_of(bw_addr) && rd_age == 0) begin", "ob_v[wb] && rd_age == 0) begin"),   # a chain into another open row
+        (" && ((WOPEN & 1) == 0 || wr_age >= 2'd2);", ";"),                                     # PRECHARGE before tWR
+        ("last && !wop);", "last);"),                                                            # auto-precharged yet marked open
+    ]
+
+
+if WRAP:   # the wrap: reads that ignore it
+    MUTANTS = MUTANTS + [("if (q_wrap) q_addr[2:0] <= q_addr[2:0] + 1'b1; else q_addr[7:0]", "if (1'b0) q_addr[2:0] <= q_addr[2:0] + 1'b1; else q_addr[7:0]")]
 
 
 if OUTR:   # the read capture left where it was: the word is taken a clock early
@@ -62,7 +79,7 @@ def run(name, mut=None):
                         *[str(d / s) for s in SRCS]], capture_output=True, text=True)
     if r.returncode:
         return 'build failed: ' + (r.stdout + r.stderr)[-600:]
-    r = subprocess.run([str(d / 'obj/Vtb_sdram_mc')], capture_output=True, text=True, timeout=1200)
+    r = subprocess.run([str(d / 'obj/Vtb_sdram_mc')] + (['+wrap'] if WRAP else []), capture_output=True, text=True, timeout=1200)
     shutil.rmtree(d / 'obj', ignore_errors=True)
     out = r.stdout.splitlines()
     summary = next((l for l in out if l.startswith('reads ')), '')

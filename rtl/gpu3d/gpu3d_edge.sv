@@ -566,12 +566,14 @@ module gpu3d_edge #(
             else if (ylen == 0 || z0 == z1) begin z <= z0; xs <= X_YF; end
             else xs <= DS_LINZ ? X_Z3 : X_Z1;
         end
-        X_Z1: if (STAGE != 1) begin
+        // (X_Z1 and X_Z2 are entered only without DS_LINZ: their datapath is gated by it too, or synthesis keeps the
+        //  unreachable states' z normalisation and shift, the RC11 tie-off audit)
+        X_Z1: if (!DS_LINZ && STAGE != 1) begin
             // dz >> zs (zs <= 14) as a multiply: (dz * 2^(14-zs)) >> 14
             m_a <= 27'((39'(zdz) * 39'(15'd1 << (5'd14 - zsh))) >> 14);
             xs <= X_Z2;
         end
-        X_Z2: if (STAGE != 1) begin
+        X_Z2: if (!DS_LINZ && STAGE != 1) begin
             m_a <= m_p[26:0]; m_b <= 27'(xrecip);
             xs <= X_Z3;
         end

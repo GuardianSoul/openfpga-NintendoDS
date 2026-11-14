@@ -1,0 +1,57 @@
+--- a/rtl/ds/nds_gpu3d.sv
++++ b/rtl/ds/nds_gpu3d.sv
+@@ -23,6 +23,7 @@
+ module nds_gpu3d
+     import gpu2d_pkg::*;
+ #(
++    parameter bit ES2 = 0,      // experimental scheduled edge/span service
+     parameter int PW = 10,      // log2 polygons per bank (HG title: 626)
+     parameter int VW = 11,      // log2 vertices per bank (HG title: 1,679)
+     parameter int RB = 3,       // log2 lines in the 3D ring
+@@ -597,7 +598,7 @@
+     assign r_ps_valid = ps_valid && stall_en;
+     assign ps_ready   = r_ps_ready && stall_en;
+     // AREA=0: full rate; the half-rate option measured no area gain (#187)
+-    gpu3d_raster #(.LINE_POOL(1), .Q0_PUMP(1), .ATTR_RAM(1), .AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .TPF(TPF), .TPFS(TPFS), .TPF_FIRST(TPF_FIRST), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
++    gpu3d_raster #(.ES2(ES2), .LINE_POOL(1), .Q0_PUMP(1), .ATTR_RAM(1), .AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .TPF(TPF), .TPFS(TPFS), .TPF_FIRST(TPF_FIRST), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
+                    .FEAT_EDGE(FEAT_EDGE), .FEAT_SHADOW(FEAT_SHADOW), .FEAT_LOWER(FEAT_LOWER), .TR3(TR3 && !FEAT_EDGE && !LB2), .VYS_M10K(VYS_M10K)) u_raster (
+         .clk, .clk_2x, .rst(rst || r_abort),
+         .dispcnt(r_dispcnt), .alpharef(r_alpharef), .clear_attr1(r_clear_attr1), .clear_depth(r_clear_depth),
+--- a/rtl/ds/nds_top.sv
++++ b/rtl/ds/nds_top.sv
+@@ -11,6 +11,7 @@
+ // boot ROM (sw/boot): ARM9 at 0xFFFF8000, ARM7 at 0x00008004. The boot
+ // program direct-boots the cartridge the way melonDS's SetupDirectBoot does.
+ module nds_top #(
++    parameter integer G3D_ES2 = 0, // experimental scheduled edge/span service
+     parameter BOOTROM = "build/boot/bootrom.hex",
+     // 1: the boot ROM (8 KiB) is loaded with the BIOS from the boot image port (sel 3) into the external SRAM
+     // (byte 0x1E000) and read there like the BIOS, instead of an M10K ROM (7 M10K); 0: the M10K ROM (BOOTROM)
+@@ -713,7 +714,7 @@
+             .a_req(d_req), .a_blk(d_blk), .a_ack(d_ack), .a_rvalid(d_rvalid),
+             .b_req(t_req), .b_blk(t_blk), .b_ack(t_ack), .b_rvalid(t_rvalid),
+             .g_req, .g_blk, .g_ack, .g_rvalid);
+-        nds_gpu3d #(.FEAT_AA(G3D_AA != 0), .FEAT_TOON(G3D_TOON != 0), .FEAT_FOG(G3D_FOG != 0), .FEAT_ATEST(G3D_ATEST != 0),
++        nds_gpu3d #(.ES2(G3D_ES2 != 0), .FEAT_AA(G3D_AA != 0), .FEAT_TOON(G3D_TOON != 0), .FEAT_FOG(G3D_FOG != 0), .FEAT_ATEST(G3D_ATEST != 0),
+             .FEAT_EDGE(G3D_EDGE != 0), .FEAT_SHADOW(G3D_SHADOW != 0), .FEAT_LOWER(G3D_LOWER != 0), .GX_USORT(GX_USORT != 0), .GX_LUNIT(GX_LUNIT != 0), .GX_VFIN(GX_VFIN), .GX_FF(GX_FF != 0), .GX_PAR(GX_PAR), .GX_SPILL(GX_SPILL != 0), .STORE_SD(G3D_STORE_SD != 0), .GX_GATH16(GX_GATH16 != 0), .GX_ENGM10K(GX_ENGM10K != 0), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID != 0),
+             .TC_FAST(G3D_TCFAST != 0), .VYS_M10K(G3D_VYSM10K != 0), .TC_MIF2(G3D_TCMIF2 != 0), .TC_V2(G3D_TCV2 != 0), .TC_POOL(G3D_TCPOOL != 0), .TC_CWF(G3D_CWF != 0), .TC_WAYS(G3D_TCWAYS), .TC_V2W(G3D_TCV2W), .SPO(G3D_SPO != 0), .SPO_SL(G3D_SPOSL), .SPOG(G3D_SPO != 0 && G3D_SPOG != 0), .SPOG_N(G3D_SPOGN), .TXD(G3D_TXD), .PXD(G3D_PXD), .FPSKIP(G3D_FPSKIP != 0), .TRU(G3D_TRU != 0), .TRUL(G3D_TRUL != 0), .FPCLR(G3D_FPCLR != 0), .YLIM2(G3D_YLIM2 != 0), .LLR(G3D_LLR != 0), .RPRI(G3D_RPRI != 0), .NX2(G3D_NX2 != 0), .RH_AT(G3D_RH_AT), .NXB(G3D_NXB != 0), .VREG(G3D_VREG != 0), .DSHARE(G3D_DSHARE != 0), .LB2(G3D_LB2 != 0), .LOV(G3D_LOV != 0), .EDIV4(G3D_EDIV4 != 0), .EDGE2(G3D_EDGE2 != 0), .EP2(G3D_EP2 != 0), .FDB(G3D_FDB != 0), .RING(G3D_RING != 0), .TL(G3D_TL), .PL(G3D_PL), .RESTART(G3D_RESTART != 0), .PUMP(G3D_PUMP != 0), .SWHOLD(G3D_SWHOLD != 0), .SWPC(G3D_SWPC != 0), .LMARK(G3D_LMARK != 0), .RLEAD(G3D_LEAD), .SSL(G3D_SL), .SCL(G3D_CL), .SDROP(G3D_DROP != 0)) u_gpu3d (.clk, .clk_2x, .rst, .tick, .geom_en(powcnt1[3]), .rend_en(powcnt1[2]),
+             .vblank(line_start && vcount == 9'd192), .line215(line_start && vcount == 9'd215), .sw_close(line_start && vcount == 9'(215 + G3D_SWL)), .sw_lim(line_start && vcount == 9'(222 + G3D_SWL)),
+--- a/rtl/pocket/core_top_ds.sv
++++ b/rtl/pocket/core_top_ds.sv
+@@ -19,6 +19,7 @@
+ // crossed synchronously (nds_x2b); PSRAM and SDRAM controllers on clk_mem.
+ `default_nettype none
+ module core_top #(
++    parameter integer G3D_ES2 = 0, // experimental scheduled edge/span service
+     parameter integer CACHE_SLOTS = 12288,          // 48 MiB of 4 KiB slots
+     parameter bit CACHE_PREFETCH = 1,               // nds_cart_cache sequential prefetch
+     parameter bit SND_CAPTURE = 1'b1,               // TEMPORARY for the test build (docs/ds-rules.md): no sound capture units
+@@ -663,7 +664,7 @@
+     wire [31:0] diag_r_val;
+     wire        diag_t_start, diag_t_stop, diag_l3d_v;
+     wire [8:0]  diag_l3d_line;
+-    nds_top #(.BOOTROM("bootrom.mif"), .A9_SOLO(A9_SOLO), .SOUND(SOUND), .SND_CAPTURE(SND_CAPTURE), .GPU3D(GPU3D), .G3D_AA(G3D_AA), .G3D_TOON(G3D_TOON), .G3D_FOG(G3D_FOG), .G3D_ATEST(G3D_ATEST), .G3D_EDGE(G3D_EDGE), .G3D_SHADOW(G3D_SHADOW), .G3D_LOWER(G3D_LOWER), .G3D_TCFAST(G3D_TCFAST), .G3D_TCMIF2(G3D_TCMIF2), .G3D_TCWAYS(G3D_TCWAYS), .G3D_TCV2W(G3D_TCV2W), .G3D_SPO(G3D_SPO), .G3D_SPOSL(G3D_SPOSL), .G3D_SPOG(G3D_SPOG), .G3D_SPOGN(G3D_SPOGN), .G3D_TXD(G3D_TXD), .G3D_PXD(G3D_PXD), .G3D_FPSKIP(G3D_FPSKIP), .G3D_TRU(G3D_TRU), .G3D_TRUL(G3D_TRUL), .G3D_FPCLR(G3D_FPCLR), .G3D_YLIM2(G3D_YLIM2), .G3D_LLR(G3D_LLR), .G3D_RPRI(G3D_RPRI), .G3D_NX2(G3D_NX2), .G3D_TL(G3D_TL), .G3D_PL(G3D_PL), .G3D_TCV2(G3D_TCV2), .G3D_TCPOOL(G3D_TCPOOL), .G3D_CWF(G3D_CWF), .G3D_NXB(G3D_NXB), .G3D_VREG(G3D_VREG), .G3D_DSHARE(G3D_DSHARE), .G3D_LB2(G3D_LB2), .G3D_LOV(G3D_LOV), .G3D_EDIV4(G3D_EDIV4), .G3D_EDGE2(G3D_EDGE2), .G3D_EP2(G3D_EP2), .G3D_FDB(G3D_FDB), .G3D_PUMP(G3D_PUMP), .G3D_SWHOLD(G3D_SWHOLD), .G3D_SWPC(G3D_SWPC), .G3D_LMARK(G3D_LMARK), .G3D_SWL(G3D_SWL), .G3D_SWROUTE(G3D_SWROUTE), .G3D_LEAD(G3D_LEAD), .G3D_SL(G3D_SL), .G3D_CL(G3D_CL), .CAP_CHAIN(CAP_CHAIN), .VR_POST(VR_POST), .VR_RDB(VR_RDB), .VR_PASS(VR_PASS), .VR_WB(VR_WB), .VR_CWF(VR_CWF), .VR_HIT(VR_HIT), .VR_YIELD(VR_YIELD), .VR_PDRAIN(VR_PDRAIN), .G3D_RING(RING), .G3D_STORE_SD(G3D_STORE_SD), .A9_EVB(A9_EVB), .A9_EVBW(A9_EVBW), .A9_EARLYD(A9_EARLYD), .BOOT_SRAM(BOOT_SRAM), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .A7_IO(A7_IO), .DMA_UNIT(DMA_UNIT), .DMA_RA(DMA_RA), .DMA_B8(DMA_B8), .DMA_PACE(DMA_PACE), .DMA_PACE_GX(DMA_PACE_GX), .DMA_PW(DMA_PW), .DMA_PMM(DMA_PMM), .DMA_IOF(DMA_IOF), .DMA_GX(DMA_GX), .GX_GATH16(GX_GATH16), .GX_ENGM10K(GX_ENGM10K), .G3D_VYSM10K(G3D_VYSM10K), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID), .ARM7_CACHE(ARM7_CACHE), .A7_IL(A7_IL), .A7_DL(A7_DL), .CPU_FAST(CPU_FAST), .WIFI(WIFI), .SYS_PUMP(SYS_PUMP), .G2D_MOSAIC(G2D_MOSAIC), .G2D_CAPTURE(G2D_CAPTURE), .OAM_SHARE(OAM_SHARE), .G2D_TEX_IDXW(G2D_TEX_IDXW), .G2D_HURRY(DL_PRI != 0 ? G2D_HURRY : 0), .G3D_RH_AT(DL_PRI != 0 && RING != 0 ? G3D_RH_AT : 0), .VR_PF(VR_PF), .VR_PH(VR_PH), .PO_WD(PO_WD), .G3D_DROP(G3D_DROP)) ds (.hurry2d(ds_hurry2d), .rg_hurry(ds_rg_hurry), .clk(clk_sys), .clk_cpu(clk_cpu), .clk_2x(clk_2x), .rst(rst_sys), .go(go),
++    nds_top #(.G3D_ES2(G3D_ES2), .BOOTROM("bootrom.mif"), .A9_SOLO(A9_SOLO), .SOUND(SOUND), .SND_CAPTURE(SND_CAPTURE), .GPU3D(GPU3D), .G3D_AA(G3D_AA), .G3D_TOON(G3D_TOON), .G3D_FOG(G3D_FOG), .G3D_ATEST(G3D_ATEST), .G3D_EDGE(G3D_EDGE), .G3D_SHADOW(G3D_SHADOW), .G3D_LOWER(G3D_LOWER), .G3D_TCFAST(G3D_TCFAST), .G3D_TCMIF2(G3D_TCMIF2), .G3D_TCWAYS(G3D_TCWAYS), .G3D_TCV2W(G3D_TCV2W), .G3D_SPO(G3D_SPO), .G3D_SPOSL(G3D_SPOSL), .G3D_SPOG(G3D_SPOG), .G3D_SPOGN(G3D_SPOGN), .G3D_TXD(G3D_TXD), .G3D_PXD(G3D_PXD), .G3D_FPSKIP(G3D_FPSKIP), .G3D_TRU(G3D_TRU), .G3D_TRUL(G3D_TRUL), .G3D_FPCLR(G3D_FPCLR), .G3D_YLIM2(G3D_YLIM2), .G3D_LLR(G3D_LLR), .G3D_RPRI(G3D_RPRI), .G3D_NX2(G3D_NX2), .G3D_TL(G3D_TL), .G3D_PL(G3D_PL), .G3D_TCV2(G3D_TCV2), .G3D_TCPOOL(G3D_TCPOOL), .G3D_CWF(G3D_CWF), .G3D_NXB(G3D_NXB), .G3D_VREG(G3D_VREG), .G3D_DSHARE(G3D_DSHARE), .G3D_LB2(G3D_LB2), .G3D_LOV(G3D_LOV), .G3D_EDIV4(G3D_EDIV4), .G3D_EDGE2(G3D_EDGE2), .G3D_EP2(G3D_EP2), .G3D_FDB(G3D_FDB), .G3D_PUMP(G3D_PUMP), .G3D_SWHOLD(G3D_SWHOLD), .G3D_SWPC(G3D_SWPC), .G3D_LMARK(G3D_LMARK), .G3D_SWL(G3D_SWL), .G3D_SWROUTE(G3D_SWROUTE), .G3D_LEAD(G3D_LEAD), .G3D_SL(G3D_SL), .G3D_CL(G3D_CL), .CAP_CHAIN(CAP_CHAIN), .VR_POST(VR_POST), .VR_RDB(VR_RDB), .VR_PASS(VR_PASS), .VR_WB(VR_WB), .VR_CWF(VR_CWF), .VR_HIT(VR_HIT), .VR_YIELD(VR_YIELD), .VR_PDRAIN(VR_PDRAIN), .G3D_RING(RING), .G3D_STORE_SD(G3D_STORE_SD), .A9_EVB(A9_EVB), .A9_EVBW(A9_EVBW), .A9_EARLYD(A9_EARLYD), .BOOT_SRAM(BOOT_SRAM), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .A7_IO(A7_IO), .DMA_UNIT(DMA_UNIT), .DMA_RA(DMA_RA), .DMA_B8(DMA_B8), .DMA_PACE(DMA_PACE), .DMA_PACE_GX(DMA_PACE_GX), .DMA_PW(DMA_PW), .DMA_PMM(DMA_PMM), .DMA_IOF(DMA_IOF), .DMA_GX(DMA_GX), .GX_GATH16(GX_GATH16), .GX_ENGM10K(GX_ENGM10K), .G3D_VYSM10K(G3D_VYSM10K), .GX_SPAW(GX_SPAW), .DX_SKID(DX_SKID), .ARM7_CACHE(ARM7_CACHE), .A7_IL(A7_IL), .A7_DL(A7_DL), .CPU_FAST(CPU_FAST), .WIFI(WIFI), .SYS_PUMP(SYS_PUMP), .G2D_MOSAIC(G2D_MOSAIC), .G2D_CAPTURE(G2D_CAPTURE), .OAM_SHARE(OAM_SHARE), .G2D_TEX_IDXW(G2D_TEX_IDXW), .G2D_HURRY(DL_PRI != 0 ? G2D_HURRY : 0), .G3D_RH_AT(DL_PRI != 0 && RING != 0 ? G3D_RH_AT : 0), .VR_PF(VR_PF), .VR_PH(VR_PH), .PO_WD(PO_WD), .G3D_DROP(G3D_DROP)) ds (.hurry2d(ds_hurry2d), .rg_hurry(ds_rg_hurry), .clk(clk_sys), .clk_cpu(clk_cpu), .clk_2x(clk_2x), .rst(rst_sys), .go(go),
+         .cw_valid(cw_valid), .cw_addr(cw_addr), .cw_data(cw_data), .cw_he(cw_he), .cw_ack(cw_ack), .rg_wlast(ds_rg_wlast), .rg_wreq(ds_rg_wreq), .rg_waddr(ds_rg_waddr), .rg_wdata(ds_rg_wdata), .rg_wack(rg_wack),
+         .rg_rreq(ds_rg_rreq), .rg_raddr(ds_rg_raddr), .rg_rack(rg_rack), .rg_rvalid(rg_rvalid), .rg_rdata(rg_rdata), .rg_wdrained(bw_empty), .rg_wfill(bw_fill), .rg_wpcnt(bw_pcnt), .rom_size(rom_size_b), .mem_dirty(MEM_DIRTY != 0),
+         .wx_req(), .wx_we(), .wx_be(), .wx_addr(), .wx_wdata(), .wx_ack(1'b0), .wx_rdata(32'd0), .wx_irq(1'b0), .wx_power(), .wx_rtl_ack(), .wx_rtl_rdata(), .wx_rtl_irq(),

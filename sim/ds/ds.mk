@@ -13,7 +13,7 @@ DS_G     ?=                        # extra nds_top parameters (-GNAME=V), e.g. -
 DS_USORT ?= 1
 DS_B     := build/ds$(if $(filter 1,$(DS_SOUND)),-snd,)$(if $(filter 1,$(DS_3D)),-3d,)$(if $(filter 1,$(DS_FAST)),-fast,)$(if $(filter 0,$(DS_USORT)),-gxsort,)$(if $(filter 0,$(DS_A7C)),-a7m,)$(if $(filter-out 1,$(DS_THREADS)),-t$(DS_THREADS),)
 DS_RTL   := rtl/arm/arm_pkg.sv rtl/arm/arm_regfile.sv rtl/arm/arm_mul.sv rtl/arm/arm_thumb.sv \
-            rtl/arm/arm_core.sv rtl/arm/arm7_ds.sv rtl/arm/arm9_ram.sv rtl/arm/arm9_mem.sv rtl/arm/arm_cpu.sv \
+            rtl/arm/arm_core.sv rtl/arm/arm9_core.sv rtl/arm/arm7_ds.sv rtl/arm/arm9_ram.sv rtl/arm/arm9_mem.sv rtl/arm/arm_cpu.sv \
             rtl/arm/cdc_req.sv rtl/arm/cdc_fifo.sv rtl/arm/cdc_a7.sv rtl/arm/cpu_domain.sv \
             rtl/ds/nds_dsp_add.sv rtl/sys/sys_ram.sv rtl/sys/sys_irq.sv rtl/sys/sys_timers.sv rtl/sys/sys_ipc.sv \
             rtl/sys/sys_math.sv rtl/sys/sys_dma.sv rtl/sys/nds_sys.sv \
@@ -23,7 +23,7 @@ DS_RTL   := rtl/arm/arm_pkg.sv rtl/arm/arm_regfile.sv rtl/arm/arm_mul.sv rtl/arm
             rtl/ds/nds_ram.sv rtl/ds/nds_lcache.sv rtl/ds/nds_arm7_port.sv rtl/ds/nds_arm7_port_min.sv rtl/ds/nds_fabric.sv rtl/ds/nds_vram.sv \
             rtl/ds/nds_io.sv rtl/ds/nds_disp_refs.sv rtl/ds/nds_disp.sv rtl/ds/nds_cart.sv rtl/ds/nds_spi.sv rtl/ds/nds_rtc.sv rtl/ds/nds_wifi.sv rtl/ds/nds_wifi_mc.sv \
             rtl/gpu3d/gpu3d_pkg.sv rtl/gpu3d/gpu3d_div4.sv rtl/gpu3d/gpu3d_ram.sv rtl/gpu3d/gpu3d_edge.sv rtl/gpu3d/gpu3d_front.sv rtl/gpu3d/gpu3d_fpass.sv rtl/gpu3d/gpu3d_raster.sv \
-            rtl/gpu3d/gpu3d_gxu_pkg.sv rtl/gpu3d/gpu3d_gxrom.sv rtl/gpu3d/gpu3d_gxrom_us.sv rtl/gpu3d/gpu3d_gxrom_ul.sv rtl/gpu3d/gpu3d_gxrom_uv.sv rtl/gpu3d/gpu3d_gxrom_uw.sv rtl/gpu3d/gpu3d_gxrom_uf.sv rtl/gpu3d/gpu3d_gxlight.sv rtl/gpu3d/gpu3d_gxvfin.sv rtl/gpu3d/gpu3d_gxdiv.sv rtl/gpu3d/gpu3d_gxfront.sv rtl/gpu3d/gpu3d_gxeng.sv rtl/gpu3d/gpu3d_gxsort.sv rtl/gpu3d/gpu3d_geom.sv rtl/ds/nds_blk_arb.sv rtl/ds/nds_g3d_plane.sv rtl/ds/nds_l3d_xscroll.sv rtl/ds/nds_fr_arb.sv rtl/ds/nds_mr_arb.sv rtl/ds/nds_g3d_store.sv rtl/ds/nds_g3d_ring.sv rtl/ds/nds_gpu3d.sv \
+            rtl/gpu3d/gpu3d_gxu_pkg.sv rtl/gpu3d/gpu3d_gxrom.sv rtl/gpu3d/gpu3d_gxrom_us.sv rtl/gpu3d/gpu3d_gxrom_ul.sv rtl/gpu3d/gpu3d_gxrom_uv.sv rtl/gpu3d/gpu3d_gxrom_uw.sv rtl/gpu3d/gpu3d_gxrom_uf.sv rtl/gpu3d/gpu3d_gxrom_up1.sv rtl/gpu3d/gpu3d_gxrom_up2.sv rtl/gpu3d/gpu3d_gxlight.sv rtl/gpu3d/gpu3d_gxvfin.sv rtl/gpu3d/gpu3d_gxdiv.sv rtl/gpu3d/gpu3d_gxfront.sv rtl/gpu3d/gpu3d_gxeng.sv rtl/gpu3d/gpu3d_gxsort.sv rtl/gpu3d/gpu3d_geom.sv rtl/ds/nds_blk_arb.sv rtl/ds/nds_g3d_plane.sv rtl/ds/nds_l3d_xscroll.sv rtl/ds/nds_fr_arb.sv rtl/ds/nds_mr_arb.sv rtl/ds/nds_g3d_store.sv rtl/ds/nds_g3d_ring.sv rtl/ds/nds_gpu3d.sv \
             rtl/ds/nds_top.sv
 DS_TB    := $(DS_B)/obj/Vnds_top
 DS_VFLAGS := --cc --exe --build -j 8 -O3 --x-assign fast --x-initial fast --threads $(DS_THREADS) --savable \

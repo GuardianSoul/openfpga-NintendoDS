@@ -191,6 +191,7 @@ package gpu3d_gxu_pkg;
     localparam logic [10:0] PU_A_NCONS = 11'h0D9;
     localparam logic [10:0] PU_A_LSREUSE = 11'h0E4;
     localparam logic [10:0] PU_A_SLOT = 11'h16B;
+    localparam logic [10:0] PX_A_POSTEST = 11'h278;
     localparam logic [10:0] PU_A_SV1 = 11'h2D3;
     localparam logic [5:0] PU_TRIVM = 6'h3B;
     localparam logic [5:0] FF_HCOLOR = 6'd14;

@@ -23,6 +23,7 @@
 // pipeline when the engine answers. It waits only where melonDS reads the
 // pipeline: the next vertex slot, a stalling command, the busy bit.
 module gpu3d_gxfront #(
+    parameter bit GAT_FE = 1'b0,   // the spill gather u_gat in M10K, read on the falling edge (core_top_ds RAM_MOVE 4)
     // 1: GX cheap timing (docs/budget-3d.md, option (a); a DS deviation the maintainer approved): every entry costs a
     // fixed number of cycles by command (cheap_idx/cheap_val), the vertex, normal and polygon pipelines never fill,
     // so no NextVertexSlot / StallPolygonPipeline and no polygon outcomes; the FIFO, PIPE, GXSTAT bits,
@@ -217,7 +218,18 @@ module gpu3d_gxfront #(
     // staging: one bus write -> up to four entries (WriteToGXFIFO)
     // ------------------------------------------------------------------
     logic [2:0]  pk_nc;                // NumCommands
-    logic [31:0] pk_cur;               // CurCommand
+    // CurCommand as a byte pointer into the word as accepted (docs/gx-area-map.md a2): pk_w the packed word, pk_p
+    // its current command's byte (0..3; 4 past the word). melonDS's CurCommand is pk_w >> 8 pk_p; nothing shifts
+    logic [31:0] pk_w;
+    logic [2:0]  pk_p;
+    // a word's byte k (0 past the word), and the first non-zero byte after byte p (4: none)
+    function automatic [7:0] byt(input [31:0] w, input [2:0] k);
+        byt = k[2] ? 8'h00 : w[8 * k[1:0] +: 8];
+    endfunction
+    function automatic [2:0] nxt(input [31:0] w, input [2:0] p);
+        nxt = 3'd4;
+        for (int k = 3; k >= 0; k--) if (3'(k) > p && w[8 * k +: 8] != 8'h00) nxt = 3'(k);
+    endfunction
     logic [5:0]  pk_pc, pk_tp;         // ParamCount, TotalParams
     logic [2:0]  st_n, st_w, st_a;     // staged, written to RAM, counted
     logic [7:0]  st_cmd [4];
@@ -241,24 +253,26 @@ module gpu3d_gxfront #(
     endfunction
     // a new packed command word: skip its leading zero bytes
     wire  [2:0]  w_z    = PRE ? wr_pre[2:0] : lzb(wr_data, 3'd4);
-    wire  [31:0] w_cur  = wr_data >> {w_z, 3'b000};
-    wire  [5:0]  w_tp   = PRE ? wr_pre[9:4] : nparams(w_cur[7:0]);
+    wire  [7:0]  w_c    = byt(wr_data, w_z);                   // its first command
+    wire  [5:0]  w_tp   = PRE ? wr_pre[9:4] : nparams(w_c);
     wire         w_zero = PRE ? wr_pre[3] : wr_data == 32'd0;   // emits one NOP
     // a packed word whose first command takes parameters stages nothing
     wire         w_none = w_pack && pk_nc == 3'd0 && (PRE ? wr_pre[19] : !w_zero && w_tp != 6'd0);
     // the step: emit the current command, then (its parameters in) move past
     // it and the zero bytes after it; the step ends where parameters are due
-    logic [31:0] s_cur;
+    logic [31:0] s_w;                  // the step's word and command byte (s_cur = s_w >> 8 s_p)
+    logic [2:0]  s_p;
     logic [2:0]  s_nc;
     logic [5:0]  s_pc, s_tp;
     always_comb begin
         if (!act) begin                // the accepted word itself
-            s_cur = pk_nc == 3'd0 ? w_cur : pk_cur;
+            s_w   = pk_nc == 3'd0 ? wr_data : pk_w;
+            s_p   = pk_nc == 3'd0 ? w_z : pk_p;
             s_nc  = pk_nc == 3'd0 ? 3'd4 - w_z : pk_nc;
             s_pc  = pk_nc == 3'd0 ? 6'd0 : pk_pc + 6'd1;
             s_tp  = pk_nc == 3'd0 ? w_tp : pk_tp;
         end else begin
-            s_cur = pk_cur; s_nc = pk_nc; s_pc = pk_pc; s_tp = pk_tp;
+            s_w = pk_w; s_p = pk_p; s_nc = pk_nc; s_pc = pk_pc; s_tp = pk_tp;
         end
     end
     wire         i_next = s_pc >= s_tp;
@@ -266,13 +280,22 @@ module gpu3d_gxfront #(
     wire         i_new  = PRE && !act && pk_nc == 3'd0;
     // the command after pk_cur's, shared with pk_upb's step below: with PRE, s_* are pk_* except for a new
     // word (i_new), whose step comes from wr_pre
-    wire  [2:0]  sh_z   = lzb(pk_cur >> 8, pk_nc - 3'd1);
-    wire  [31:0] sh_cur = pk_cur >> {sh_z + 3'd1, 3'b000};
-    wire  [5:0]  sh_tp  = nparams(sh_cur[7:0]);
-    wire  [2:0]  i_z    = i_new ? wr_pre[12:10] : PRE ? sh_z : lzb(s_cur >> 8, s_nc - 3'd1);
-    wire  [31:0] i_cur  = !i_next ? s_cur : PRE && !i_new ? sh_cur : s_cur >> {i_z + 3'd1, 3'b000};
+    // (the pointer form: pk_nc is 4 - pk_p while commands are left, so the next non-zero byte within pk_nc - 1
+    // bytes is the next non-zero byte of the word, and none means all pk_nc - 1 are zero, as lzb counts)
+    wire  [2:0]  sh_nx  = nxt(pk_w, pk_p);
+    // (no commands left, pk_nc 0: CurCommand was 0 and lzb's count pk_nc - 1 wraps to 7, which pk_upb's step reads)
+    wire  [2:0]  sh_z   = pk_nc == 3'd0 ? 3'd7 : sh_nx - pk_p - 3'd1;
+    wire  [7:0]  sh_c   = byt(pk_w, sh_nx);
+    wire  [5:0]  sh_tp  = nparams(sh_c);
+`ifdef GXFRONT_A2_MUT
+    wire  [2:0]  i_nx   = i_new ? w_z + wr_pre[12:10] + 3'd1 : PRE ? sh_nx - 3'(sh_nx != 3'd4 && sh_nx > pk_p + 3'd1) : nxt(s_w, s_p);   // (mutant: the zero-byte skip one byte short)
+`else
+    wire  [2:0]  i_nx   = i_new ? w_z + wr_pre[12:10] + 3'd1 : PRE ? sh_nx : nxt(s_w, s_p);
+`endif
+    wire  [2:0]  i_z    = i_nx - s_p - 3'd1;
+    wire  [2:0]  i_p    = i_next ? i_nx : s_p;
     wire  [2:0]  i_nc   = i_next ? s_nc - 3'd1 - i_z : s_nc;
-    wire  [5:0]  i_tp   = i_next ? (i_new ? wr_pre[18:13] : PRE ? sh_tp : nparams(i_cur[7:0])) : s_tp;
+    wire  [5:0]  i_tp   = i_next ? (i_new ? wr_pre[18:13] : PRE ? sh_tp : nparams(byt(s_w, i_nx))) : s_tp;
     wire  [5:0]  i_pc   = i_next ? 6'd0 : s_pc;
     // PRE: up after a parameter word continues the packed word in pk_* (the step of !act with pk_nc != 0),
     // from pk_* a clock earlier: they are written at least two clocks before a following word is taken
@@ -282,12 +305,10 @@ module gpu3d_gxfront #(
         logic [5:0] bpc;
         logic       bnx, bend;
         logic [2:0] bz, bnc;
-        logic [31:0] bcur;
         logic [5:0] btp, bipc;
         bpc  = pk_pc + 6'd1;
         bnx  = bpc >= pk_tp;
         bz   = sh_z;
-        bcur = sh_cur;
         bnc  = bnx ? pk_nc - 3'd1 - bz : pk_nc;
         btp  = bnx ? sh_tp : pk_tp;
         bipc = bnx ? 6'd0 : bpc;
@@ -298,8 +319,8 @@ module gpu3d_gxfront #(
     // i_end of an unpacking step (act: s_* = pk_*), with pk_nc only in the last compare (#626: pk_nc -> up
     // -0.736 ns through lzb's count). up is set only with commands left, so pk_nc is 1..4 here: the next
     // command is the first non-zero byte after byte 0 (bz_f; 3: none) if it lies within pk_nc - 1 bytes
-    wire  [2:0]  bz_f   = pk_cur[15:8] != 8'h00 ? 3'd0 : pk_cur[23:16] != 8'h00 ? 3'd1 : pk_cur[31:24] != 8'h00 ? 3'd2 : 3'd3;
-    wire  [7:0]  b_nx   = bz_f == 3'd0 ? pk_cur[15:8] : bz_f == 3'd1 ? pk_cur[23:16] : pk_cur[31:24];
+    wire  [2:0]  bz_f   = sh_nx == 3'd4 ? 3'd3 : sh_z;
+    wire  [7:0]  b_nx   = sh_c;
     wire         up_end = pk_pc < pk_tp || bz_f >= pk_nc - 3'd1 || nparams(b_nx) != 6'd0;
     // a FIFO write completes once its entries are counted (as melonDS's
     // synchronous Write32), so a following GXSTAT read sees it
@@ -310,8 +331,43 @@ module gpu3d_gxfront #(
     always_ff @(posedge clk)
         if (!rst && act && up && up_end != i_end) $error("gpu3d_gxfront: up_end %0d != i_end %0d", up_end, i_end);
     always_ff @(posedge clk)
-        if (!rst && PRE && !i_new && (s_cur != pk_cur || s_nc != pk_nc || s_tp != pk_tp))
+        if (!rst && PRE && !i_new && (s_w != pk_w || s_p != pk_p || s_nc != pk_nc || s_tp != pk_tp))
             $error("gpu3d_gxfront: the shared next-command step sees s_* != pk_*");
+    // a2: CurCommand as the shifted register it was (o_pk), stepped beside the pointer form by the old step's
+    // expressions; the pointer form must name the same word and the same step at every clock
+    logic [31:0] o_pk;
+    wire  [31:0] o_wc   = wr_data >> {w_z, 3'b000};
+    wire  [31:0] o_sc   = !act ? (pk_nc == 3'd0 ? o_wc : o_pk) : o_pk;
+    wire  [2:0]  o_shz  = lzb(o_pk >> 8, pk_nc - 3'd1);
+    wire  [31:0] o_shc  = o_pk >> {o_shz + 3'd1, 3'b000};
+    wire  [2:0]  o_iz   = i_new ? wr_pre[12:10] : PRE ? o_shz : lzb(o_sc >> 8, s_nc - 3'd1);
+    wire  [31:0] o_ic   = !i_next ? o_sc : PRE && !i_new ? o_shc : o_sc >> {o_iz + 3'd1, 3'b000};
+    wire  [2:0]  o_inc  = i_next ? s_nc - 3'd1 - o_iz : s_nc;
+    wire  [5:0]  o_itp  = i_next ? (i_new ? wr_pre[18:13] : PRE ? nparams(o_shc[7:0]) : nparams(o_ic[7:0])) : s_tp;
+    wire  [2:0]  o_bzf  = o_pk[15:8] != 8'h00 ? 3'd0 : o_pk[23:16] != 8'h00 ? 3'd1 : o_pk[31:24] != 8'h00 ? 3'd2 : 3'd3;
+    wire  [7:0]  o_bnx  = o_bzf == 3'd0 ? o_pk[15:8] : o_bzf == 3'd1 ? o_pk[23:16] : o_pk[31:24];
+    wire         o_upe  = pk_pc < pk_tp || o_bzf >= pk_nc - 3'd1 || nparams(o_bnx) != 6'd0;
+    // pk_upb's step on the old CurCommand (registered as pk_upb is)
+    logic        o_upb;
+    always_ff @(posedge clk) begin
+        logic [2:0] bnc;
+        bnc = (pk_pc + 6'd1 >= pk_tp) ? pk_nc - 3'd1 - o_shz : pk_nc;
+        o_upb <= !(bnc == 3'd0 || ((pk_pc + 6'd1 >= pk_tp) ? 6'd0 : pk_pc + 6'd1) < ((pk_pc + 6'd1 >= pk_tp) ? nparams(o_shc[7:0]) : pk_tp));
+    end
+    wire         o_step = (!act && w_fifo && w_pack && !(pk_nc == 3'd0 && w_zero) && !w_none) || (!(!act && w_fifo) && up);
+    always_ff @(posedge clk) begin
+        if (rst) o_pk <= 32'd0;
+        else if (!act && w_fifo && w_pack && pk_nc == 3'd0 && w_zero) o_pk <= 32'd0;
+        else if (!act && w_fifo && w_pack && w_none) o_pk <= o_wc;
+        else if (o_step) o_pk <= o_ic;
+        if (!rst && pk_nc != 3'd0 && o_pk != pk_w >> {pk_p, 3'b000})
+            $error("gpu3d_gxfront a2: CurCommand %08x, pointer form %08x byte %0d", o_pk, pk_w, pk_p);
+        if (!rst && o_step && (i_nc != o_inc || i_tp != o_itp || (i_nc != 3'd0 && o_ic != s_w >> {i_p, 3'b000}) ||
+                               byt(s_w, s_p) != o_sc[7:0]))
+            $error("gpu3d_gxfront a2: step i_nc %0d/%0d i_tp %0d/%0d cmd %02x/%02x", i_nc, o_inc, i_tp, o_itp, byt(s_w, s_p), o_sc[7:0]);
+        if (!rst && act && pk_nc != 3'd0 && up_end != o_upe) $error("gpu3d_gxfront a2: up_end %0d, old %0d", up_end, o_upe);
+        if (!rst && pk_upb != o_upb) $error("gpu3d_gxfront a2: pk_upb %0d, old %0d", pk_upb, o_upb);
+    end
     logic [31:0] st_word;              // the word as the write was accepted
     always_ff @(posedge clk) begin
         if (w_fifo && !act) st_word <= wr_data;
@@ -393,7 +449,7 @@ module gpu3d_gxfront #(
         wire [39:0] ent_wd = direct ? ram_wd : gfill ? g_q : {rhi, sp_rdata};
         gpu3d_ram #(.W(40), .AW(9), .STYLE(CHEAP ? "M10K, no_rw_check" : "AUTO")) u_ent (
             .clk, .we(ent_we), .waddr(oc), .wdata(ent_wd), .raddr(e_addr), .rdata(e_data));
-        gpu3d_lram #(.W(40), .AW(GA)) u_gat (.clk, .we(push), .waddr(sw[GA-1:0]), .wdata(ram_wd),
+        gpu3d_lram #(.W(40), .AW(GA), .FE(GAT_FE)) u_gat (.clk, .we(push), .waddr(sw[GA-1:0]), .wdata(ram_wd),
                                             .raddr(wact ? {swb[GA-1:2], wsec} : sr[GA-1:0]), .rdata(g_q));
         // (no capacity term: occ + sq reaches 511 + SPN - 8 only past the last term's SPN - 64)
         assign sp_full  = (sq != '0 || occ >= 10'(SP_ON)) && (sw - swb) >= SP_AW'(1 << GA) ||
@@ -1033,7 +1089,7 @@ module gpu3d_gxfront #(
             busy <= 1'b0; b14 <= 1'b0; b0 <= 1'b0; b15 <= 1'b0; npush <= 9'd0; ntest <= 9'd0; npush_x <= 1'b0; ntest_x <= 2'd0; st_aq <= 3'd0;
             psp <= 6'd0; jsp <= 1'b0; tsp <= 1'b0; irqm <= 2'd0; zdot <= 24'hFFFFFF;
             phase <= 1'b0; flush_t <= 1'b0; mx <= 9'd0; wr <= 9'd0;
-            pk_nc <= 3'd0; pk_cur <= 32'd0; pk_pc <= 6'd0; pk_tp <= 6'd0;
+            pk_nc <= 3'd0; pk_w <= 32'd0; pk_p <= 3'd0; pk_pc <= 6'd0; pk_tp <= 6'd0;
             st_n <= 3'd0; st_w <= 3'd0; st_a <= 3'd0; act <= 1'b0; up <= 1'b0;
             for (int k = 0; k < 4; k++) st_cmd[k] <= 8'h00;
         end else begin
@@ -1056,6 +1112,13 @@ module gpu3d_gxfront #(
                 if (npush_s == 9'd0) c14 = 1'b0;
                 if (ntest_s == 9'd0) c0 = 1'b0;
             end
+            // a VBlank takes the flush it finds (gpu3d_geom swap_in_v: the old flush) and clears it; a SWAP_BUFFERS
+            // executed in that VBlank's clock waits for the next one (the clear first, then the set). The clear used
+            // to come last and won: such a SWAP was never taken, the model ran on without its halt and the engine
+            // waited at SWAPGO for the next frame's take, one frame behind from then on
+`ifndef GXFRONT_FLUSH_MUT
+            if (vblank && geom_en) flush <= 1'b0;
+`endif
             if (do_exec) begin
                 if (hd.flush) flush <= 1'b1;
                 b15 <= x_b15; psp <= x_psp; jsp <= x_jsp; tsp <= x_tsp;
@@ -1078,18 +1141,18 @@ module gpu3d_gxfront #(
                 end else if (pk_nc == 3'd0 && w_zero) begin
                     // an all-zero word: one NOP entry, the word done
                     act <= 1'b1; st_n <= 3'd1; st_cmd[0] <= 8'h00;
-                    pk_nc <= 3'd0; pk_cur <= 32'd0; pk_pc <= 6'd0; pk_tp <= 6'd0;
+                    pk_nc <= 3'd0; pk_w <= 32'd0; pk_p <= 3'd0; pk_pc <= 6'd0; pk_tp <= 6'd0;
                 end else if (w_none) begin
-                    pk_nc <= 3'd4 - w_z; pk_cur <= w_cur; pk_pc <= 6'd0; pk_tp <= w_tp;
+                    pk_nc <= 3'd4 - w_z; pk_w <= wr_data; pk_p <= w_z; pk_pc <= 6'd0; pk_tp <= w_tp;
                 end else begin
-                    act <= 1'b1; st_n <= 3'd1; st_cmd[0] <= s_cur[7:0];
-                    pk_cur <= i_cur; pk_nc <= i_nc; pk_tp <= i_tp; pk_pc <= i_pc;
+                    act <= 1'b1; st_n <= 3'd1; st_cmd[0] <= byt(s_w, s_p);
+                    pk_w <= s_w; pk_p <= i_p; pk_nc <= i_nc; pk_tp <= i_tp; pk_pc <= i_pc;
                     // PRE: a new word's from gxpre, a parameter word's from pk_upb (both registered)
                     up <= PRE ? (pk_nc == 3'd0 ? wr_pre[20] : pk_upb) : !i_end;
                 end
             end else if (up) begin
-                st_cmd[st_n[1:0]] <= pk_cur[7:0]; st_n <= st_n + 3'd1;
-                pk_cur <= i_cur; pk_nc <= i_nc; pk_tp <= i_tp; pk_pc <= i_pc;
+                st_cmd[st_n[1:0]] <= byt(pk_w, pk_p); st_n <= st_n + 3'd1;
+                pk_p <= i_p; pk_nc <= i_nc; pk_tp <= i_tp; pk_pc <= i_pc;
                 if (up_end) up <= 1'b0;
             end else if (st_done) act <= 1'b0;
             if (ram_we) begin
@@ -1107,7 +1170,9 @@ module gpu3d_gxfront #(
             end
             if (wr_req && geom_en && wr_addr[9] && wr_addr[8:2] == 7'h04 && wr_be[1:0] == 2'b11)
                 zdot <= {wr_data[14:0], 9'h1FF};
-            if (vblank && geom_en) flush <= 1'b0;
+`ifdef GXFRONT_FLUSH_MUT
+            if (vblank && geom_en) flush <= 1'b0;                   // (mutant: the clear last, a VBlank-clock SWAP lost)
+`endif
         end
     end
 

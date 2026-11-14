@@ -10,7 +10,7 @@
 //
 // Every layout's frame starts (VS with the HS) at DS line 1; the live screen's
 // line m goes out during DS line m+1 from a two-line buffer.
-// Layouts (SELECT+R, plan.md "Controls and screen layouts"):
+// Layouts (SELECT+R, docs/archive/plan.md "Controls and screen layouts"):
 //   stacked (default), scaler slot 0, 256 x 384: the top screen goes out live
 //     (DS lines 1-192). The bottom screen is written to SDRAM (BUF_W, 128
 //     words per line, about 5.9 MB/s) as it is drawn and sent from there

@@ -19,14 +19,14 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-RTL = ['arm/arm_pkg.sv', 'arm/arm_regfile.sv', 'arm/arm_mul.sv', 'arm/arm_thumb.sv', 'arm/arm_core.sv', 'arm/arm7_ds.sv',
+RTL = ['arm/arm_pkg.sv', 'arm/arm_regfile.sv', 'arm/arm_mul.sv', 'arm/arm_thumb.sv', 'arm/arm_core.sv', 'arm/arm9_core.sv', 'arm/arm7_ds.sv',
        'arm/arm9_ram.sv', 'arm/arm9_mem.sv', 'arm/arm_cpu.sv', 'arm/cdc_req.sv', 'arm/cdc_fifo.sv', 'arm/cdc_a7.sv', 'arm/cpu_domain.sv',
        'sys/sys_ram.sv', 'sys/sys_irq.sv', 'ds/nds_dsp_add.sv', 'sys/sys_timers.sv', 'sys/sys_ipc.sv', 'sys/sys_math.sv', 'sys/sys_dma.sv',
        'sys/nds_sys.sv', 'gpu2d/gpu2d_pkg.sv', 'gpu2d/gpu2d_ram.sv', 'gpu2d/gpu2d_cache.sv', 'gpu2d/gpu2d_bg.sv',
        'gpu2d/gpu2d_obj.sv', 'gpu2d/gpu2d.sv', 'sound/sound_ram.sv', 'sound/sound.sv',
        'ds/nds_ram.sv', 'ds/nds_lcache.sv', 'ds/nds_arm7_port.sv', 'ds/nds_arm7_port_min.sv', 'ds/nds_fabric.sv', 'ds/nds_vram.sv', 'ds/nds_io.sv', 'ds/nds_disp_refs.sv', 'ds/nds_disp.sv',
        'gpu3d/gpu3d_pkg.sv', 'gpu3d/gpu3d_div4.sv', 'gpu3d/gpu3d_ram.sv', 'gpu3d/gpu3d_edge.sv', 'gpu3d/gpu3d_front.sv', 'gpu3d/gpu3d_fpass.sv', 'gpu3d/gpu3d_raster.sv',
-       'gpu3d/gpu3d_gxu_pkg.sv', 'gpu3d/gpu3d_gxrom.sv', 'gpu3d/gpu3d_gxrom_us.sv', 'gpu3d/gpu3d_gxrom_ul.sv', 'gpu3d/gpu3d_gxrom_uv.sv', 'gpu3d/gpu3d_gxrom_uw.sv', 'gpu3d/gpu3d_gxrom_uf.sv', 'gpu3d/gpu3d_gxlight.sv', 'gpu3d/gpu3d_gxvfin.sv', 'gpu3d/gpu3d_gxdiv.sv', 'gpu3d/gpu3d_gxfront.sv', 'gpu3d/gpu3d_gxeng.sv', 'gpu3d/gpu3d_gxsort.sv', 'gpu3d/gpu3d_geom.sv', 'ds/nds_blk_arb.sv', 'ds/nds_g3d_plane.sv', 'ds/nds_l3d_xscroll.sv', 'ds/nds_fr_arb.sv', 'ds/nds_mr_arb.sv', 'ds/nds_g3d_store.sv', 'ds/nds_g3d_ring.sv', 'ds/nds_gpu3d.sv',
+       'gpu3d/gpu3d_gxu_pkg.sv', 'gpu3d/gpu3d_gxrom.sv', 'gpu3d/gpu3d_gxrom_us.sv', 'gpu3d/gpu3d_gxrom_ul.sv', 'gpu3d/gpu3d_gxrom_uv.sv', 'gpu3d/gpu3d_gxrom_uw.sv', 'gpu3d/gpu3d_gxrom_uf.sv', 'gpu3d/gpu3d_gxrom_up1.sv', 'gpu3d/gpu3d_gxrom_up2.sv', 'gpu3d/gpu3d_gxlight.sv', 'gpu3d/gpu3d_gxvfin.sv', 'gpu3d/gpu3d_gxdiv.sv', 'gpu3d/gpu3d_gxfront.sv', 'gpu3d/gpu3d_gxeng.sv', 'gpu3d/gpu3d_gxsort.sv', 'gpu3d/gpu3d_geom.sv', 'ds/nds_blk_arb.sv', 'ds/nds_g3d_plane.sv', 'ds/nds_l3d_xscroll.sv', 'ds/nds_fr_arb.sv', 'ds/nds_mr_arb.sv', 'ds/nds_g3d_store.sv', 'ds/nds_g3d_ring.sv', 'ds/nds_gpu3d.sv',
        'ds/nds_cart.sv', 'ds/nds_spi.sv', 'ds/nds_rtc.sv', 'ds/nds_wifi.sv', 'ds/nds_wifi_mc.sv', 'ds/nds_top.sv',
        'pocket/nds_sig.sv', 'pocket/nds_cdc.sv', 'pocket/nds_sdram_mc.sv', 'pocket/nds_sdram_bus.sv', 'pocket/nds_apf_host.sv', 'pocket/nds_save_read.sv',
        'pocket/nds_cart_cache.sv', 'pocket/nds_cart_scpu.sv', 'pocket/nds_bport_share.sv', 'pocket/nds_diag.sv', 'pocket/nds_diag_lat.sv', 'pocket/nds_diag_xmem.sv', 'pocket/nds_bus_tests.sv', 'pocket/nds_log.sv', 'pocket/psx_pocket_pad_combo.sv',
@@ -144,7 +144,7 @@ def main():
            *(['-DRING_GEN'] if a.ringgen is not None else []),
            *([f'-GSLOTS={a.slots}'] if a.slots else []), *(['+define+NODEBUG'] if a.nodebug else []), *(['+define+IMPORT'] if a.imp else []),
            *(['+define+TB_CORE_PARAMS=' + ''.join(f', .{n}({v})' for n, v in (p.split('=', 1) for p in a.core_param))] if a.core_param else []), *(['+define+DIAG_MON'] if 'DIAG=1' in a.core_param else []), *(['+define+NO_SCPU'] if 'SHELL_CPU=0' in a.core_param else []), f'-GROM_AW={rom_aw}', '--threads', str(a.threads), *(['-GPREFETCH=0'] if a.no_prefetch else []),
-           '-I' + str(rtl / 'pocket'), '--Mdir', str(obj), *srcs]
+           '-I' + str(rtl / 'pocket'), '-I' + str(ROOT / 'sim/pocket_ds'), '+define+TB_PROBES', '--Mdir', str(obj), *srcs]
     # one build at a time on this machine, with 12 GB free (AGENTS.md: three at once ran the Desktop out of memory)
     lock = Path.home() / '.cache/nds-sim-build.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)

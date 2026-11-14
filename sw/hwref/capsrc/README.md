@@ -19,7 +19,7 @@ the64-entry resume table. The source is adapted from sndq v3's measured procedur
 The SDK-linked NDS image completes all64 segments in qualified Census22;
 the actual source register state, source RAM fetches and capture writes are
 checked against all128 saved buffers. Seven actual-artifact mutations are
-caught. See [batch qualification](../../../docs/hwref-batch22-20261101.md).
+caught. See [batch qualification](../../../docs/archive/hwref-batch22-20261101.md).
 Both completed-prefix and interrupted-segment restart sandboxes are qualified;
 the latter correctly remains incomplete when its interrupted case is skipped.
-See the [follow-up](../../../docs/hg-live-gp3d193.md). Real-hardware results remain pending.
+See the [follow-up](../../../docs/archive/hg-live-gp3d193.md). Real-hardware results remain pending.

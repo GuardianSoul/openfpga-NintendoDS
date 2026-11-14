@@ -13,7 +13,7 @@
 // EVEN_LINES: with an odd count it leaves part of a top row unwritten, the
 // old red line and the random first-line pixels on #217), and the lead line
 // plus 384 or 192 is odd.
-// Layouts (SELECT+R, plan.md "Controls and screen layouts"):
+// Layouts (SELECT+R, docs/archive/plan.md "Controls and screen layouts"):
 //   stacked (default), scaler slot 0, 256 x 384: the top screen goes out live
 //     (DS lines 3-194). The bottom screen's lines are written to SDRAM
 //     (BUF_W, 128 words per line) when they are complete and sent from there

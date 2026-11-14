@@ -47,6 +47,11 @@ module nds_io (
     input  logic        gx_ack,
     input  logic [31:0] gx_rdata,
     input  logic        gx_real,
+    // GX_REL (nds_fabric): an ARM9 read of the geometry engine parked by the fabric: its answer on gxp_done (one clock,
+    // gxp_rdata), not io_ack, while the fabric serves other requests (which may come here meanwhile)
+    input  logic        gx_park,
+    output logic        gxp_done,
+    output logic [31:0] gxp_rdata,
     input  logic        gx_ovf,         // DISP3DCNT bit 13: polygon/vertex RAM overflow
     output logic        wf_req,         // the WiFi block (ARM7 0x04800000+): answered with wf_ack
     input  logic        wf_ack,
@@ -323,10 +328,11 @@ module nds_io (
     logic [31:0] misc_q;
     logic        mr_hq;                 // the request read the mirror
     logic        snd_wait;
+    logic        gx_wait;               // a geometry-engine request waits for gx_ack
     logic        snd_stub, snd_cnt;
     always_ff @(posedge clk) begin
         io_ack <= 1'b0;
-        if (rst) begin dev_q <= D_NONE; snd_wait <= 1'b0; end
+        if (rst) begin dev_q <= D_NONE; snd_wait <= 1'b0; gx_wait <= 1'b0; gxp_done <= 1'b0; end
         else begin
             if (io_req) begin
                 dev_q <= dev;
@@ -334,10 +340,19 @@ module nds_io (
                 mr_hq <= mr_hit;
                 snd_stub <= dev == D_MISC && !a9 && wa[11:8] == 4'h1 && !snd_real;
                 snd_cnt  <= wa[1:0] == 2'd0;               // SOUNDxCNT word (channel stride 16 bytes)
-                if (dev == D_SND || dev == D_GX || dev == D_WIFI) snd_wait <= 1'b1;
+                if (dev == D_SND || dev == D_WIFI) snd_wait <= 1'b1;
+                else if (dev == D_GX) gx_wait <= 1'b1;
                 else io_ack <= 1'b1;
             end
-            if (snd_wait && (dev_q == D_GX ? gx_ack : dev_q == D_WIFI ? wf_ack : snd_ack)) begin snd_wait <= 1'b0; io_ack <= 1'b1; end
+            if (snd_wait && (dev_q == D_WIFI ? wf_ack : snd_ack)) begin snd_wait <= 1'b0; io_ack <= 1'b1; end
+            // the geometry engine: its own wait, so a parked read's answer (gx_park) goes to gxp_done while other
+            // devices are answered; unparked as before (dev_q is still D_GX: no other request came meanwhile)
+            gxp_done <= 1'b0;
+            if (gx_wait && gx_ack) begin
+                gx_wait <= 1'b0;
+                if (gx_park) begin gxp_done <= 1'b1; gxp_rdata <= gx_rdata; end
+                else io_ack <= 1'b1;
+            end
         end
     end
     always_comb begin

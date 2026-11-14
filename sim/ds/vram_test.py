@@ -31,13 +31,29 @@ MUTANTS = [
     # the second block's words counted only once the first is done
     ("bw_left <= bw_left + (bw_acc ? 5'd8 : 5'd0)", "bw_left <= (bw_acc ? 5'd8 : bw_left)"),
 ]
+MUTANTS_PFS = [   # (with --define TB_PF=1 --define TB_PFS=1 --plus cseq=1)
+    # a read answered from the M10K in the clock after a write went to its word (the read took the old word)
+    ("    wire         p_h = !rb_col && (", "    wire         p_h = (", None),
+    # set 0's tag without bit 5's carry: the prefetch of L+1 after an odd line L is tagged as L-1
+    ("    wire  [19:6] p_nt = res_q[19:6] + 14'(res_q[5]);", "    wire  [19:6] p_nt = res_q[19:6];", None),
+    # the prefetch block read from set 0's line whatever its set
+    ("va <= PS ? {lt[pf_way][19:6], pf_way, 3'd0}", "va <= PS ? {lt[pf_way][19:6], 1'b0, 3'd0}", None),
+]
+MUTANTS_HITB = [   # (with --define TB_HITB=1)
+    # VR_HITB: a read-line miss starts its fill while 2D block words still come (the fill takes their words)
+    ("                else if (VR_HITB && bw_left != 5'd0) begin if (VR_YIELD && g_req) st <= S_IDLE; end  // a miss: after the block words\n", ""),
+]
+
+
+DEFINES = []   # --define TB_PF=1 / TB_HITB=1 (tb_vram's settings)
+PLUS = []      # --plus cseq=1 (tb_vram's run-time settings: sequential DMA reads)
 
 
 def build(name, rtl):
     obj = BUILD / name
     env = dict(os.environ, PATH=f'{TOOLS}:{os.environ["PATH"]}')
-    r = subprocess.run(['verilator', '--binary', '--timing', '-O2', '-Wno-fatal', '-Wno-WIDTHEXPAND',
-                        '-Wno-WIDTHTRUNC', '-Wno-UNUSEDSIGNAL', '--top-module', 'tb_vram', '--Mdir', str(obj),
+    r = subprocess.run(['verilator', '--binary', '--timing', '-O2', '-j', '4', '-Wno-fatal', '-Wno-WIDTHEXPAND',
+                        '-Wno-WIDTHTRUNC', '-Wno-UNUSEDSIGNAL', *[f'+define+{d}' for d in DEFINES], '--top-module', 'tb_vram', '--Mdir', str(obj),
                         str(ROOT / 'rtl/gpu2d/gpu2d_pkg.sv'), str(rtl), str(ROOT / 'sim/ds/tb_vram.sv')],
                        env=env, capture_output=True, text=True)
     if r.returncode:
@@ -47,7 +63,7 @@ def build(name, rtl):
 
 def run(exe, seeds, blocks):
     for s in range(1, seeds + 1):
-        out = subprocess.run([str(exe), f'+seed={s}', f'+blocks={blocks}'], capture_output=True, text=True,
+        out = subprocess.run([str(exe), f'+seed={s}', f'+blocks={blocks}', *[f'+{p}' for p in PLUS]], capture_output=True, text=True,
                              timeout=600).stdout
         if 'TEST PASSED' not in out:
             first = next((l for l in out.splitlines() if l.startswith(('ERROR', 'stuck'))), 'failed')
@@ -60,7 +76,16 @@ def main():
     ap.add_argument('--seeds', type=int, default=4)
     ap.add_argument('--blocks', type=int, default=3000)
     ap.add_argument('--mutate', action='store_true')
+    ap.add_argument('--define', action='append', default=[], help='a tb_vram define, e.g. TB_HITB=1 (repeatable)')
+    ap.add_argument('--plus', action='append', default=[], help='a tb_vram plusarg, e.g. cseq=1 (repeatable)')
     a = ap.parse_args()
+    DEFINES.extend(a.define)
+    PLUS.extend(a.plus)
+    global BUILD
+    if a.define:
+        BUILD = BUILD.with_name(BUILD.name + '-' + '-'.join(d.replace('=', '') for d in a.define))
+    if a.plus:
+        BUILD = BUILD.with_name(BUILD.name + '-' + '-'.join(p.replace('=', '') for p in a.plus))
     BUILD.mkdir(parents=True, exist_ok=True)
     src = ROOT / 'rtl/ds/nds_vram.sv'
     fail = run(build('ref', src), a.seeds, a.blocks)
@@ -68,6 +93,10 @@ def main():
     if fail or not a.mutate:
         sys.exit(1 if fail else 0)
     text = src.read_text()
+    if 'TB_PFS=1' in DEFINES:
+        MUTANTS[:] = [m[:2] for m in MUTANTS_PFS]
+    elif 'TB_HITB=1' in DEFINES:
+        MUTANTS[:] = MUTANTS_HITB
 
     def one(i):
         old, new = MUTANTS[i]
@@ -78,7 +107,7 @@ def main():
         return run(build(f'mut{i}/obj', d / 'nds_vram.sv'), a.seeds, a.blocks)
 
     missed = 0
-    with cf.ThreadPoolExecutor(4) as ex:
+    with cf.ThreadPoolExecutor(2) as ex:
         for i, res in enumerate(ex.map(one, range(len(MUTANTS)))):
             print(f'mutation {i} [{MUTANTS[i][1]}]: {"caught: " + res if res else "MISSED"}')
             missed += res is None

@@ -56,10 +56,13 @@ endmodule
 // in the clock's second half, as the MLAB's asynchronous read gives it (the write at this clock's rising edge
 // seen). raddr must settle in the first half and rdata be used within the second (gxeng's u_vm: from registers,
 // into registers)
+// SY = 1: in M10K with a plain synchronous read: rdata is the word at the raddr of the clock before (the write of
+// that clock not seen). For a reader whose address is held and whose data is taken a clock or more later.
 module gpu3d_lram #(
     parameter int W  = 8,
     parameter int AW = 2,
-    parameter bit FE = 1'b0
+    parameter bit FE = 1'b0,
+    parameter bit SY = 1'b0
 ) (
     input  logic          clk,
     input  logic          we,
@@ -68,7 +71,15 @@ module gpu3d_lram #(
     input  logic [AW-1:0] raddr,
     output logic [W-1:0]  rdata
 );
-    generate if (FE) begin : g_fe
+    generate if (SY) begin : g_sy
+        (* ramstyle = "M10K, no_rw_check" *) logic [W-1:0] mem [0:(1<<AW)-1];
+        always_ff @(posedge clk) if (we) mem[waddr] <= wdata;
+`ifdef GPU3D_LRAM_SY_MUT
+        always_ff @(posedge clk) rdata <= mem[raddr ^ AW'(1)];   // (mutant: the neighbouring word)
+`else
+        always_ff @(posedge clk) rdata <= mem[raddr];
+`endif
+    end else if (FE) begin : g_fe
         (* ramstyle = "M10K, no_rw_check" *) logic [W-1:0] mem [0:(1<<AW)-1];
         always_ff @(posedge clk) if (we) mem[waddr] <= wdata;
         always_ff @(negedge clk) rdata <= mem[raddr];
@@ -162,7 +173,8 @@ endmodule
 // same-address read and write, as the MLAB's read before the edge gave).
 module gpu3d_sram_en #(
     parameter int W  = 8,
-    parameter int AW = 5
+    parameter int AW = 5,
+    parameter STYLE = "M10K"
 ) (
     input  logic          clk,
     input  logic          we,
@@ -172,7 +184,7 @@ module gpu3d_sram_en #(
     input  logic [AW-1:0] raddr,
     output logic [W-1:0]  rdata
 );
-    (* ramstyle = "M10K" *) logic [W-1:0] mem [0:(1<<AW)-1];
+    (* ramstyle = STYLE *) logic [W-1:0] mem [0:(1<<AW)-1];
     always_ff @(posedge clk) begin
         if (we) mem[waddr] <= wdata;
         if (en) rdata <= mem[raddr];
@@ -192,7 +204,8 @@ module gpu3d_dring #(
     parameter int W  = 8,
     parameter int AW = 5,
     parameter int D  = 2,
-    parameter int K  = 1
+    parameter int K  = 1,
+    parameter STYLE = "M10K"
 ) (
     input  logic          clk,
     input  logic          we,             // write wdata at wp (the ring's write enable)
@@ -204,7 +217,7 @@ module gpu3d_dring #(
     generate
     if (D > K && D - K < (1 << AW)) begin : g_m10k
         logic [W-1:0] q;
-        gpu3d_sram_en #(.W(W), .AW(AW)) u_r (
+        gpu3d_sram_en #(.W(W), .AW(AW), .STYLE(STYLE)) u_r (
             .clk, .we, .waddr(wp), .wdata, .en, .raddr(AW'(wp - AW'(D - K))), .rdata(q));
         if (K == 2) begin : g_k2
             always_ff @(posedge clk) if (en) rdata <= q;
@@ -422,6 +435,81 @@ module gpu3d_ram_be4 #(
 `endif
 endmodule
 
+// N 64-bit tables (N even) written at one address by separate enables and read together at one address, in
+// 3.5 N M10K instead of 4 N: 512 x 20 blocks (two 10-bit bytes, byte enables). Table k keeps bits 59:0 in six
+// bytes of its own three blocks and bits 63:60 in one byte of a block it shares with table k ^ 1 (nds_g3d_cache2's
+// way data: docs/plan-next.md "RC12b 3D room"). Registered read; a same-address read and write returns the old
+// word (mixed-port OLD_DATA), as the inferred gpu3d_ram it replaces. Synthesis instantiates altsyncram (byte
+// enables are not inferred for 10-bit bytes).
+module gpu3d_ram_w7 #(
+    parameter int N  = 4,
+    parameter int AW = 9
+) (
+    input  logic                clk,
+    input  logic [N-1:0]        we,            // table k written at waddr
+    input  logic [AW-1:0]       waddr,
+    input  logic [63:0]         wdata,         // (one data word for all tables, as each gpu3d_ram had)
+    input  logic [AW-1:0]       raddr,
+    output logic [N-1:0][63:0]  rdata
+);
+    localparam int NB = 7 * N;                 // 10-bit bytes: 6 N full ones, then the N top nibbles
+    logic [10*NB-1:0] d, q;
+    logic [NB-1:0]    be;
+    always_comb begin
+        d = '0; be = '0;
+        for (int k = 0; k < N; k++) begin
+            d[60*k +: 60] = wdata[59:0];
+            d[60*N + 10*k +: 4] = wdata[63:60];
+            be[6*k +: 6] = {6{we[k]}};
+            be[6*N + k] = we[k];
+        end
+        for (int k = 0; k < N; k++) rdata[k] = {q[60*N + 10*k +: 4], q[60*k +: 60]};
+    end
+`ifdef ALTERA_RESERVED_QIS
+    altsyncram #(
+        .operation_mode                     ("DUAL_PORT"),
+        .ram_block_type                     ("M10K"),
+        .intended_device_family             ("Cyclone V"),
+        .width_a                            (10 * NB),
+        .widthad_a                          (AW),
+        .numwords_a                         (1 << AW),
+        .width_b                            (10 * NB),
+        .widthad_b                          (AW),
+        .numwords_b                         (1 << AW),
+        .width_byteena_a                    (NB),
+        .byte_size                          (10),
+        .outdata_reg_b                      ("UNREGISTERED"),
+        .address_reg_b                      ("CLOCK0"),
+        .rdcontrol_reg_b                    ("CLOCK0"),
+        .address_aclr_b                     ("NONE"),
+        .outdata_aclr_b                     ("NONE"),
+        .read_during_write_mode_mixed_ports ("OLD_DATA"),
+        .power_up_uninitialized             ("FALSE"),
+        .lpm_type                           ("altsyncram")
+    ) u_ram (
+        .clock0    (clk),
+        .wren_a    (|we),
+        .address_a (waddr),
+        .data_a    (d),
+        .byteena_a (be),
+        .address_b (raddr),
+        .q_b       (q)
+    );
+`else
+    // a table per 10-bit byte: what the blocks hold, byte by byte (old data on a same-address read and write)
+    logic [9:0] m [NB][0:(1<<AW)-1];
+    always_ff @(posedge clk) begin
+        for (int b = 0; b < NB; b++) begin
+            if (be[b]) m[b][waddr] <= d[10*b +: 10];
+            q[10*b +: 10] <= m[b][raddr];
+        end
+    end
+`ifndef SYNTHESIS
+    initial if (N % 2 != 0) $error("gpu3d_ram_w7: N even");
+`endif
+`endif
+endmodule
+
 // True dual-port RAM on two clocks (a double-pumped block, docs/phase2-integration.md
 // "Double-pumped RAMs"): port A only reads, on clk_a; port B reads or writes, on clk_b
 // (2 x clk_a, phase 0, in its users). Registered reads, unregistered outputs; power-up 0.
@@ -490,5 +578,114 @@ module gpu3d_tdp2c #(
     always @(posedge clk_a) #0 if (wt == $realtime) $error("gpu3d_tdp2c: a port-B write at a port-A read's edge");
     // synthesis translate_on
 `endif
+`endif
+endmodule
+
+// A multiply-accumulate in one DSP block (gpu3d_gxeng's vector lanes, docs/gx-area-map.md a1x): a and b are taken
+// into the block's input registers every clock; while en, q (the block's output register) becomes ld ? 2^63 + a_r * b_r :
+// q + a_r * b_r, modulo 2^WR (the preload constant: none of it in WR < 64 bits). Quartus infers this pattern only for some widths (nds-fit #2300: one lane half of
+// two), so synthesis instantiates altera_mult_add; the simulation model below is checked against Intel's model
+// (sim/gpu3d/a123_eq/lmac_vendor.py).
+module gpu3d_lmac #(
+    parameter int WA = 17,
+    parameter int WB = 16,
+    parameter int WR = 44
+) (
+    input  logic                 clk,
+    input  logic signed [WA-1:0] a,
+    input  logic signed [WB-1:0] b,
+    input  logic                 en,
+    input  logic                 ld,
+    output logic [WR-1:0]        q
+);
+`ifdef ALTERA_RESERVED_QIS
+    wire [63:0] r;
+    assign q = r[WR-1:0];
+    altera_mult_add #(
+        .selected_device_family("Cyclone V"),
+        .dedicated_multiplier_circuitry("YES"),
+        .number_of_multipliers(1), .width_a(WA), .width_b(WB), .width_result(64),
+        .representation_a("SIGNED"), .representation_b("SIGNED"),
+        .input_register_a0("CLOCK0"), .input_register_b0("CLOCK0"),
+        .multiplier_register0("UNREGISTERED"),
+        .output_register("CLOCK1"),
+        .accumulator("YES"), .accum_direction("ADD"),
+        // sload_accum high accumulates, low loads the preload constant 2^loadconst_value plus the product (Intel's
+        // model; default 2^0 = 1): the 64-bit result's bit 63, above the WR bits kept, so a load is the product alone
+        .use_sload_accum_port("YES"), .loadconst_value(63)
+    ) u_mac (
+        .dataa(a), .datab(b), .result(r),
+        .clock0(clk), .clock1(clk),
+        .ena0(1'b1), .ena1(en),
+        .aclr0(1'b0), .aclr1(1'b0), .aclr2(1'b0), .aclr3(1'b0),
+        .sclr0(1'b0), .sclr1(1'b0), .sclr2(1'b0), .sclr3(1'b0),
+        .accum_sload(1'b0), .sload_accum(!ld),
+        .signa(1'b1), .signb(1'b1),
+        .addnsub1(1'b1), .addnsub3(1'b1),
+        .zero_loopback(1'b0), .zero_chainout(1'b0), .chainin(1'b0),
+        .negate(1'b0), .rotate(1'b0), .shift_right(1'b0)
+    );
+`else
+    logic signed [WA-1:0] a_r;
+    logic signed [WB-1:0] b_r;
+    always_ff @(posedge clk) begin
+        a_r <= a; b_r <= b;
+        // (a load adds the preload constant 2^63 as the block does: none of it in WR < 64 bits)
+        if (en) q <= (ld ? WR'(64'h8000_0000_0000_0000) : q) + WR'(a_r * b_r);
+    end
+`endif
+endmodule
+
+// Two products summed into one DSP block's accumulator (gxeng a4's middle partial sum): a0, b0, a1, b1 are taken into
+// the block's input registers every clock; while en, q becomes (ld ? 0 : q) + a0_r b0_r + a1_r b1_r, modulo 2^WR.
+// As gpu3d_lmac: altera_mult_add in synthesis (the preload constant at bit 63 of a 64-bit result, above the WR bits
+// kept), the model below checked against Intel's (sim/gpu3d/a123_eq/lmac_vendor.py)
+module gpu3d_lmac2 #(
+    parameter int WA = 17,
+    parameter int WB = 17,
+    parameter int WR = 48
+) (
+    input  logic                 clk,
+    input  logic signed [WA-1:0] a0,
+    input  logic signed [WB-1:0] b0,
+    input  logic signed [WA-1:0] a1,
+    input  logic signed [WB-1:0] b1,
+    input  logic                 en,
+    input  logic                 ld,
+    output logic [WR-1:0]        q
+);
+`ifdef ALTERA_RESERVED_QIS
+    wire [63:0] r;
+    assign q = r[WR-1:0];
+    altera_mult_add #(
+        .selected_device_family("Cyclone V"),
+        .dedicated_multiplier_circuitry("YES"),
+        .number_of_multipliers(2), .width_a(WA), .width_b(WB), .width_result(64),
+        .representation_a("SIGNED"), .representation_b("SIGNED"),
+        .input_register_a0("CLOCK0"), .input_register_b0("CLOCK0"),
+        .input_register_a1("CLOCK0"), .input_register_b1("CLOCK0"),
+        .multiplier_register0("UNREGISTERED"), .multiplier_register1("UNREGISTERED"),
+        .output_register("CLOCK1"),
+        .accumulator("YES"), .accum_direction("ADD"),
+        .use_sload_accum_port("YES"), .loadconst_value(63)
+    ) u_mac (
+        .dataa({a1, a0}), .datab({b1, b0}), .result(r),
+        .clock0(clk), .clock1(clk),
+        .ena0(1'b1), .ena1(en),
+        .aclr0(1'b0), .aclr1(1'b0), .aclr2(1'b0), .aclr3(1'b0),
+        .sclr0(1'b0), .sclr1(1'b0), .sclr2(1'b0), .sclr3(1'b0),
+        .accum_sload(1'b0), .sload_accum(!ld),
+        .signa(1'b1), .signb(1'b1),
+        .addnsub1(1'b1), .addnsub3(1'b1),
+        .zero_loopback(1'b0), .zero_chainout(1'b0), .chainin(1'b0),
+        .negate(1'b0), .rotate(1'b0), .shift_right(1'b0)
+    );
+`else
+    logic signed [WA-1:0] a0_r, a1_r;
+    logic signed [WB-1:0] b0_r, b1_r;
+    always_ff @(posedge clk) begin
+        a0_r <= a0; b0_r <= b0; a1_r <= a1; b1_r <= b1;
+        if (en) q <= (ld ? WR'(64'h8000_0000_0000_0000) : q) + WR'(a0_r * b0_r) + WR'(a1_r * b1_r);
+    end
 `endif
 endmodule

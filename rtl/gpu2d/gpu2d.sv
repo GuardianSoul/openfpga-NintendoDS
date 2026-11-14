@@ -28,6 +28,11 @@ module gpu2d
     // pulsed on every VRAM write and VRAMCNT change. Without it the caches
     // start empty every line and vram_wr is ignored.
     parameter bit PERSIST   = 0,
+    parameter bit ER        = 0,  // gpu2d_cache ER (nds_top G2D_ER)
+    parameter bit CBD       = 0,  // gpu2d_bg CBD (nds_top G2D_CBD)
+    parameter bit CFL       = 0,  // gpu2d_bg CFL (nds_top G2D_CFL)
+    parameter int AMF       = 0,
+    parameter int THASH     = 1,  // gpu2d_bg THASH (nds_top G2D_THASH)  // gpu2d_bg/obj AMF (nds_top G2D_CFL 2: 1, 3: 2)
     parameter int MAP_IDXW  = 6,
     parameter int TEX_IDXW  = 6,
     parameter bit MOSAIC    = 1,  // 0: no BG/OBJ mosaic (fit setting)
@@ -37,6 +42,10 @@ module gpu2d
     parameter bit OAM_CPU   = 0,
     parameter int EXT_IDXW  = 6,
     parameter int OTEX_IDXW = 6,
+    parameter int OHASH     = 0,
+    // CWF (critical word first): a miss's block read starts at its needed 64-bit word (vr_word; the read wraps
+    // within the block: nds_vram / nds_sdram_mc), the beats fill the cache in that order
+    parameter bit CWF       = 0,  // gpu2d_obj OHASH (nds_top G2D_OHASH)
     parameter int OEXT_IDXW = 6,
     parameter int MAXQ      = 2,  // VRAM blocks in flight (1 or 2)
     parameter bit PREFETCH  = 1,  // prefetch passes (BG layers, OBJ rows)
@@ -50,6 +59,8 @@ module gpu2d
     input  logic        clk,
     input  logic        rst,
     input  logic        vram_wr,
+    input  logic        vw_v,        // AMF: a CPU/DMA write through a BG/OBJ view, its block
+    input  blk_t        vw_blk,
     // state
     input  logic        st_we,
     input  logic        st_eng,
@@ -85,6 +96,7 @@ module gpu2d
     // external VRAM: 32-byte block reads, data in four 64-bit beats
     output logic        vr_req,
     output blk_t        vr_blk,
+    output logic [1:0]  vr_word,     // CWF: the block's first 64-bit word (0 without CWF)
     input  logic        vr_ack,
     input  logic        vr_rvalid,
     input  logic [63:0] vr_rdata,
@@ -274,9 +286,11 @@ module gpu2d
     // waits for it, a prefetch is dropped.
     logic [3:0]       b_req;
     blk_t [3:0]       b_blk;
+    logic [3:0][1:0]  b_wd;
     logic             b_pf_ack, o_pf_ack;
     logic [2:0]       o_req;
     blk_t [2:0]       o_blk;
+    logic [2:0][1:0]  o_wd;
     // Miss requests are registered here: the path from a cache's tag RAM
     // through its hit compare into this arbiter and out to vr_req was the 2D
     // build's critical path (nds-fit #204). A miss is therefore issued a clock
@@ -296,13 +310,17 @@ module gpu2d
     blk_t [6:0]       rblk;
     assign reqs = {o_req[2], b_req[3], mreq};
     assign rblk = {o_blk[2], b_blk[3], mblk};
+    logic [6:0][1:0]  rwd;
+    assign rwd = {o_wd[2], b_wd[3], o_wd[1:0], b_wd[2:0]};
 
     // in flight: entry 0 is the block whose beats come next; q_r is the
     // requester, which also names the cache (prefetch fills the BG texel cache)
     logic [1:0]       q_v;
     logic [1:0][2:0]  q_r;
     blk_t [1:0]       q_blk;
-    logic [1:0]       fbeat;
+    logic [1:0]       fbeat;       // the beat's 64-bit word in the block (CWF: from the head's first word on)
+    logic [1:0]       fk;          // beats of the head block received
+    logic [1:0][1:0]  q_wd;
     logic             rec_v;
     logic [1:0]       rec_n;
     logic [2:0]       rec_r;
@@ -322,6 +340,7 @@ module gpu2d
     logic       out_v;
     logic [2:0] out_r;
     blk_t       out_blk;
+    logic [1:0] out_wd;
     logic [2:0] out_t;
     assign out_t = tgt(out_r);
 
@@ -365,13 +384,15 @@ module gpu2d
         qfull = MAXQ == 1 ? q_v[0] : q_v[1];
         vr_req = out_v && !qfull;
         vr_blk = out_blk;
+        vr_word = CWF ? out_wd : 2'd0;
         // a prefetch is taken when it moves into the issue register
         b_pf_ack = (reqs[5] && pf_dup) || (!out_v && !qfull && |elig && pick == 3'd5);
         o_pf_ack = (reqs[6] && opf_dup) || (!out_v && !qfull && |elig && pick == 3'd6);
     end
 
     logic pop, push;
-    assign pop  = vr_rvalid && fbeat == 2'd3;
+    assign pop  = vr_rvalid && fk == 2'd3;
+    assign fbeat = CWF ? q_wd[0] + fk : fk;
     assign push = vr_req && vr_ack;
     always_ff @(posedge clk)
         if (rst) out_v <= 1'b0;
@@ -381,12 +402,12 @@ module gpu2d
         else if (!out_v && !qfull && |elig) out_v <= 1'b1;
     // (not gated by push: push needs out_v. #1323 fabric/vram/ack -> out_blk, q_blk -0.46 ns)
     always_ff @(posedge clk)
-        if (!out_v && !qfull && |elig) begin out_r <= pick; out_blk <= rblk[pick]; end
+        if (!out_v && !qfull && |elig) begin out_r <= pick; out_blk <= rblk[pick]; out_wd <= rwd[pick]; end
     always_ff @(posedge clk) begin
         if (rst) begin
-            q_v <= '0; fbeat <= 2'd0; rec_v <= 1'b0;
+            q_v <= '0; fk <= 2'd0; rec_v <= 1'b0;
         end else begin
-            if (vr_rvalid) fbeat <= fbeat + 2'd1;
+            if (vr_rvalid) fk <= fk + 2'd1;
             // shift out the head on its last beat, append accepted requests
             if (pop) begin
                 q_v[0] <= q_v[1]; q_v[1] <= 1'b0;
@@ -404,14 +425,16 @@ module gpu2d
     // The slot that a push would fill is loaded while the request waits (a free slot, read only under q_v), so the
     // ack's long path ends at q_v alone. vr_rvalid only comes for an entry in slot 0, which pop keeps moved up.
     always_ff @(posedge clk) begin
-        if (pop) begin q_r[0] <= q_r[1]; q_blk[0] <= q_blk[1]; end
+        if (pop) begin q_r[0] <= q_r[1]; q_blk[0] <= q_blk[1]; q_wd[0] <= q_wd[1]; end
         if (vr_req) begin
-            if (pop ? !q_v[1] : !q_v[0]) begin q_r[0] <= out_r; q_blk[0] <= out_blk; end
-            else begin q_r[1] <= out_r; q_blk[1] <= out_blk; end
+            if (pop ? !q_v[1] : !q_v[0]) begin q_r[0] <= out_r; q_blk[0] <= out_blk; q_wd[0] <= CWF ? out_wd : 2'd0; end
+            else begin q_r[1] <= out_r; q_blk[1] <= out_blk; q_wd[1] <= CWF ? out_wd : 2'd0; end
         end
     end
     logic flast;
-    assign flast = fbeat == 2'd3;
+    assign flast = fk == 2'd3;
+    logic ffirst;
+    assign ffirst = fk == 2'd0;
     logic [2:0] b_fwe;
     assign b_fwe = {vr_rvalid && q_t[0] == 3'd2, vr_rvalid && q_t[0] == 3'd1, vr_rvalid && q_t[0] == 3'd0};
     logic [1:0] o_fwe;
@@ -430,11 +453,11 @@ module gpu2d
     logic bg_ubusy;
     assign bg_busy = bg_ubusy || ld || ld_q || ld_go;
 
-    gpu2d_bg #(.PERSIST(PERSIST), .MAP_IDXW(MAP_IDXW), .TEX_IDXW(TEX_IDXW), .EXT_IDXW(EXT_IDXW), .PREFETCH(PREFETCH),
+    gpu2d_bg #(.ER(ER), .THASH(THASH), .CBD(CBD), .PERSIST(PERSIST), .CFL(CFL), .AMF(AMF), .MAP_IDXW(MAP_IDXW), .TEX_IDXW(TEX_IDXW), .EXT_IDXW(EXT_IDXW), .PREFETCH(PREFETCH),
                .WST_RF(WST_RF), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .EXT_TAG_MLAB(TAG_MLAB)) u_bg (
         .clk, .rst, .start(ld_go), .eng(ld_eng), .line(ld_line), .objslot(ld_slot),
-        .busy(bg_ubusy), .done(bg_done), .st(wst), .rf_raddr(b_rf_ra), .rf_rdata(rf_q), .rf_free(b_rf_free), .pre(b_pre), .capcnt, .cap_en, .lcdc_map, .vram_wr,
-        .fill_req(b_req), .fill_blk(b_blk), .pf_ack(b_pf_ack), .fill_we(b_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_last(flast),
+        .busy(bg_ubusy), .done(bg_done), .st(wst), .rf_raddr(b_rf_ra), .rf_rdata(rf_q), .rf_free(b_rf_free), .pre(b_pre), .capcnt, .cap_en, .lcdc_map, .vram_wr, .vw_v, .vw_blk,
+        .fill_req(b_req), .fill_blk(b_blk), .fill_word(b_wd), .pf_ack(b_pf_ack), .fill_we(b_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_first(ffirst), .fill_last(flast),
         .fill_data(vr_rdata),
         .pal_raddr(bpal_ra), .pal_rdata(bpal_q),
         .olb_raddr(b_olb_ra), .olb_rdata(olb_q[bg_slot_q]), .olb_we(b_olb_we), .olb_waddr(b_olb_wa),
@@ -454,10 +477,10 @@ module gpu2d
             if (obj_start) olb_dirty[obj_slot][obj_eng] <= 1'b1;
         end
 
-    gpu2d_obj #(.PERSIST(PERSIST), .TEX_IDXW(OTEX_IDXW), .EXT_IDXW(OEXT_IDXW), .MOSAIC(MOSAIC), .EXT_TAG_MLAB(TAG_MLAB)) u_obj (
+    gpu2d_obj #(.ER(ER), .PERSIST(PERSIST), .AMF(AMF), .OHASH(OHASH), .TEX_IDXW(OTEX_IDXW), .EXT_IDXW(OEXT_IDXW), .MOSAIC(MOSAIC), .EXT_TAG_MLAB(TAG_MLAB)) u_obj (
         .clk, .rst, .start(obj_start), .clr(olb_dirty[obj_slot][obj_eng]), .eng(obj_eng), .line(obj_line),
-        .busy(obj_busy), .done(obj_done), .st(st_obj), .vram_wr,
-        .fill_req(o_req), .fill_blk(o_blk), .pf_ack(o_pf_ack), .fill_we(o_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_last(flast),
+        .busy(obj_busy), .done(obj_done), .st(st_obj), .vram_wr, .vw_v, .vw_blk,
+        .fill_req(o_req), .fill_blk(o_blk), .fill_word(o_wd), .pf_ack(o_pf_ack), .fill_we(o_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_first(ffirst), .fill_last(flast),
         .fill_data(vr_rdata),
         .oam_raddr(o_oam_ra), .oam_rdata(oam_q), .pal_raddr(opal_ra), .pal_rdata(opal_q),
         .olb_raddr(o_olb_ra), .olb_rdata(olb_q[obj_slot_q]), .olb_we(o_olb_we), .olb_waddr(o_olb_wa),

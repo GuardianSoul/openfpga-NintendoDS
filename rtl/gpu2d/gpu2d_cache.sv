@@ -77,11 +77,21 @@ module gpu2d_cache
     // 0), read from the data RAM as two byte lanes of mixed width (written
     // 32 bits, read 8: gpu2d_ram_w32r8), so the owner needs no 4:1 halfword
     // select; the same M10Ks as the 64-bit RAM. Not with TAG_DATA
-    parameter bit HALF = 0
+    parameter bit HALF = 0,
+    // ER (early restart): a lookup of the block being filled hits once its 64-bit word has been written (a clock
+    // before the lookup's address, so the data RAM gives the new word), before the tag is written at fill_last:
+    // the owner's pixel goes on as the word it needs arrives, not when the whole block has
+    parameter bit ER = 0,
+    // LGEN (gpu2d_bg CFL): LCDC-space blocks are stored with {1, lgen} in a generation field one bit wider, the
+    // others with {0, gen}; the scrubber retires every entry but {0, gen}'s. Not with TAG_DATA
+    parameter bit LGEN = 0
 ) (
     input  logic        clk,
     input  logic        idle,        // owner idle: scrub
     input  logic [GW-1:0]   gen,     // gpu2d_cgen
+    input  logic [GW-1:0]   lgen,    // LGEN: the LCDC blocks' generation (the owner's job number)
+    input  logic            inv_v,   // gpu2d_wrange: invalidate inv_blk's slot (after a fill's tag write; not TAG_DATA)
+    input  blk_t            inv_blk,
     input  logic [(TAG_DATA ? IDXW + 2 : IDXW)-1:0] scrub,
     input  logic [(TAG_DATA ? IDXW + 2 : IDXW)-1:0] scrub_q,
     input  logic            scrub_v,
@@ -96,6 +106,7 @@ module gpu2d_cache
     input  logic        fill_we,
     input  blk_t        fill_blk,
     input  logic [1:0]  fill_beat,
+    input  logic        fill_first,  // the fill's first beat (fill_beat 0 unless the read starts at the needed pair: CWF)
     input  logic        fill_last,
     input  logic [63:0] fill_data
 );
@@ -106,6 +117,11 @@ module gpu2d_cache
         return TW'(b[VLO-1:IDXW]);
     endfunction
 
+    localparam int GX = GW + (LGEN ? 1 : 0);
+    function automatic logic [GX-1:0] gsel(input blk_t b);
+        if (LGEN && b[17:15] == SP_LCDC) return GX'({1'b1, lgen});
+        return GX'(gen);
+    endfunction
     blk_t       q_blk;
     logic [1:0] q_word, q_half;
     always_ff @(posedge clk)
@@ -147,26 +163,28 @@ module gpu2d_cache
     logic [IDXW-1:0] fidx;
     assign fidx = idx_of(fill_blk);
 
-    logic [GW+TW-1:0] tag_q;
+    logic [GX+TW-1:0] tag_q;
+    logic [63:0]      q_c;      // the data RAM's word
     generate if (TAG_DATA) begin : g_td
         // synthesis translate_off
         initial if (GW + TW > 16) $fatal(1, "gpu2d_cache: TAG_DATA needs GW + TW <= 16, not %0d", GW + TW);
         initial if (HALF) $fatal(1, "gpu2d_cache: HALF is not for TAG_DATA");
+        initial if (LGEN) $fatal(1, "gpu2d_cache: LGEN is not for TAG_DATA");
         // synthesis translate_on
         logic [79:0] d_q, d_wd;
         logic        d_we, s_we;
         logic [IDXW+1:0] d_wa;
-        assign tag_q = d_q[64 +: GW+TW];
+        assign tag_q = d_q[64 +: GX+TW];
         // the scrub read of the last clock: clear that word's copy if it is
         // of an older generation (with whatever data: the word then misses)
-        assign s_we = !fill_we && scrub_v && tag_q[GW+TW-1:TW] != gen && tag_q[GW+TW-1:TW] != '0;
+        assign s_we = !fill_we && scrub_v && tag_q[GX+TW-1:TW] != GX'(gen) && tag_q[GX+TW-1:TW] != '0;
         assign d_we = fill_we || s_we;
         assign d_wa = fill_we ? {fidx, fill_beat} : scrub_q;
-        assign d_wd = {16'(fill_we ? {gen, tag_of(fill_blk)} : '0), fill_data};
+        assign d_wd = {16'(fill_we ? {gsel(fill_blk), tag_of(fill_blk)} : '0), fill_data};
         gpu2d_ram #(.W(80), .AW(IDXW+2)) u_data (
             .clk, .we(d_we), .waddr(d_wa), .wdata(d_wd),
             .raddr(idle ? scrub : {r_bidx, r_word}), .rdata(d_q));
-        assign q = d_q[63:0];
+        assign q_c = d_q[63:0];
     end else begin : g_tt
         if (HALF) begin : g_h
             // lane 0: bytes 0, 2, 4, 6 of the word; lane 1: bytes 1, 3, 5, 7
@@ -177,37 +195,122 @@ module gpu2d_cache
             gpu2d_ram_w32r8 #(.AW(IDXW+2)) u_d1 (.clk, .we(fill_we), .waddr({fidx, fill_beat}),
                 .wdata({fill_data[63:56], fill_data[47:40], fill_data[31:24], fill_data[15:8]}),
                 .raddr({r_bidx, r_word, r_half}), .rdata(q1));
-            assign q = {48'd0, q1, q0};
+            assign q_c = {48'd0, q1, q0};
         end else begin : g_w
             gpu2d_ram #(.W(64), .AW(IDXW+2)) u_data (
                 .clk, .we(fill_we), .waddr({fidx, fill_beat}), .wdata(fill_data),
-                .raddr({r_bidx, r_word}), .rdata(q));
+                .raddr({r_bidx, r_word}), .rdata(q_c));
         end
 
         logic            tag_we;
         logic [IDXW-1:0] tag_wa;
-        logic [GW+TW-1:0] tag_wd;
+        logic [GX+TW-1:0] tag_wd;
         always_comb begin
-            tag_we = fill_we && (fill_last || fill_beat == 2'd0);
+            tag_we = fill_we && (fill_last || fill_first);
             tag_wa = fidx;
-            tag_wd = fill_last ? {gen, tag_of(fill_blk)} : '0;
+            tag_wd = fill_last ? {gsel(fill_blk), tag_of(fill_blk)} : '0;
+            if (!tag_we && inv_v) begin tag_we = 1'b1; tag_wa = idx_of(inv_blk); tag_wd = '0; end
             // the scrub read of the last clock: retire it if it is an older generation
-            if (!tag_we && scrub_v && tag_q[GW+TW-1:TW] != gen && tag_q[GW+TW-1:TW] != '0) begin
+            else if (!tag_we && scrub_v && tag_q[GX+TW-1:TW] != GX'(gen) && tag_q[GX+TW-1:TW] != '0) begin
                 tag_we = 1'b1; tag_wa = scrub_q; tag_wd = '0;
             end
         end
         if (TAG_MLAB) begin : g_tm
-            gpu2d_mlab_od #(.W(GW + TW), .AW(IDXW)) u_tag (
+            gpu2d_mlab_od #(.W(GX + TW), .AW(IDXW)) u_tag (
                 .clk, .we(tag_we), .waddr(tag_wa), .wdata(tag_wd),
                 .raddr(r_idx), .rdata(tag_q));
         end else begin : g_tr
-            gpu2d_ram #(.W(GW + TW), .AW(IDXW)) u_tag (
+            gpu2d_ram #(.W(GX + TW), .AW(IDXW)) u_tag (
                 .clk, .we(tag_we), .waddr(tag_wa), .wdata(tag_wd),
                 .raddr(r_idx), .rdata(tag_q));
         end
     end endgenerate
 
-    assign hit      = tag_q == {gen, tag_of(q_blk)};
+    assign q        = q_c;
+    logic       er_v;               // ER: a fill is under way: its block, and the words written a clock ago or more
+    blk_t       er_blk;
+    logic [3:0] er_m, er_w;
+    always_ff @(posedge clk) begin
+        er_m <= er_w;                    // (a word written this clock is readable from the next)
+        if (fill_we) begin
+            if (fill_first) begin er_v <= 1'b1; er_blk <= fill_blk; er_w <= 4'b0001 << fill_beat; er_m <= 4'b0000; end
+            else er_w <= er_w | (4'b0001 << fill_beat);
+            if (fill_last) begin er_v <= 1'b0; er_w <= 4'b0000; er_m <= 4'b0000; end
+        end
+    end
+    assign hit      = tag_q == {gsel(q_blk), tag_of(q_blk)} || (ER && er_v && q_blk == er_blk && er_m[q_word]);
     assign cur_blk  = q_blk;
     assign cur_word = q_word;
+endmodule
+
+// gpu2d_wrange (nds_top G2D_CFL 2): the range of this side's blocks (space SP) that CPU/DMA writes through a BG or
+// OBJ view touched since the owner's last job start. At the next start (take) the range is latched and swept, one
+// block a clock while no fill writes a tag (ok): sw_blk's index is invalidated in the side's caches whatever block
+// holds it (no tag read: a wrong guess costs a miss). A range of SWMAX blocks or more, or across both engines, is
+// `big`: the owner starts its caches over, as it did for every write. A write in the take clock joins the latched
+// range; a later one, during the sweep or the job, goes to the next job's (as the dirty bit did)
+module gpu2d_wrange
+    import gpu2d_pkg::*;
+#(
+    parameter logic [2:0] SP = SP_BG,
+    parameter int SWMAX = 64,
+    // ENG2: one written range per engine (vw_blk bit 14), swept one after the other: writes through both engines'
+    // views no longer make one range spanning both (which was always over SWMAX: the caches started over)
+    parameter bit ENG2 = 0
+) (
+    input  logic clk,
+    input  logic rst,
+    input  logic vw_v,
+    input  blk_t vw_blk,
+    input  logic take,
+    input  logic ok,
+    output logic big,
+    output logic sw_on,
+    output blk_t sw_blk
+);
+    localparam int NE = ENG2 ? 2 : 1;
+    logic [NE-1:0] w_any;
+    logic [14:0]   w_lo [NE], w_hi [NE], n_lo [NE], n_hi [NE];
+    logic [14:0]   sw_cur, sw_end;
+    logic          sw2;              // ENG2: engine B's range is swept after engine A's
+    logic [14:0]   sw2_lo, sw2_hi;
+    wire           mine = vw_v && vw_blk[17:15] == SP;
+    wire  [14:0]   b = vw_blk[14:0];
+    wire           we = ENG2 ? b[14] : 1'b0;
+    logic [NE-1:0] mine_e, big_e;
+    always_comb for (int e = 0; e < NE; e++) begin
+        mine_e[e] = mine && (NE == 1 || we == 1'(e));
+        n_lo[e] = w_lo[e]; n_hi[e] = w_hi[e];
+        if (mine_e[e]) begin
+            if (!w_any[e] || b < w_lo[e]) n_lo[e] = b;
+            if (!w_any[e] || b > w_hi[e]) n_hi[e] = b;
+        end
+        big_e[e] = mine_e[e] && (n_hi[e] - n_lo[e]) >= 15'(SWMAX);
+    end
+    assign big = |big_e;
+    assign sw_blk = {SP, sw_cur};
+    wire [NE-1:0] has = w_any | mine_e;
+    always_ff @(posedge clk) begin
+        if (rst) begin w_any <= '0; sw_on <= 1'b0; sw2 <= 1'b0; end
+        else begin
+            if (sw_on && ok) begin
+                sw_cur <= sw_cur + 15'd1;
+                if (sw_cur == sw_end) begin
+                    if (ENG2 && sw2) begin sw2 <= 1'b0; sw_cur <= sw2_lo; sw_end <= sw2_hi; end
+                    else sw_on <= 1'b0;
+                end
+            end
+            if (take) begin
+                w_any <= '0;
+                if (big) sw_on <= 1'b0;
+                else if (NE == 2 && has[0]) begin
+                    sw_on <= 1'b1; sw_cur <= n_lo[0]; sw_end <= n_hi[0];
+                    sw2 <= has[NE-1]; sw2_lo <= n_lo[NE-1]; sw2_hi <= n_hi[NE-1];
+                end else begin
+                    sw_on <= has[NE-1]; sw_cur <= n_lo[NE-1]; sw_end <= n_hi[NE-1]; sw2 <= 1'b0;
+                end
+            end else if (big) w_any <= '0;
+            else for (int e = 0; e < NE; e++) if (mine_e[e]) begin w_any[e] <= 1'b1; w_lo[e] <= n_lo[e]; w_hi[e] <= n_hi[e]; end
+        end
+    end
 endmodule
