@@ -172,6 +172,7 @@ module tb_arm #(parameter int ARM9_WAYS = 4, parameter int ARM9_IWAYS = 0, param
     errors = 0;
     cycle = 0;
     repeat (4) @(posedge clk);
+    @(negedge clk);
     rst = 1'b0;
   end
 
