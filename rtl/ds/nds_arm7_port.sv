@@ -45,9 +45,13 @@ module nds_arm7_port #(
     // the tag stores in MLAB instead of M10K (nds_lcache STYLE): 4 M10K for
     // about 4 LABs with the 3D build's 32/16-line caches, should M10K bind
     parameter     TAG_STYLE = "M10K",
-    parameter bit TAG_WLATE = 1'b1      // tag writes a cycle late (nds_lcache WLATE): timing, same cycles
+    parameter bit TAG_WLATE = 1'b1,     // tag writes a cycle late (nds_lcache WLATE): timing, same cycles
+    // 1: each tag store's two copies (lookup, check) as one double-pumped M10K on clk2 (nds_lcache PUMP, as the 3D
+    // texture caches' G3D_PUMP): two tag copies in one RAM. Retain TAG_WLATE for the registered half-clock write.
+    parameter bit TPUMP = 1'b0
 ) (
     input  logic        clk,
+    input  logic        clk2,           // TPUMP: 2 x clk, phase 0, from the same PLL (nds_top clk_2x); else unused
     input  logic        rst,
     input  logic [1:0]  wramcnt,
     // pipeline ports
@@ -223,7 +227,8 @@ module nds_arm7_port #(
     wire fill_w = xs_busy && !xs_w && x_done;
     // a fill ends without its line if a store or a write meets it on the last
     // edge (the store's own lookup ran before the line was valid)
-    wire fl_kill = (su_v && su_a[17:4] == fl_a) || (inv && inv_addr[17:4] == fl_a) ||
+    wire su_fl   = su_a[17:4] == fl_a;          // last cycle's store's line is the fill's (one compare, used twice)
+    wire fl_kill = (su_v && su_fl) || (inv && inv_addr[17:4] == fl_a) ||
                    (d_req && d_we && dreg == 2'd2 && dxa[17:4] == fl_a);
     always_comb begin
         dc_we = su_hit; dc_wa = da_xa[DL+3:2]; dc_wbe = su_be; dc_wd = su_d;
@@ -240,19 +245,19 @@ module nds_arm7_port #(
     // filled (the valid bit used to be cleared at the fill's start) and
     // becomes valid at the fill's end unless a store or a write met it.
     wire fl_good = !fl_bad && !(!fl_i && su_hit) && !fl_kill;
-    logic ic_cv, dc_cv;
-    wire  ic_inv = cki_v && ic_cv && itq2 == cki_a[17:IL+4];
-    wire  dc_inv = ckd_v && dc_cv && dtq2 == ckd_a[17:DL+4];
-    nds_lcache #(.LB(IL), .TW(ITW), .CHECK(1), .CQ(2), .STYLE(TAG_STYLE), .WLATE(TAG_WLATE)) u_itag (.clk, .clk2(1'b0), .rst,
+    logic ic_cv, dc_cv, ic_match, dc_match;
+    wire  ic_inv = cki_v && (TPUMP ? ic_match : (ic_cv && itq2 == cki_a[17:IL+4]));
+    wire  dc_inv = ckd_v && (TPUMP ? dc_match : (dc_cv && dtq2 == ckd_a[17:DL+4]));
+    nds_lcache #(.LB(IL), .TW(ITW), .CHECK(1), .CQ(2), .STYLE(TPUMP ? "M10K" : TAG_STYLE), .WLATE(TAG_WLATE), .PUMP(TPUMP), .INV_TAGGED(TPUMP), .MATCH_ONLY(TPUMP)) u_itag (.clk, .clk2(TPUMP ? clk2 : 1'b0), .rst,
         .l_en(1'b1), .l_idx(ixa[IL+3:4]), .l_v(iv_q), .l_vn(), .l_tag(itq),
-        .c_idx(cki_ra[IL+3:4]), .c_v(ic_cv), .c_tag(itq2),
+        .c_idx(cki_ra[IL+3:4]), .c_v(ic_cv), .c_tag(itq2), .c_hit(ic_match),
         .f_busy(fl_v && fl_i), .f_idx(fl_a[IL+3:4]), .f_end(it_we), .f_ok(fl_good), .f_tag(fl_a[17:IL+4]),
-        .inv(ic_inv), .inv_idx(cki_a[IL+3:4]), .inv_all(1'b0), .busy());
-    nds_lcache #(.LB(DL), .TW(DTW), .CHECK(1), .CQ(2), .STYLE(TAG_STYLE), .WLATE(TAG_WLATE)) u_dtag (.clk, .clk2(1'b0), .rst,
+        .inv(ic_inv), .inv_idx(cki_a[IL+3:4]), .inv_tag(cki_a[17:IL+4]), .inv_all(1'b0), .busy());
+    nds_lcache #(.LB(DL), .TW(DTW), .CHECK(1), .CQ(2), .STYLE(TPUMP ? "M10K" : TAG_STYLE), .WLATE(TAG_WLATE), .PUMP(TPUMP), .INV_TAGGED(TPUMP), .MATCH_ONLY(TPUMP)) u_dtag (.clk, .clk2(TPUMP ? clk2 : 1'b0), .rst,
         .l_en(1'b1), .l_idx(dxa[DL+3:4]), .l_v(dv_q), .l_vn(), .l_tag(dtq),
-        .c_idx(inv_addr[DL+3:4]), .c_v(dc_cv), .c_tag(dtq2),
+        .c_idx(inv_addr[DL+3:4]), .c_v(dc_cv), .c_tag(dtq2), .c_hit(dc_match),
         .f_busy(fl_v && !fl_i), .f_idx(fl_a[DL+3:4]), .f_end(dt_we), .f_ok(fl_good), .f_tag(fl_a[17:DL+4]),
-        .inv(dc_inv), .inv_idx(ckd_a[DL+3:4]), .inv_all(1'b0), .busy());
+        .inv(dc_inv), .inv_idx(ckd_a[DL+3:4]), .inv_tag(ckd_a[17:DL+4]), .inv_all(1'b0), .busy());
 
     always_ff @(posedge clk) begin
         ia_v <= i_req; ia_r <= ireg; ia_ok <= 1'b0; ia_c <= i_req && ireg == 2'd2; ia_xa <= ixa;
@@ -315,7 +320,7 @@ module nds_arm7_port #(
                 if (su_a[17:14] != 4'b0110) begin              // BIOS7 is read-only
                     sf_wp <= sf_wp + 2'd1;
                 end
-                if (fl_v && fl_a == su_a[17:4]) fl_bad <= 1'b1;
+                if (fl_v && su_fl) fl_bad <= 1'b1;
             end
             sf_n <= sf_n + ((su_v && su_a[17:14] != 4'b0110) ? 3'd1 : 3'd0)
                          - ((xs_busy && x_done && xs_w) ? 3'd1 : 3'd0);

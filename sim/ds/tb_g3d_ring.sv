@@ -7,13 +7,15 @@
 // starts must read back as that frame's pixels; the others are late. Some
 // frames are cut short (a restart).
 //   +seed=S +frames=N +heavy=P (one line in P renders 3-8 lines long) +slow=C (render time scale)
+//   +wack0=1: a write word is taken the clock it is offered (the core's write FIFO: rg_go is
+//   combinational), random gaps; else a clock after
 //   +wlag=W (a written word reaches the memory 1..W clocks later; rg_wdrained when none is on its way)
 //   -GLLR=1: the raster's four line buffers (lb: the clear colour, then a
 //   line's pixels drawn left to right over its render time) behind the ll_*
 //   port (refused one clock in four, as the final pass takes it); a late line
 //   the ring copied must read back as drawn so far: a prefix of the line's
 //   pixels, the clear colour after it
-module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bit RPRI = 0, parameter bit NX2 = 0, parameter bit TR3 = 0);
+module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bit RPRI = 0, parameter bit NX2 = 0, parameter bit TR3 = 0, parameter bit WYLD = 0);
     localparam int LS = TR3 ? 3 : 4;      // the raster's line buffer slots (TR3: line mod 3)
     logic clk = 0;
     always #5 clk = !clk;
@@ -25,10 +27,11 @@ module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bi
     logic        px_valid = 0;
     logic [7:0]  px_x = 0, px_y = 0;
     logic [22:0] px_color = 0;
-    logic        rg_wreq, rg_wack = 0, rg_rreq, rg_rack = 0, rg_rvalid = 0;
+    logic        rg_wreq, rg_wack, wack_r = 0, rg_rreq, rg_rack = 0, rg_rvalid = 0;
     logic [23:0] rg_waddr, rg_raddr;
     logic [31:0] rg_wdata, rg_rdata = 0;
     logic        rg_wdrained;
+    logic        rg_hurry;              // (RH_AT 0 here: never set)
     logic        l3d_have;
     logic [3:0]  st_busy;
     logic        ll_rd, ll_ack;
@@ -60,14 +63,19 @@ module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bi
     // YLAG (-GYLAG=2): the producer is the final pass, YLAG lines behind the
     // line the store streams (y_lim gates y + YLAG, up to 191), and it holds
     // each pixel while its line's staging slot is still full (st_busy)
-    nds_g3d_ring #(.YLAG(YLAG), .LLR(LLR), .RPRI(RPRI), .NX2(NX2), .TR3(TR3)) dut (.*);
+    nds_g3d_ring #(.YLAG(YLAG), .LLR(LLR), .RPRI(RPRI), .NX2(NX2), .TR3(TR3), .WYLD(WYLD)) dut (.*);
 
     function automatic logic [22:0] pix(input int f, input int y, input int x);
         logic [31:0] h = 32'(f) * 32'h9E3779B1 ^ 32'(y) * 32'h85EBCA6B ^ 32'(x) * 32'hC2B2AE35;
         return h[22:0] ^ h[31:9];
     endfunction
 
-    int seed = 1, frames = 30, heavy = 40, slow = 100, wlag = 150, wfix = 0, skip = 0;
+    int seed = 1, frames = 30, heavy = 40, slow = 100, wlag = 150, wfix = 0, skip = 0, wack0 = 0;
+    longint yields = 0, copies = 0;
+    always @(posedge clk) if (!rst) begin
+        if (dut.est == 3'd2 && rg_wack && dut.w == 3'd7 && dut.blk != 5'd31 && !dut.drop && dut.RPRI && dut.r_pend) yields++;
+        if (dut.est == 3'd5 && dut.cp_x == 9'd0) copies++;
+    end
     longint part = 0, part_px = 0, errs = 0, late = 0, checked = 0, wblk = 0, rblk = 0, restarts = 0, stale = 0;
     initial begin
         void'($value$plusargs("seed=%d", seed));
@@ -76,6 +84,7 @@ module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bi
         void'($value$plusargs("slow=%d", slow));
         void'($value$plusargs("wlag=%d", wlag));
         void'($value$plusargs("wfix=%d", wfix));
+        void'($value$plusargs("wack0=%d", wack0));
         void'($value$plusargs("skip=%d", skip));     // the display skips a line's composition, one in N (a late 2D line)     // ... or exactly this many     // writes reach the memory up to this many clocks late
         void'($urandom(seed));
     end
@@ -89,11 +98,14 @@ module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bi
     longint      cyc = 0;
     always @(posedge clk) cyc++;
     // drained: no write waiting to reach the memory (a clock late, as the Pocket's)
+    logic wrnd = 0;
+    always @(posedge clk) if (wack0 != 0) wrnd <= $urandom % 3 != 0;   // (no draw when off: the seeds' streams stay)
+    assign rg_wack = wack0 != 0 ? rg_wreq && wrnd : wack_r;
     always @(posedge clk) rg_wdrained <= wq_t.size() == 0 && !rg_wack;
     int          sm_st = 0, sm_cnt = 0, sm_k = 0;
     logic [23:0] sm_a;
     always @(posedge clk) begin
-        rg_wack <= 0; rg_rack <= 0; rg_rvalid <= 0;
+        wack_r <= 0; rg_rack <= 0; rg_rvalid <= 0;
         if (rst) sm_st <= 0;
         else begin
             // writes: the word on rg_wdata is taken at an edge with rg_wack, and
@@ -106,7 +118,7 @@ module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bi
             while (wq_t.size() > 0 && wq_t[0] <= cyc) begin
                 mem[wq_a[0]] = wq_d[0]; void'(wq_a.pop_front()); void'(wq_d.pop_front()); void'(wq_t.pop_front());
             end
-            if (rg_wreq && !rg_wack && $urandom % 3 != 0) rg_wack <= 1;
+            if (wack0 == 0 && rg_wreq && !wack_r && $urandom % 3 != 0) wack_r <= 1;
             case (sm_st)
                 0: if (rg_rreq && !rg_rack) begin sm_cnt <= 1 + $urandom % 30; sm_st <= 1; end
                 1: if (sm_cnt > 1) sm_cnt <= sm_cnt - 1;
@@ -224,6 +236,7 @@ module tb_g3d_ring #(parameter int YLAG = 0, parameter bit LLR = 0, parameter bi
                 fork draw_frame(frame); join_none
             end
         end
+        if (WYLD) $display("WYLD: %0d line writes paused for the needed line's read, %0d copies", yields, copies);
         if (LLR) $display("LLR: %0d late lines copied as drawn so far (%0d pixels drawn of %0d)", part, part_px, part * 256);
         $display("tb_g3d_ring: %0d frames, %0d lines checked, %0d late, %0d block writes, %0d block reads, %0d restarts, %0d words read before their write landed: %0d errors",
                  frames, checked, late, wblk, rblk, restarts, stale, errs);

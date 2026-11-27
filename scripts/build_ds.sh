@@ -467,6 +467,17 @@ if {[get_collection_size $fab_fr] > 0 && [get_collection_size $fab_tr] > 0} {
   set_multicycle_path -hold 1 -from $fab_fr -to $fab_tr
   post_message -type info "Fabric request 2-clock paths: [get_collection_size $fab_fr] -> [get_collection_size $fab_tr]"
 }
+# The timers' free-running visit slot is no path to the CPU's read register (nds_sys ff_rd): ff_rd's timer word is used
+# only after io_req && d_tmr (io_hit), and io_req && d_tmr implies io_tmr (sys_timers acc: io_pre on the timer address,
+# checked in nds_fabric and nds_sys), which selects the RAM's address from acc_i, not slot (rel15 #2718 1asR: slot ->
+# the timer RAM's address (fanout 105) -> the update -> ff_rd -0.484 ns, -0.629 at 0C). slot -> the RAM write and the
+# irq / cascade registers keep their one-clock check
+set tsl [get_registers -nowarn "*|sys_timers:u_tmr|slot\[*\]*"]
+set tfr [get_registers -nowarn "*|nds_sys:u_sys|ff_rd\[*\]*"]
+if {[get_collection_size $tsl] > 0 && [get_collection_size $tfr] > 0} {
+  set_false_path -from $tsl -to $tfr
+}
+post_message -type info "Timer slot -> ff_rd false path: [get_collection_size $tsl] -> [get_collection_size $tfr]"
 # Fitter-only overconstraint (RC11 T1): the three ARM9 cones that stay negative at card 3b (#2484 1asR / #2485 7asR):
 # the I-tag -> hit -> i_rdata -> Thumb expansion -> q_w / q_cls (-0.835 / -0.614 ns), the D fill -> der -> d_sel_h ->
 # d_rdata_f -> m_ldv -> e_bw / w_wd (-0.832 ns at 7asR) and w_pg -> d_ok -> stall -> m_res (#2458). quartus_fit
@@ -525,6 +536,30 @@ if {[info exists ::TimeQuestInfo(nameofexecutable)] && $::TimeQuestInfo(nameofex
     set_min_delay -from $h2_fr -to $h2_to 0.2
   }
   post_message -type info "H2 fitter hold margin: [get_collection_size $h2_fr] -> [get_collection_size $h2_to] sound run RAM write registers at 0.2 ns"
+  # T5: nds_psram's request toggle, one register pair only: req_t (clk_sys) -> req_seen (clk_mem), a timed one-clk_mem
+  # path between the related clocks (no synchroniser: the mem side compares req_t at once), at 4.5 ns for the fitter
+  # against the 4.973 ns relation (rel15-lspill #2778 7asR -0.037 ns; the chronic crossing #639 / #1368)
+  set t5_fr [get_registers -nowarn "*|nds_psram:psram|req_t"]
+  set t5_to [get_registers -nowarn "*|nds_psram:psram|req_seen"]
+  if {[get_collection_size $t5_fr] > 0 && [get_collection_size $t5_to] > 0} {
+    set_max_delay -from $t5_fr -to $t5_to 4.5
+  }
+  post_message -type info "T5 fitter overconstraint: [get_collection_size $t5_fr] -> [get_collection_size $t5_to] psram request toggle at 4.5 ns"
+  # T6: the palette cache's pump half-buffer (clk_2x) -> its read address r_a (clk_sys), a half-cycle path at 7.459 ns,
+  # at 7.1 ns for the fitter (rel15f #2779 7asR -0.045 ns, 6 endpoints); point to point only
+  set t6_fr [get_registers -nowarn "*|nds_g3d_cache2:g_c2.u_pc|nds_lcache:*|g_pump.hb\[*"]
+  set t6_to [get_registers -nowarn "*|nds_g3d_cache2:g_c2.u_pc|r_a\[*"]
+  if {[get_collection_size $t6_fr] > 0 && [get_collection_size $t6_to] > 0} {
+    set_max_delay -from $t6_fr -to $t6_to 7.1
+  }
+  post_message -type info "T6 fitter overconstraint: [get_collection_size $t6_fr] -> [get_collection_size $t6_to] palette cache pump -> r_a at 7.1 ns"
+  # H3: a hold margin on the raster's tg -> p1_ix only (rel15-ed #2758 -0.102, rel15f #2779 -0.015 ns at fast 0C)
+  set h3_fr [get_registers -nowarn "*|gpu3d_raster:u_raster|tg\[*"]
+  set h3_to [get_registers -nowarn "*|gpu3d_raster:u_raster|p1_ix\[*"]
+  if {[get_collection_size $h3_fr] > 0 && [get_collection_size $h3_to] > 0} {
+    set_min_delay -from $h3_fr -to $h3_to 0.2
+  }
+  post_message -type info "H3 fitter hold margin: [get_collection_size $h3_fr] -> [get_collection_size $h3_to] raster tg -> p1_ix at 0.2 ns"
 }
 
 SDC

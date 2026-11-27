@@ -32,6 +32,10 @@ module gpu2d
     parameter bit CBD       = 0,  // gpu2d_bg CBD (nds_top G2D_CBD)
     parameter bit CFL       = 0,  // gpu2d_bg CFL (nds_top G2D_CFL)
     parameter int AMF       = 0,
+    // WSPLIT (with PERSIST): the OBJ side's caches start over on vram_wr_o (a write that can reach an OBJ view's
+    // blocks), the BG side's on vram_wr (one that can reach a BG view's); 0: both on vram_wr
+    // 2: also one BG cache generation per engine (gpu2d_bg ESPLIT, vram_wr_e); 3: instead, volatile engines (gpu2d_bg VOL)
+    parameter int WSPLIT    = 0,
     parameter int THASH     = 1,  // gpu2d_bg THASH (nds_top G2D_THASH)  // gpu2d_bg/obj AMF (nds_top G2D_CFL 2: 1, 3: 2)
     parameter int MAP_IDXW  = 6,
     parameter int TEX_IDXW  = 6,
@@ -42,6 +46,7 @@ module gpu2d
     parameter bit OAM_CPU   = 0,
     parameter int EXT_IDXW  = 6,
     parameter int OTEX_IDXW = 6,
+    parameter bit OPFT      = 0,   // gpu2d_obj OPFT: the OBJ prefetch queues only blocks its texel cache misses
     parameter int OHASH     = 0,
     // CWF (critical word first): a miss's block read starts at its needed 64-bit word (vr_word; the read wraps
     // within the block: nds_vram / nds_sdram_mc), the beats fill the cache in that order
@@ -59,6 +64,8 @@ module gpu2d
     input  logic        clk,
     input  logic        rst,
     input  logic        vram_wr,
+    input  logic        vram_wr_o,   // WSPLIT: the OBJ side's
+    input  logic [1:0]  vram_wr_e,   // WSPLIT 2: the BG side's, per engine
     input  logic        vw_v,        // AMF: a CPU/DMA write through a BG/OBJ view, its block
     input  blk_t        vw_blk,
     // state
@@ -453,10 +460,10 @@ module gpu2d
     logic bg_ubusy;
     assign bg_busy = bg_ubusy || ld || ld_q || ld_go;
 
-    gpu2d_bg #(.ER(ER), .THASH(THASH), .CBD(CBD), .PERSIST(PERSIST), .CFL(CFL), .AMF(AMF), .MAP_IDXW(MAP_IDXW), .TEX_IDXW(TEX_IDXW), .EXT_IDXW(EXT_IDXW), .PREFETCH(PREFETCH),
+    gpu2d_bg #(.ESPLIT(WSPLIT == 2), .VOL(WSPLIT == 3), .ER(ER), .THASH(THASH), .CBD(CBD), .PERSIST(PERSIST), .CFL(CFL), .AMF(AMF), .MAP_IDXW(MAP_IDXW), .TEX_IDXW(TEX_IDXW), .EXT_IDXW(EXT_IDXW), .PREFETCH(PREFETCH),
                .WST_RF(WST_RF), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .EXT_TAG_MLAB(TAG_MLAB)) u_bg (
         .clk, .rst, .start(ld_go), .eng(ld_eng), .line(ld_line), .objslot(ld_slot),
-        .busy(bg_ubusy), .done(bg_done), .st(wst), .rf_raddr(b_rf_ra), .rf_rdata(rf_q), .rf_free(b_rf_free), .pre(b_pre), .capcnt, .cap_en, .lcdc_map, .vram_wr, .vw_v, .vw_blk,
+        .busy(bg_ubusy), .done(bg_done), .st(wst), .rf_raddr(b_rf_ra), .rf_rdata(rf_q), .rf_free(b_rf_free), .pre(b_pre), .capcnt, .cap_en, .lcdc_map, .vram_wr, .vram_wr_e, .vw_v, .vw_blk,
         .fill_req(b_req), .fill_blk(b_blk), .fill_word(b_wd), .pf_ack(b_pf_ack), .fill_we(b_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_first(ffirst), .fill_last(flast),
         .fill_data(vr_rdata),
         .pal_raddr(bpal_ra), .pal_rdata(bpal_q),
@@ -477,9 +484,9 @@ module gpu2d
             if (obj_start) olb_dirty[obj_slot][obj_eng] <= 1'b1;
         end
 
-    gpu2d_obj #(.ER(ER), .PERSIST(PERSIST), .AMF(AMF), .OHASH(OHASH), .TEX_IDXW(OTEX_IDXW), .EXT_IDXW(OEXT_IDXW), .MOSAIC(MOSAIC), .EXT_TAG_MLAB(TAG_MLAB)) u_obj (
+    gpu2d_obj #(.ER(ER), .PERSIST(PERSIST), .AMF(AMF), .OHASH(OHASH), .OPFT(OPFT), .TEX_IDXW(OTEX_IDXW), .EXT_IDXW(OEXT_IDXW), .MOSAIC(MOSAIC), .EXT_TAG_MLAB(TAG_MLAB)) u_obj (
         .clk, .rst, .start(obj_start), .clr(olb_dirty[obj_slot][obj_eng]), .eng(obj_eng), .line(obj_line),
-        .busy(obj_busy), .done(obj_done), .st(st_obj), .vram_wr, .vw_v, .vw_blk,
+        .busy(obj_busy), .done(obj_done), .st(st_obj), .vram_wr(WSPLIT ? vram_wr_o : vram_wr), .vw_v, .vw_blk,
         .fill_req(o_req), .fill_blk(o_blk), .fill_word(o_wd), .pf_ack(o_pf_ack), .fill_we(o_fwe), .fill_fblk(fblk), .fill_beat(fbeat), .fill_first(ffirst), .fill_last(flast),
         .fill_data(vr_rdata),
         .oam_raddr(o_oam_ra), .oam_rdata(oam_q), .pal_raddr(opal_ra), .pal_rdata(opal_q),

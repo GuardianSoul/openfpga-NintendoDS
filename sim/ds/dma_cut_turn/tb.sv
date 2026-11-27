@@ -63,7 +63,7 @@ module tb_dma_words #(parameter TURN=0, TAIL=0, WCAP=0, PIPE=0, ENABLE=1, EARLY=
       .DMA_READ_EARLY(START),
 `endif
       .A7_IO(1), .MR_BLOCK(1), .DMA_FAST(1), .DMA_RA(2), .VRAM_WRITE_CUT(ENABLE ? 3 : 0), .DMA_GX(1), .DMA_PACE(52), .DMA_PACE_GX(34)) u_fab (.clk, .rst, .dm_vcut(dm_vcut), .dm_unit(dm_unit), .dm_more(more), .dm_dst(dm_dst), .dx_valid(dx_valid), .dx_ready(dx_ready), .dx_idle(dx_idle), .wramcnt(2'd3), .exmemcnt9(8'd0), .pb_busy(1'b0),
-        .dm_req(dm_req), .dm_we(dm_we), .dm_cpu(dm_cpu), .dm_size32(dm_size32), .dm_addr(dm_addr), .dm_wdata(dm_wdata), .dm_ack(dm_ack), .dm_rdata(dm_rdata),
+        .dm_req(dm_req), .dm_we(dm_we), .dm_cpu(dm_cpu), .dm_size32(dm_size32), .dm_addr(dm_addr), .dm_src(dm_addr), .dm_wdata(dm_wdata), .dm_ack(dm_ack), .dm_rdata(dm_rdata),
         .a9_tmr(4'd0), .a9_req, .a9_we, .a9_addr, .a9_be, .a9_wdata, .a9_ack, .a9_rdata, .a9_n8, .a9_rvalid, .a9_wnext,
         .a7_req, .a7_we, .a7_addr, .a7_be, .a7_wdata, .a7_ack, .a7_rdata,
         .sn_req(sn_req), .sn_we(sn_we), .sn_addr(sn_addr), .sn_wdata(sn_wdata), .sn_ack(sn_ack), .sn_rdata(sn_rdata),

@@ -30,6 +30,14 @@ module gpu2d_bg
     // AMF (with CFL): a CPU/DMA write through a BG view no longer starts the caches over; vw_blk's block range
     // since the last job start is swept out of the map and texel caches at the next one (gpu2d_wrange)
     parameter int THASH    = 1,   // the BG texel cache's index function (gpu2d_cache HASH): 0 c0 ^ c1 (gsdd-battle: fewer conflicts)
+    // ESPLIT (with PERSIST): one cache generation per engine (gpu2d_cgen E2); a write that can reach engine e's
+    // BG blocks (vram_wr_e[e]) starts only engine e's over
+    parameter bit ESPLIT   = 0,
+    // VOL (with PERSIST and CFL): an engine whose BG view was written (vram_wr_e[e]) turns volatile at the cache
+    // restart that write causes: its BG blocks are then stored job-local, as LCDC blocks are (gpu2d_cache LGEN), and
+    // later writes through its view restart nothing; vram_wr (LCDC, ARM7, VRAMCNT) still restarts all. A frame (the
+    // engine's line-0 job) without such a write makes it persistent again. The other engine's blocks persist
+    parameter bit VOL      = 0,
     parameter int AMF      = 0,   // 2: a written range per engine, up to 256 blocks (gpu2d_wrange ENG2, SWMAX)
     parameter int MAP_IDXW = 6,   // log2 blocks per cache
     parameter int TEX_IDXW = 6,
@@ -67,6 +75,7 @@ module gpu2d_bg
     input  logic        cap_en,
     input  logic [3:0]  lcdc_map,    // banks A-D mapped to LCDC
     input  logic        vram_wr,     // VRAM or VRAMCNT written (PERSIST)
+    input  logic [1:0]  vram_wr_e,   // ESPLIT: written where engine [e]'s BG blocks can be (vram_wr unused)
     input  logic        vw_v,        // AMF: a CPU/DMA write through a BG/OBJ view, its block
     input  blk_t        vw_blk,
     // fills: request per cache (0 map, 1 texel, 2 ext palette)
@@ -360,18 +369,34 @@ module gpu2d_bg
     always_ff @(posedge clk) if (CFL && js == J_INIT) l_gen <= l_gen == 10'h3ff ? 10'd1 : l_gen + 10'd1;
     logic [CSW-1:0] c_scrub, c_scrub_q;
     logic           c_scrub_v;
-    gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .idle(js == J_IDLE), .gen(c_gen), .scrub(c_scrub),
+    logic [19:0]    c_gen_o;
+    gpu2d_cgen #(.SW(CSW), .E2(ESPLIT)) u_cgen (.clk, .clear(cclear), .sel(j_eng), .idle(js == J_IDLE), .gen(c_gen), .gen_o(c_gen_o), .scrub(c_scrub),
         .scrub_q(c_scrub_q), .scrub_v(c_scrub_v));
+    // synthesis translate_off
+    // ESPLIT: the registered generation has settled before any stage looks a block up (a fill landing earlier,
+    // a prefetch of the job before, takes a generation no lookup matches: a miss)
+    always_ff @(posedge clk) if (ESPLIT && !rst && js != J_IDLE && js != J_INIT && (s1.v || s2.v || s3.v || s4.v)
+                                 && c_gen != (j_eng ? {u_cgen.gb, 1'b1} : {u_cgen.ga, 1'b0}))
+        $error("gpu2d_bg: ESPLIT generation not settled at a lookup (js %0d)", js);
+    // synthesis translate_on
+    // G2D_VOL_MUT (simulation mutant): the texel cache stores a volatile engine's blocks as persistent ones
+    logic [1:0] vol, vpend, vwr;   // VOL: volatile engines; a write that turns one volatile at the next restart; written this frame
+    logic [1:0] tc_vol;
+`ifndef G2D_VOL_MUT
+    assign tc_vol = vol;
+`else
+    assign tc_vol = 2'b00;
+`endif
     // (the map and texel caches give the halfword addressed: HALF)
-    gpu2d_cache #(.ER(ER), .IDXW(MAP_IDXW), .HASH(1), .HALF(1), .LGEN(CFL)) u_mc (.clk, .idle(js == J_IDLE), .gen(c_gen), .lgen(l_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[MAP_IDXW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(MAP_IDXW), .HASH(1), .HALF(1), .LGEN(CFL), .E2(ESPLIT)) u_mc (.clk, .idle(js == J_IDLE), .gen(c_gen), .gen_o(c_gen_o), .lgen(l_gen), .lvol(VOL ? vol : 2'b00), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[MAP_IDXW-1:0]),
         .scrub_q(c_scrub_q[MAP_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(m_ablk), .a_word(m_aword), .a_half(m_ahalf),
         .q(m_q), .hit(m_hit), .cur_blk(m_cur), .cur_word(m_curw),
         .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
-    gpu2d_cache #(.ER(ER), .IDXW(TEX_IDXW), .HASH(THASH), .HALF(1), .LGEN(CFL)) u_tc (.clk, .idle(js == J_IDLE), .gen(c_gen), .lgen(l_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[TEX_IDXW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(TEX_IDXW), .HASH(THASH), .HALF(1), .LGEN(CFL), .E2(ESPLIT)) u_tc (.clk, .idle(js == J_IDLE), .gen(c_gen), .gen_o(c_gen_o), .lgen(l_gen), .lvol(VOL ? tc_vol : 2'b00), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[TEX_IDXW-1:0]),
         .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword), .a_half(t_ahalf),
         .q(t_q), .hit(t_hit), .cur_blk(t_cur), .cur_word(t_curw),
         .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
-    gpu2d_cache #(.ER(ER), .IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .HASH(2), .VLO(10)) u_ec (.clk, .idle(js == J_IDLE), .gen(c_gen), .lgen(c_gen), .inv_v(1'b0), .inv_blk('0), .scrub(c_scrub[ESW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .HASH(2), .VLO(10), .E2(ESPLIT)) u_ec (.clk, .idle(js == J_IDLE), .gen(c_gen), .gen_o(c_gen_o), .lgen(c_gen), .lvol(2'b00), .inv_v(1'b0), .inv_blk('0), .scrub(c_scrub[ESW-1:0]),
         .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword), .a_half(2'd0),
         .q(e_q), .hit(e_hit), .cur_blk(e_cur), .cur_word(e_curw),
         .fill_we(fill_we[2]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
@@ -856,12 +881,25 @@ module gpu2d_bg
     assign busy = js != J_IDLE;
     // caches start a new generation per job, or with PERSIST only after VRAM
     // (or this unit's own capture) was written since the last one
-    logic dirty;
-    assign cclear = js == J_INIT && (!PERSIST || dirty);
+    // (ESPLIT: per engine, the job's engine's)
+    logic [1:0] dirty;
+    assign cclear = js == J_INIT && (!PERSIST || dirty[ESPLIT ? j_eng : 1'b0]);
+    wire  [1:0] vw_new = vram_wr_e & ~vol;
     always_ff @(posedge clk)
-        if (rst) dirty <= 1'b1;
-        else if (vram_wr || w_big || (!CFL && cap_we && cap_ready)) dirty <= 1'b1;
-        else if (cclear) dirty <= 1'b0;
+        if (rst) dirty <= 2'b11;
+        else for (int e = 0; e < 2; e++)
+            if ((ESPLIT ? vram_wr_e[e] : VOL ? (vram_wr || (|vw_new)) : vram_wr) || w_big || (!CFL && cap_we && cap_ready)) dirty[e] <= 1'b1;
+            else if (cclear && (!ESPLIT || j_eng == 1'(e))) dirty[e] <= 1'b0;
+    always_ff @(posedge clk)
+        if (rst || !VOL) begin vol <= 2'b00; vpend <= 2'b00; vwr <= 2'b00; end
+        else for (int e = 0; e < 2; e++) begin
+            if (cclear) begin vol[e] <= vol[e] | vpend[e]; vpend[e] <= vw_new[e]; end
+            else if (vw_new[e]) vpend[e] <= 1'b1;
+            if (js == J_INIT && j_eng == 1'(e) && j_line == 8'd0) begin
+                vwr[e] <= vram_wr_e[e];
+                if (!cclear && !vwr[e]) vol[e] <= 1'b0;
+            end else if (vram_wr_e[e]) vwr[e] <= 1'b1;
+        end
 
     // RAM read addresses (held by the RAMs' own address mux while stalled)
     logic [8:0] pal_a_q;

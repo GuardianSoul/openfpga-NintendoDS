@@ -156,7 +156,7 @@ def read_slack():
 
 
 PACE_MIN = 30                                                          # melonDS swaps for a resolved pace
-OPT = {'tag': '', 'core_param': [], 'plus': [], 'diag': False}         # --tag, --core-param (a variant's runs beside the baseline's)
+OPT = {'tag': '', 'core_param': [], 'plus': [], 'define': [], 'diag': False}         # --tag, --core-param (a variant's runs beside the baseline's)
 
 
 def not_run(s, detail):
@@ -185,6 +185,8 @@ def run_scene(s, update, no_run=False):
         cmd += ['--core-param', p]
     for p in OPT['plus']:
         cmd += ['--plus', p]
+    for df in OPT['define']:
+        cmd += ['--define', df]
     if s.get('hold'):
         cmd += ['--plus', 'hold=' + hold_mask(s)]
     ndg = d / f'diag{sfx}.ndg'
@@ -333,6 +335,7 @@ def main():
     ap.add_argument('--core-param', action='append', default=[], metavar='NAME=V',
                     help='a core_top_ds parameter for a variant (run.py --core-param), e.g. RING=1; needs --tag')
     ap.add_argument('--plus', action='append', default=[], help='an extra plusarg for the runs (run.py --plus), e.g. g3dperf')
+    ap.add_argument('--define', action='append', default=[], help='a simulation define for the runs (run.py --define), e.g. G2D_ABL_BLK; needs --tag')
     ap.add_argument('--diag', action='store_true',
                     help='the NDSDiag build (DIAG=1, a second record every 8 frames, tag diag): also checks its log '
                          'read back at quit against the testbench mirror (diag_check.py)')
@@ -352,6 +355,7 @@ def main():
     if a.update and a.tag:
         sys.exit('--update writes the baseline of the default build: not with --tag')
     OPT['tag'], OPT['core_param'], OPT['plus'], OPT['diag'] = a.tag, a.core_param, a.plus, a.diag
+    OPT['define'] = a.define
     OPT['slack_update'] = a.slack_update
     rows = read_table()
     todo = [s for s in rows if not a.only or s['name'] in a.only.split(',')]

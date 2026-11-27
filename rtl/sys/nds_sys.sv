@@ -49,6 +49,7 @@ module nds_sys #(
     output logic        m_cpu,
     output logic        m_size32,
     output logic [31:0] m_addr,
+    output logic [31:0] m_src,
     output logic        m_unit,
     output logic [31:0] m_dst,
     output logic        m_more,
@@ -160,7 +161,7 @@ module nds_sys #(
         .be(io_be), .wdata(io_wdata), .en_q(dma_en),
         .reg_gnt(!cpu_rg), .reg_raddr(dma_raddr), .reg_rd,
         .trig9(dma_trig9), .gx_low(dma_gx_low), .stop9(dma_stop9), .trig7(dma_trig7),
-        .m_req, .m_we, .m_cpu, .m_size32, .m_addr, .m_unit, .m_dst, .m_more, .m_wdata, .m_ack, .m_rdata,
+        .m_req, .m_we, .m_cpu, .m_size32, .m_addr, .m_src, .m_unit, .m_dst, .m_more, .m_wdata, .m_ack, .m_rdata,
         .busy(dma_busy), .irq9(dirq9), .irq7(dirq7), .dbg_run(dbg_dma_run), .lat_lost(dma_lat_lost));
 
     logic [31:0] t9_rd, t7_rd;
@@ -168,6 +169,10 @@ module nds_sys #(
     // synthesis translate_off
     always @(posedge clk) if (!rst && tmr_oh !== ((wr && d_tmr) ? 8'd1 << {!a9, w[1:0]} : 8'd0))
         $display("nds_sys: ERROR: the fabric's timer decode (%b) is not this one's", tmr_oh);
+    // a timer read's request clock is a timer visit (acc = io_tmr): the RAM's address is acc_i, so the visit slot is no
+    // path to ff_rd (build_ds.sh: its false path)
+    always @(posedge clk) if (!rst && io_req && d_tmr && !io_tmr)
+        $display("nds_sys: ERROR: a timer request without io_tmr at %0t", $time);
     // synthesis translate_on
     // The ARM9's timers 0-1 increment in DSP blocks (2), with the fabric's
     // one-hot write select straight in and atmax off the DSP's output; its

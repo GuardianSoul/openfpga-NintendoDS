@@ -58,6 +58,8 @@ module nds_gpu3d
     parameter bit LLR = 0,
     // RPRI (RING): nds_g3d_ring RPRI, the needed line's read before a staged line's write
     parameter bit RPRI = 0,
+    // WYLD (RING, RPRI): nds_g3d_ring WYLD, a line's write gives way to the needed line's read at each block
+    parameter bit WYLD = 0,
     // NX2 (RING): nds_g3d_ring NX2, line dline+2 fetched once the composed line is swept
     parameter bit NX2 = 0,
     // RH_AT (RING): nds_g3d_ring RH_AT, the needed line's read urgent that many clocks into a line (0: never)
@@ -69,6 +71,7 @@ module nds_gpu3d
     parameter bit VREG = 0,     // gpu3d_raster VREG: the edge unit's vertex RAM output registered (timing only)
     parameter bit DSHARE = 0,   // gpu3d_raster DSHARE: one divider for the edge unit and the AA coverage start
     parameter bit LB2 = 0,      // gpu3d_raster LB2: line buffers as two RAMs per layer (2:1 read muxes)
+    parameter bit EDEPTH = 0,   // gpu3d_raster EDEPTH: early depth (2 M10K)
     parameter bit LOV = 0,      // gpu3d_raster LOV: the next line starts while this one's pixels drain
     parameter bit EDIV4 = 0,    // gpu3d_raster EDIV4: the edge's perspective divider four bits a clock
     parameter bit SPO = 0,      // gpu3d_raster SPO: the walker loads a span without waiting for P0-P13 to empty
@@ -109,8 +112,10 @@ module nds_gpu3d
     // record kept). The PSRAM goes to the CPUs and DMA: ~23K word writes and ~5.7K 4-word reads less a game frame on mkds-pack
     parameter bit STORE_SD = 1'b0,
     parameter bit GX_SPILL = 1'b0, // gpu3d_geom SPILL: GX entries beyond the on-chip 512 spill to SDRAM (shares the rg_* ports)
+    parameter bit GX_SPLEAN = 1'b0, // gpu3d_gxfront SP_LEAN (with GX_SPILL)
     parameter bit GX_GATH16 = 1'b0, // gpu3d_gxfront GATH16: the spill's gather 16 entries deep
     parameter bit GX_FFVTX = 1'b0,  // gpu3d_geom FF_VTX: vertex commands decoded in hardware (with GX_FF; docs/gx-speed-study.md C1)
+    parameter bit GX_TC1 = 1'b0,    // gpu3d_geom FF_TC1: TEXCOORD texture mode 1 on the vector MAC lanes (with GX_FF; docs/gx-speed-study.md C2)
     parameter bit GX_ENGM10K = 1'b1, // gpu3d_geom ENG_TM10K: the engine's VC and VOC tables in M10K (0: MLAB, -2 M10K)
     parameter bit VYS_M10K = 1'b1,   // gpu3d_front VYS_M10K: the vertex y table in an M10K (0: MLAB, -1 M10K)
     parameter int GX_SPAW = 12,     // gpu3d_gxfront SP_AW: the spill ring 2^GX_SPAW entries (8 bytes each) in SDRAM
@@ -379,7 +384,7 @@ module nds_gpu3d
     logic [23:0] q_waddr, q_raddr;
     logic [31:0] q_wdata;
     // the divider on clk_2x where clk_2x runs (PUMP)
-    gpu3d_geom #(.GAT_FE((RAM_MOVE & 4) != 0), .USORT(GX_USORT), .LUNIT(GX_LUNIT), .VFIN(GX_VFIN), .FF(GX_FF), .FF_VTX(GX_FFVTX), .GX_PAR(GX_PAR), .GX_PRE(1'b1), .DIV_P2X(1'b0), .SPILL(GX_SPILL), .GATH16(GX_GATH16), .SP_AW(GX_SPAW), .ENG_TM10K(GX_ENGM10K)) u_geom (
+    gpu3d_geom #(.GAT_FE((RAM_MOVE & 4) != 0), .USORT(GX_USORT), .LUNIT(GX_LUNIT), .VFIN(GX_VFIN), .FF(GX_FF), .FF_VTX(GX_FFVTX), .FF_TC1(GX_TC1), .GX_PAR(GX_PAR), .GX_PRE(1'b1), .DIV_P2X(1'b0), .SPILL(GX_SPILL), .SP_LEAN(GX_SPLEAN), .GATH16(GX_GATH16), .SP_AW(GX_SPAW), .ENG_TM10K(GX_ENGM10K)) u_geom (
         .clk, .clk_2x, .rst, .tick, .geom_en, .vblank,
         .io_req(g_req), .io_we(g_we), .io_be(g_be), .io_addr(g_addr), .io_wdata(g_wdata), .io_wpre(g_wpre),
         .io_rdata(g_rdata), .io_ack(g_ack), .io_wait(g_wait),
@@ -592,7 +597,7 @@ module nds_gpu3d
     assign r_ps_valid = ps_valid && stall_en;
     assign ps_ready   = r_ps_ready && stall_en;
     // AREA=0: full rate; the half-rate option measured no area gain (#187)
-    gpu3d_raster #(.QFE((RAM_MOVE & 8) != 0), .AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
+    gpu3d_raster #(.QFE((RAM_MOVE & 8) != 0), .AREA(0), .TXD(TXD), .PXD(PXD), .FPSKIP(FPSKIP), .LLR(LLR), .TRU(TRU), .TRUL(TRUL), .FPCLR(FPCLR), .NXB(NXB), .VREG(VREG), .DSHARE(DSHARE), .LB2(LB2), .EDEPTH(EDEPTH), .LOV(LOV), .EDIV4(EDIV4), .EDGE2(EDGE2), .EP2(EP2), .FDB(FDB), .SPO(SPO), .SPO_SL(SPO_SL), .SPOG(SPOG), .SPOG_N(SPOG_N), .FEAT_AA(FEAT_AA), .FEAT_FOG(FEAT_FOG), .FEAT_ATEST(FEAT_ATEST), .FEAT_TOON(FEAT_TOON),
                    .FEAT_EDGE(FEAT_EDGE), .FEAT_SHADOW(FEAT_SHADOW), .FEAT_LOWER(FEAT_LOWER), .TR3(TR3 && !FEAT_EDGE && !LB2), .VYS_M10K(VYS_M10K)) u_raster (
         .clk, .rst(rst || r_abort),
         .dispcnt(r_dispcnt), .alpharef(r_alpharef), .clear_attr1(r_clear_attr1), .clear_depth(r_clear_depth),
@@ -690,7 +695,7 @@ module nds_gpu3d
         end
 `endif
     generate if (RING) begin : g_ring
-        nds_g3d_ring #(.YLAG(YLIM2 ? 2 : 0), .LLR(LLR), .COPY_SHARE(1'b1), .RING3(RING3), .RPRI(RPRI), .NX2(NX2), .RH_AT(RH_AT), .TR3(TR3 && !FEAT_EDGE && !LB2), .LEAD(RLEAD)) u_ringx (.rg_hurry, .clk, .rst, .frame_go, .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata(ring_q),
+        nds_g3d_ring #(.YLAG(YLIM2 ? 2 : 0), .LLR(LLR), .COPY_SHARE(1'b1), .RING3(RING3), .RPRI(RPRI), .WYLD(WYLD), .NX2(NX2), .RH_AT(RH_AT), .TR3(TR3 && !FEAT_EDGE && !LB2), .LEAD(RLEAD)) u_ringx (.rg_hurry, .clk, .rst, .frame_go, .l3d_go, .l3d_line, .l3d_raddr, .l3d_rdata(ring_q),
             .y_lim(y_lim_rg), .px_valid, .px_x, .px_y, .px_color,
             .rg_wreq(q_wreq), .rg_waddr(q_waddr), .rg_wdata(q_wdata), .rg_wack(q_wack), .rg_rreq(q_rreq), .rg_raddr(q_raddr),
             .rg_rack(q_rack), .rg_rvalid(q_rvalid), .rg_rdata, .rg_wdrained,

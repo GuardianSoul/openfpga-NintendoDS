@@ -32,6 +32,7 @@ module arm9_mem import arm_pkg::*; #(
   // burst serves it as one transfer (the DS: 46 cycles per line, hwref run 22)
   parameter bit          BURST = 1'b0,
   parameter bit          SLOW = 1'b0,                 // the CPUs at clk_sys (67 MHz): smaller forms
+  parameter bit          A9C_RETURN = 1'b0,           // arm9_core consumes only accepted, surviving loads
   // 1: a fill's dirty victim line is copied into an 8-word eviction buffer (an MLAB) and the fill starts at
   // once; the buffer drains behind it, before any later fill, read, fetch or buffered store (the DS charges a
   // dirty eviction nothing extra, hwref run 22; docs/ds-rules.md)
@@ -57,6 +58,8 @@ module arm9_mem import arm_pkg::*; #(
   output logic [31:0] i_rdata,
   input  logic        i_hsel,           // the core's f1_pc[1]: which halfword of the answer i_rhw carries
   output logic [15:0] i_rhw,            // the answer's halfword (i_rdata's, by i_hsel), the way select last (#2566)
+  output logic [4:0]  i_rcls,
+  output logic [6:0]  i_rtop,           // thumb_top(i_rhw): the expansion's kind and condition, decoded per way (RC13b)           // thumb_class(i_rhw), decoded in each way before the hit select (#2570, #2594)
   output logic        i_ok,
   output logic        i_abort,
 
@@ -73,6 +76,11 @@ module arm9_mem import arm_pkg::*; #(
   input  logic [15:0] cp_op,
   input  logic [31:0] cp_wdata,
   output logic [31:0] d_rdata_f,
+  // the load word's sources for arm9_core's formatter, which selects the TCM word last (rc15f #2844 5asR: w_ra ->
+  // rd_itcm -> u -> d_rdata_f -> m_ldv's lanes -> e_bw -0.784 ns): d_ls_it ? d_lw_it : d_ls_dt ? d_lw_dt : d_lw_rs is
+  // d_rdata_f (SLOW; without SLOW d_lw_rs is d_rdata_f and both selects are 0)
+  output logic [31:0] d_lw_it, d_lw_dt, d_lw_rs,
+  output logic        d_ls_it, d_ls_dt,
   output logic        d_ok,
   output logic        d_abort,
   output logic        d_wait,
@@ -507,6 +515,8 @@ module arm9_mem import arm_pkg::*; #(
     logic [2:0]  idx;
     logic [15:0] ihw [0:IWAYS-1];
     logic [15:0] ohw;
+    logic [4:0]  icls [0:IWAYS-1];
+    logic [6:0]  itop [0:IWAYS-1];
     logic [IWAYS-1:0] hv;                   // each way's hit (the loop's compare)
     logic [IWAYS-1:0] sel;                  // the way whose word is the answer (one-hot or none)
     logic        ifl;                       // an I fill of the fetch side runs (registers only)
@@ -557,6 +567,27 @@ module arm9_mem import arm_pkg::*; #(
     ohw = itcm ? (i_hsel ? itcm_aq[31:16] : itcm_aq[15:0]) : (i_hsel ? ibuf_d[31:16] : ibuf_d[15:0]);
     i_rhw = (!itcm && cach) ? 16'h0 : ohw;
     for (int w = 0; w < IWAYS; w++) i_rhw = i_rhw | (ihw[w] & {16{sel[w]}});
+    // the Thumb class decoded from each way's halfword in parallel with the tag compare and selected by the same
+    // one-hot (ffvshadow #2594 1asR / #2595 7asR: I-tag -> sel -> i_rhw -> thumb_class -> a_cls -> q_cls -0.622 /
+    // -0.654 ns); the same function as thumb_class(i_rhw) (checked in arm9_core)
+    for (int w = 0; w < IWAYS; w++)
+`ifdef ARM9_TCLS_MUT
+      icls[w] = thumb_class(w == 0 ? ihw[1] : ihw[w]);   // (mutant: way 0's class from way 1's halfword)
+`else
+      icls[w] = thumb_class(ihw[w]);
+`endif
+    i_rcls = (!itcm && cach) ? 5'd0 : thumb_class(ohw);
+    for (int w = 0; w < IWAYS; w++) i_rcls = i_rcls | (icls[w] & {5{sel[w]}});
+    // and the Thumb expansion's kind and condition field the same way (RC13b #2611 1asR -0.510 ns into q_w's top
+    // bits, #2610 7asR -0.230); the same function as u_thumb's kind and arm[31:28] (checked in arm9_core)
+    for (int w = 0; w < IWAYS; w++)
+`ifdef ARM9_TTOP_MUT
+      itop[w] = thumb_top(w == 0 ? ihw[1] : ihw[w]);   // (mutant: way 0's from way 1's halfword)
+`else
+      itop[w] = thumb_top(ihw[w]);
+`endif
+    i_rtop = (!itcm && cach) ? 7'd0 : thumb_top(ohw);
+    for (int w = 0; w < IWAYS; w++) i_rtop = i_rtop | (itop[w] & {7{sel[w]}});
     if (!f_req || i_abort) i_ok = 1'b1;
     else if (itcm)         i_ok = !(MEM1 && itcm_steal);   // MEM1: a data write to the ITCM took port A in the fetch's cycle: fetch again
     else if (cach)                 i_ok = (hit && !busy_i && !col_i &&
@@ -575,6 +606,10 @@ module arm9_mem import arm_pkg::*; #(
   logic [15:0] w_cpop;
 
   logic        wd_itcm, wd_dtcm, wd_cach, wd_buf, wd_hit, wd_abort;
+  // the D ways' short tag hits (valid, bits 21:DSB+5): the read data's select and, under DTRIM, the full hit
+  logic [WAYS-1:0] hsv;
+  always_comb for (int w = 0; w < WAYS; w++)
+    hsv[w] = dt_bq[w*DLW + DTW + 1] && dt_bq[w*DLW +: 17 - DSB] == w_addr[21:DSB+5];
   logic [31:0] d_rdata;
   logic [WB-1:0] wd_way;
   logic          wd_thit;                   // the tag compare alone (without der)
@@ -607,8 +642,10 @@ module arm9_mem import arm_pkg::*; #(
     wd_cach  = mpu_en && dc_en && found && cach;
     wd_buf   = bufr;
     wd_hit = 1'b0; wd_way = '0;
+    // (DTRIM: a lane's bits 31:22 read back as 0x008, so the full compare is the short one (hsv, shared with the
+    // read data's select) and found)
     for (int w = 0; w < WAYS; w++)
-      if (dt_bq[w*DLW + DTW + 1] && dt_bq[w*DLW +: DTW] == w_addr[31:DSB+5]) begin
+      if (DTRIM ? (hsv[w] && found) : (dt_bq[w*DLW + DTW + 1] && dt_bq[w*DLW +: DTW] == w_addr[31:DSB+5])) begin
         wd_hit = 1'b1; wd_way = w[WB-1:0];
       end
     wd_thit = wd_hit;
@@ -764,20 +801,44 @@ module arm9_mem import arm_pkg::*; #(
   wire         rb_hit = rbuf_v && rbuf_a[31:2] == w_ra;           // the uncached read buffer has this word
   // the TCM matches again, from w_ra, for the read data's select (wd_itcm / wd_dtcm still decide everything else)
   wire         rd_itcm = itcm_en && ((w_ra[31:12] & itcm_mask) == 20'h0) && (w_we || !itcm_ld);
-  wire         rd_dtcm = !rd_itcm && dtcm_en && ((w_ra[31:12] & dtcm_mask) == dtcm_base) && (w_we || !dtcm_ld);
+  wire         rd_dtcm_r = dtcm_en && ((w_ra[31:12] & dtcm_mask) == dtcm_base) && (w_we || !dtcm_ld);
+  wire         rd_dtcm = !rd_itcm && rd_dtcm_r;
   logic        d_sel_h;                     // ... is the answer
+  logic        d_hs;                        // a way's short tag hits (below)
   always_comb begin
     if (wcp_e)         d_rdata = cp_rd;
     else if (rd_itcm) d_rdata = itcm_bq;
     else if (rd_dtcm) d_rdata = dtcm_bq;
     else              d_rdata = rbuf_d;
-    d_rdata_h = dc_bq[wd_rway];
+    // the cache word as a one-hot AND-OR of the ways' short tag hits (bits 21:DSB+5 and the valid bit), over the fill's
+    // way when none hits, instead of dc_bq[wd_rway] behind the full compare's encoded way (rel15 #2749 block: D-tag ->
+    // wd_rway -> d_rdata_h -> e_bw +0.238 ns, 13 endpoints). D lines are filled only from main RAM (wd_cach needs
+    // found: bits 31:22 = 0x008), so a valid tag's bits 31:22 are 0x008 and where the word is used (d_sel_h: a full
+    // hit, or der with no hit) the short hits are the full ones. Checked below against dc_bq[wd_rway]
+    begin
+      logic [WAYS-1:0] hs;
+      hs = hsv;
+      d_hs = |hs;
+      d_rdata_h = |hs ? 32'h0 : dc_bq[vway[WB-1:0]];
+      for (int w = 0; w < WAYS; w++)
+`ifdef ARM9_DSH_MUT
+        d_rdata_h = d_rdata_h | (dc_bq[w == 0 ? WAYS - 1 : w] & {32{hs[w]}});   // (mutant: way 0's hit takes the last way's word)
+`else
+        d_rdata_h = d_rdata_h | (dc_bq[w] & {32{hs[w]}});
+`endif
+    end
     // (not through wd_cach, the region match and its priority: RC6 #2097, w_addr -> w_rm -> C/B -> d_sel_h -> the
     // data mux -> the core's w_wd, -0.91 ns). The read buffer holds an uncached read's word for the next access that
     // completes, and a CP15 write completing first drops it, so where it hits the access is not cacheable; where the
     // tag hits but the region is not cacheable the access is refused, its data unused
     d_sel_h = !wcp_e && !rd_itcm && !rd_dtcm && wd_hit && !rb_hit;
   end
+
+  // synthesis translate_off
+  always @(posedge clk)
+    if (!rst && wq_e && !w_we && d_sel_h && d_rdata_h !== dc_bq[wd_rway])
+      $display("arm9_mem: ERROR: the cache word %h is not way %0d's %h at %0t", d_rdata_h, wd_rway, dc_bq[wd_rway], $time);
+  // synthesis translate_on
 
   // the answer
   always_comb begin
@@ -816,7 +877,7 @@ module arm9_mem import arm_pkg::*; #(
         d_ok = 1'b0;                        // the machine is busy with the D side
       end else if (!w_we) begin
         if (wd_cach && wd_hit) begin
-        end else if (!wd_cach && rbuf_v && rbuf_a[31:2] == w_addr[31:2]) begin
+        end else if (!wd_cach && rb_hit) begin    // (rb_hit: the same compare on w_ra, w_addr[31:2]'s copy)
         end else begin
           d_ok = 1'b0;
           wd_need = 1'b1;
@@ -847,6 +908,8 @@ module arm9_mem import arm_pkg::*; #(
     end
   end
 
+  logic same_chk;                           // (simulation: the merge's condition, for the load-data check)
+  logic [31:0] ld_rest;                     // SLOW: the word without a TCM match (d_lw_rs)
   // the access right after a store may have read the RAM before the write
   // (not under SLOW: the write is in the store's own WB)
   always_comb begin
@@ -854,9 +917,42 @@ module arm9_mem import arm_pkg::*; #(
     logic [31:0] h, u;
     same = (!SLOW || MEM1) && pw_v && (pw_a[31:2] == w_addr[31:2]) &&
            ((pw_itcm && wd_itcm) || (pw_dtcm && wd_dtcm) || (pw_dc && !wd_itcm && !wd_dtcm));
+    same_chk = same;
     h = d_rdata_h;
-    u = SLOW ? (d_sel_h ? d_rdata_h : d_rdata) : d_rdata;   // SLOW: select first, merge once
-    if (same && !wcp_e)
+    ld_rest = 32'h0;
+    if (SLOW) begin
+      // SLOW: select first, merge once. The TCM matches (rd_itcm / rd_dtcm: the 20-bit region compares from w_ra)
+      // select last, over a word chosen without them (CP15, the cache hit, the read buffer), instead of through
+      // d_sel_h and d_rdata (rel15-ram #2732 7asR: w_ra -> rd_itcm -> d_sel_h -> d_rdata_f -> e_bw / w_wd -0.941 ns).
+      // The same function as d_sel_h ? d_rdata_h : d_rdata: d_sel_h is the rest's hit select without a TCM match,
+      // d_rdata's TCM words come after CP15 (checked below)
+      logic [31:0] rest;
+      logic use_cache;
+      // the cache word's select from the short tag hits (or der), not wd_hit's full compare (rel15f #2785: D-tag -> hs ->
+      // wd_hit -> rest -> d_rdata_f -> e_bw -0.262 ns): where a load completes from the cache (a full hit, or der) the
+      // short hits are the full ones (main-RAM lines, above); a short hit without a full one and without the read
+      // buffer is not answered (no d_ok), so its word is not used. Checked below on every answered load
+      // arm9_core only consumes an accepted load. With no read-buffer
+      // hit, the completion logic already proves the cache/fill word is
+      // usable. Keep der on that completion path, outside the data mux.
+      use_cache = !rb_hit && (A9C_RETURN || d_hs || der);
+`ifdef ARM9_RBUF_OWNER_MUT
+      if (A9C_RETURN) use_cache = 1'b1;   // mutant: ignore a matching buffered read
+`endif
+      rest = wcp_e ? cp_rd : use_cache ? d_rdata_h : rbuf_d;
+      ld_rest = rest;
+`ifdef ARM9_LDSEL_MUT
+      u = (!wcp_e && rd_itcm) ? itcm_bq : (!wcp_e && rd_dtcm) ? itcm_bq : rest;   // (mutant: the DTCM read gives the ITCM word)
+`else
+      u = (!wcp_e && rd_itcm) ? itcm_bq : (!wcp_e && rd_dtcm) ? dtcm_bq : rest;
+`endif
+    end else
+      u = d_rdata;
+    // SLOW (a9c): no merge. arm9_core never requests a load in the clock after a store it does not kill (its
+    // h_sl interlock: a load in D waits while E holds a store; proven unreachable for every input sequence,
+    // sim/formal/a9_stld, ABC PDR), so `same` never meets a load here; checked below. (rel15 #2731/#2732: the
+    // byte-merge muxes sat on the failing w_ra / w_addr -> d_rdata_f -> e_bw / w_wd paths)
+    if (same && !wcp_e && !SLOW)
       for (int b = 0; b < 4; b++)
         if (pw_be[b]) begin
           h[b*8 +: 8] = pw_d[b*8 +: 8];
@@ -864,7 +960,26 @@ module arm9_mem import arm_pkg::*; #(
         end
     d_rdata_f = (d_sel_h && !SLOW) ? h : u;
   end
+  assign d_lw_it = itcm_bq;
+  assign d_lw_dt = dtcm_bq;
+  assign d_lw_rs = SLOW ? ld_rest : d_rdata_f;
+  assign d_ls_it = SLOW && !wcp_e && rd_itcm;
+  assign d_ls_dt = SLOW && !wcp_e && rd_dtcm_r;   // (rd_itcm's priority is the formatter's select order)
 
+  // synthesis translate_off
+  always @(posedge clk)
+    if (SLOW && A9C_RETURN && !rst && d_ok && !d_abort &&
+        ((wcp_e && !w_cpwe) || (wq_e && !w_we)))
+      if (d_rdata_f !== (wcp_e ? cp_rd : rd_itcm ? itcm_bq : rd_dtcm ? dtcm_bq :
+                        ((d_hs || der) && !rb_hit) ? d_rdata_h : rbuf_d))
+        $error("arm9_mem: accepted return owner differs (address %h, CP %b, buffer %b)", w_addr, wcp_e, rb_hit);
+  always @(posedge clk)
+    if (SLOW && !rst && wq_e && !w_we && d_ok && !(same_chk && !wcp_e) && d_rdata_f !== (d_sel_h ? d_rdata_h : d_rdata))
+      $display("arm9_mem: ERROR: the load data %h is not the select's %h at %0t", d_rdata_f, d_sel_h ? d_rdata_h : d_rdata, $time);
+  always @(posedge clk)
+    if (SLOW && !rst && same_chk && !wcp_e && wq_e && !w_we)
+      $display("arm9_mem: ERROR: a load in WB right after a store to its word (the removed SLOW merge) at %0t", $time);
+  // synthesis translate_on
   // EARLYD: the fetch hold of a refused access ends while the fill's last word is on its way, so the replay's
   // refetch reaches the memory stage about when the line is there (the DS stalls in place and continues at once;
   // the core refuses, flushes and refetches after the fill: ~12 clk exposed per fill). Too early only costs another replay.

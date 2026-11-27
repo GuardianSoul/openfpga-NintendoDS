@@ -41,6 +41,8 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     input wire [1:0] layout_in,
     input wire [1:0] rotation,              // Core Setting "Rotation": 0 off, 1 left, 2 right (scaler slots 2/3
                                             // stacked, 4/5 one screen: package.py's rotated video.json modes)
+    input wire fill,                        // Core Setting "Aspect Ratio": Fill Screen, single-screen layouts only
+                                            // (slot 6, 10:9); stacked and rotated layouts keep their slots
     input wire touch, pen,
     input wire [7:0] cur_x, cur_y,
     // the DS
@@ -100,10 +102,20 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     always @(posedge clk) if (sw_new) begin sw_line <= px_line; sw_held <= swap; end
     wire bot_px = px_eng == top_l;
     wire live_eng = gen_layout == 2'd2 ? top_l : !top_l;     // the engine the live screen shows
-    wire [7:0] dx = px_x - cur_x, dy = px_line - cur_y;
-    wire near_x = dx < 6 || dx > 250, near_y = dy < 6 || dy > 250;
-    wire cursor = touch && bot_px && ((px_x == cur_x && near_y) || (px_line == cur_y && near_x));
-    wire [17:0] pix = cursor ? (pen ? 18'h00FFF : 18'h0003F) : px_rgb;     // yellow / red
+    // the cursor (2026-11-15): a white cross (arms 5 px) with a 1 px black outline and the
+    // centre pixel left transparent; with the pen down the colours swap. The offsets are 9-bit, so
+    // the cross stops at the screen's edges (an 8-bit offset wrapped a cursor at x 251-255 onto x 0-4)
+    // CURSOR_BEGIN
+    wire [8:0] sx = {1'b0, px_x} - {1'b0, cur_x}, sy = {1'b0, px_line} - {1'b0, cur_y};
+    wire ax0 = sx == 9'd0, ay0 = sy == 9'd0;
+    wire ax1 = sx <= 9'd1 || sx >= 9'd511, ay1 = sy <= 9'd1 || sy >= 9'd511;
+    wire ax5 = sx <= 9'd5 || sx >= 9'd507, ay5 = sy <= 9'd5 || sy >= 9'd507;
+    wire ax6 = sx <= 9'd6 || sx >= 9'd506, ay6 = sy <= 9'd6 || sy >= 9'd506;
+    wire cur_core = (ay0 && ax5) || (ax0 && ay5);           // the white cross
+    wire cur_area = ((ay1 && ax6) || (ax1 && ay6)) && !(ax0 && ay0);     // the cross and its outline, not the centre
+    // CURSOR_END
+    wire cursor = touch && bot_px && cur_area;
+    wire [17:0] pix = cursor ? ((cur_core ^ pen) ? 18'h3FFFF : 18'h00000) : px_rgb;     // white / black
 
     // live screen: four lines
     reg [17:0] live [0:1023];
@@ -218,9 +230,11 @@ module nds_video #(parameter [23:0] BUF_W = 24'h38_0000) (
     reg [17:0] live_q = 0;
     reg de1 = 0, hs1 = 0, vs1 = 0, slot1 = 0, buf1 = 0, buf1s = 0, half1 = 0, lead1 = 0;
     // the scaler slot word's slot: stacked 0, one screen 1; rotated (2026-10-28: all layouts) stacked
-    // 2 (left) and 3 (right), one screen 4 (left) and 5 (right)
     wire one = layout != 0 && !buf1s;
-    wire [2:0] slot_n = rotation == 2'd1 ? (one ? 3'd4 : 3'd2) : rotation == 2'd2 ? (one ? 3'd5 : 3'd3) : {2'b00, one};
+    // 2 (left) and 3 (right), one screen 4 (left) and 5 (right); Fill Screen, one screen unrotated: 6 (the maintainer,
+    // 2026-11-14: two stacked screens can't fill the Pocket, so stacked stays Original)
+    wire [2:0] slot_n = rotation == 2'd1 ? (one ? 3'd4 : 3'd2) : rotation == 2'd2 ? (one ? 3'd5 : 3'd3) :
+                        fill && one ? 3'd6 : {2'b00, one};
     always @(posedge clk) begin
         ring_q <= ring[{k[0], buf_x[7:1]}];
         live_q <= live[{m[1:0], live_x[7:0]}];

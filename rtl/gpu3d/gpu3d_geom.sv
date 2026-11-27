@@ -29,12 +29,14 @@ module gpu3d_geom #(
     parameter int VFIN = 0,            // see gpu3d_gxeng: 1 adds the vertex-finish unit gpu3d_gxvfin (with LUNIT), 2 its lite form
     parameter bit FF = 1'b0,           // see gpu3d_gxeng: the geometry redesign (with USORT, without LUNIT and VFIN)
     parameter bit FF_VTX = 1'b0,       // see gpu3d_gxeng (with FF)
+    parameter bit FF_TC1 = 1'b0,       // see gpu3d_gxeng (with FF)
     parameter int GX_PAR = 0,          // see gpu3d_gxeng PAR: the number of GX_PAR steps, cumulative (docs/geometry-engine-par.md); with FF
     parameter bit ENG_M10K = 1'b1,     // gpu3d_gxeng VC_M10K, STK_M10K, VOC_M10K: its three MLAB tables in M10K (+3 blocks, -4 MLAB LABs)
     parameter bit ENG_TM10K = ENG_M10K,   // ... the VC and VOC tables alone (0: MLAB, -2 M10K; STK_M10K stays with ENG_M10K: gpu3d_gxeng's DICT needs it)
     parameter bit GX_PRE = 1'b0,       // 1: io_wpre is gpu3d_gxpre(io_wdata), registered with it (nds_gpu3d); 0: decoded here
     parameter bit SPILL = 1'b0,        // see gpu3d_gxfront: entries beyond the on-chip 512 spill to SDRAM (sp_* ports)
     parameter int SP_ON = 512,         // see gpu3d_gxfront (tests: fewer, to spill often)
+    parameter bit SP_LEAN = 1'b0,     // gpu3d_gxfront SP_LEAN (the spill's decisions from two counters)
     parameter bit GATH16 = 1'b0,       // see gpu3d_gxfront
     parameter int SP_AW = 12,          // see gpu3d_gxfront
     parameter bit SP_SIM = 1'b0        // tests (tb_geom): a behavioural SDRAM on the sp_* ports, with varying latency
@@ -124,7 +126,7 @@ module gpu3d_geom #(
     logic        e_avail, e_pop, e_more;
     logic        f_wack, f_rack, f_rvalid, f_wdrained;
     logic [31:0] f_rdata;
-    gpu3d_gxfront #(.GAT_FE(GAT_FE), .CHEAP(GX_CHEAP), .PRE(1'b1), .SPILL(SPILL), .SP_ON(SP_ON), .GATH16(GATH16), .SP_AW(SP_AW)) u_front (
+    gpu3d_gxfront #(.GAT_FE(GAT_FE), .CHEAP(GX_CHEAP), .PRE(1'b1), .SPILL(SPILL), .SP_ON(SP_ON), .GATH16(GATH16), .SP_LEAN(SP_LEAN), .SP_AW(SP_AW)) u_front (
         .clk, .rst, .tick, .geom_en, .vblank,
         .wr_req, .wr_be(io_be), .wr_addr(io_addr), .wr_data(io_wdata), .wr_pre, .wr_wait(io_wait),
         .gxstat, .zerodot, .flush_req, .irq(irq_gxfifo), .dma_low(dma_gx_low), .gx_stall,
@@ -268,7 +270,7 @@ module gpu3d_geom #(
     logic [11:0] sort_n;
     logic        e_so_we, e_so_done;
     logic [10:0] e_so_pos, e_so_idx;
-    gpu3d_gxeng #(.SMALL(SMALL), .DIV_R4(DIV_R4), .DIV_P2X(DIV_P2X), .DS_STRIPCLIP(DS_STRIPCLIP), .DS_FARREJ(DS_FARREJ), .DS_CLIPRED(DS_CLIPRED), .USORT(USORT), .LUNIT(LUNIT), .VFIN(VFIN), .FF(FF), .FF_VTX(FF_VTX), .PAR(GX_PAR),
+    gpu3d_gxeng #(.SMALL(SMALL), .DIV_R4(DIV_R4), .DIV_P2X(DIV_P2X), .DS_STRIPCLIP(DS_STRIPCLIP), .DS_FARREJ(DS_FARREJ), .DS_CLIPRED(DS_CLIPRED), .USORT(USORT), .LUNIT(LUNIT), .VFIN(VFIN), .FF(FF), .FF_VTX(FF_VTX), .FF_TC1(FF_TC1), .PAR(GX_PAR),
                   .VC_M10K(ENG_TM10K), .STK_M10K(ENG_M10K), .VOC_M10K(ENG_TM10K)) u_eng (
         .clk, .clk_2x, .rst, .e_addr, .e_data, .mx, .e_avail, .e_pop, .e_more, .dp, .zerodot,
         .swap_go, .swap_ack, .oc_valid, .oc_rej, .oc_quad,

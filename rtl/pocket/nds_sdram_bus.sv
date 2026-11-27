@@ -29,14 +29,12 @@ module nds_sdram_bus #(parameter integer N = 6,
     parameter integer OPEN = 0,          // nds_sdram_mc OPEN: reads leave their rows open
     parameter integer OUT_REG = 0,       // nds_sdram_mc OUT_REG: a register stage before the pins
     parameter integer HURRY = 0,
-    parameter integer SOFT_MIN = 0,
-    parameter integer WURG = 0,
     parameter integer WRAP = 0,          // ports (a bit each) whose reads wrap within their 8-word group (nds_sdram_mc c_wrap: a block read from its needed word)
-    parameter integer WOPEN = 0,         // nds_sdram_mc WOPEN: write chains leave their rows open (bit 0), no pause in a chain (bit 1)          // nds_sdram_mc WURG: a nearly full write FIFO (bw_urg) ahead of waiting reads
+    parameter integer OB_M10K = 1,       // nds_sdram_mc OB_M10K: the open rows in an M10K (read at g_rb's next bank)
     // RV: port RV's waiting flag is a register, m_valid & ~m_take a clock late:
     // its request is seen one clk_mem later, its take at once (RC8p4 #2314:
     // m_take[6] / x_rg take_t -> g_rb -0.511 ns); -1: none
-    parameter integer RV = -1) (    // a hurried port outside m_cut ends a write chain once it has this many words       // 1: m_hurry promotes a port (above)
+    parameter integer RV = -1) (
     input  wire [N-1:0]      m_hurry,       // HURRY: the port's client is near its deadline (clk_mem, synchronised)
     input  wire [N-1:0]      m_cut,         // HURRY: ... and a waiting request of it ends a write chain early
     input  wire [N-1:0]      m_first,       // HURRY: a hurried port here goes before the other hurried ports
@@ -59,7 +57,6 @@ module nds_sdram_bus #(parameter integer N = 6,
     input  wire [31:0]       bw_data,
     input  wire [1:0]        bw_he,         // the word's halves to write {high, low} (VRAM halfword posts)
     output wire              bw_read,
-    input  wire              bw_urg,        // nds_sdram_mc WURG (unconnected: 0)
     inout  wire [15:0]       SDRAM_DQ,
     output wire [12:0]       SDRAM_A,
     output wire [1:0]        SDRAM_BA,
@@ -128,11 +125,12 @@ module nds_sdram_bus #(parameter integer N = 6,
 `endif
     wire c_ready, r_valid, r_last;
     wire [31:0] r_data;
-    nds_sdram_mc #(.OPEN(OPEN), .OUT_REG(OUT_REG), .SOFT_MIN(SOFT_MIN), .WURG(WURG), .WOPEN(WOPEN)) mc (.clk, .init, .ready,
-        .c_soft(HURRY != 0 && (wait_p & m_hurry & ~m_cut) != 0),
-        .c_valid(g_v && !c_ready), .c_hurry(wait_p[0] || (HURRY != 0 && (wait_p & m_hurry & m_cut) != 0)), .c_we(m_we[g]), .c_wrap(((WRAP >> g) & 1) != 0), .c_addr(m_addr[g*24 +: 24]), .c_rb(g_rb), .c_n(m_n[g*4 +: 4]),
+    // g_rb's D (the always block below), for the controller's open-row RAM read (OB_M10K)
+    wire [14:0] g_rb_d = !c_ready && !g_v && any ? g_rb_n : g_rb;
+    nds_sdram_mc #(.OPEN(OPEN), .OUT_REG(OUT_REG), .OB_M10K(OB_M10K)) mc (.clk, .init, .ready,
+        .c_valid(g_v && !c_ready), .c_hurry(wait_p[0] || (HURRY != 0 && (wait_p & m_hurry & m_cut) != 0)), .c_we(m_we[g]), .c_wrap(((WRAP >> g) & 1) != 0), .c_addr(m_addr[g*24 +: 24]), .c_rb(g_rb), .c_rb_nx(g_rb_d[14:13]), .c_n(m_n[g*4 +: 4]),
         .c_wdata(m_wdata[g*32 +: 32]), .c_be(m_be[g*4 +: 4]), .c_ready,
-        .r_valid, .r_data, .r_last, .bw_valid, .bw_addr, .bw_data, .bw_he, .bw_read, .bw_urg, .ref_late,
+        .r_valid, .r_data, .r_last, .bw_valid, .bw_addr, .bw_data, .bw_he, .bw_read, .ref_late,
         .SDRAM_DQ, .SDRAM_A, .SDRAM_BA, .SDRAM_DQML, .SDRAM_DQMH, .SDRAM_nWE, .SDRAM_nRAS, .SDRAM_nCAS,
         .SDRAM_CKE, .SDRAM_CLK);
     // owners of the reads in flight, in order (the controller serves one

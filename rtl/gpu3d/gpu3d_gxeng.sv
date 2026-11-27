@@ -43,7 +43,11 @@ module gpu3d_gxeng #(
     // dispatcher's COLOR / TEXCOORD / vertex commands, the vector MAC, the polygon unit (PU below; the control store
     // gpu3d_gxrom_uf)
     parameter bit FF = 1'b0,
-    parameter bit FF_VTX = 1'b0,       // FF: a vertex command is decoded into CurVertex's latch in the DISP clock and goes straight to
+    parameter bit FF_VTX = 1'b0,
+    parameter bit FF_TC1 = 1'b0,       // FF: a TEXCOORD in texture mode 1 is taken in the DISP clock (as mode 0) and its
+                                       // texture-matrix product runs on lanes 0-1 (rows 4, 5, 6 and 8 = T12) in four steps
+                                       // while the dispatcher holds; TexCoords' latch takes the result 7 clocks after
+                                       // the pop, as the microcode's handler wrote it (docs/gx-speed-study.md C2)       // FF: a vertex command is decoded into CurVertex's latch in the DISP clock and goes straight to
                                        // the transform (SV1 with PU, else SUBV), without its microcode handler (docs/gx-speed-study.md C1)
     // VC_M10K (SMALL): the outcode unit's x, y, z (u_vc, 2 MLAB LABs in #886) in an M10K read two clocks
     // ahead (the stepper's position two clocks on, from the word in M) into its output register; 0: MLAB
@@ -291,6 +295,12 @@ module gpu3d_gxeng #(
             odec.xt = {6{xs == 4'(XS_ATR)}} & {PU && xh == 3'd7, xh == 3'd4 || xh == 3'd5 || xh == 3'd6 || (!PU && xh == 3'd7),
                                                xh == 3'd3, xh == 3'd2, xh == 3'd1, xh == 3'd0};
             odec.xv = {3{xs == 4'(XS_VXR)}} & {xh[1:0] == 2'd0 && !xh[2], xh[1:0] == 2'd0 && xh[2], xh[1:0] != 2'd0};
+            // VXR's acc[43:12] (xv[2]) is ACCX's xa[2] source: folded into xa[2] here, in the registered decode, so xo has one
+            // acc[43:12] term and od.xv[2] no fan-out (RC15f #2785 / #2757: od.xv[2] -> xo -> adder -> R, -0.088 ns)
+`ifndef GXENG_XV_MUT
+            odec.xa[2] = odec.xa[2] | odec.xv[2];
+`endif
+            odec.xv[2] = 1'b0;
         end
         case (op)
             5'(AOP_ADD), 5'(AOP_SUB), 5'(AOP_RSUB): odec.ro[RO_SUM] = 1'b1;
@@ -350,6 +360,12 @@ module gpu3d_gxeng #(
     logic [2:0]  v_row;                // FF: the vector MAC's row of the instruction in O
     logic        v_opo;                // FF: a vector MAC step in O
     logic [31:0] vm0_q;                // FF: lane 0's row (the scalar MAC is lane 0)
+    // FF_TC1: the mode-1 TEXCOORD sequence: tx_k 1-4 the lane steps (in O), 7 the capture; pops wait for 1-6
+    logic [2:0]  tx_k;
+    wire         tx_on   = FF && FF_TC1 && tx_k != 3'd0 && tx_k <= 3'd4;
+    wire         tx_hold = FF && FF_TC1 && tx_k != 3'd0 && tx_k != 3'd7;
+    wire [31:0]  tx_mb   = tx_k == 3'd1 ? 32'(signed'(P[15:0])) : tx_k == 3'd2 ? 32'(signed'(P[31:16])) : 32'd1;
+    logic [15:0] tx_t1;                // lane 1's bits 12..27 (lane 0's are acc's)
     logic        ffw_m, fft_m, ffv_m;  // FF: the dispatcher's latch write in M (TEXCOORD, vertex; else COLOR)
     logic [31:0] ffd_m;
     logic [15:0] ffv_d [3];
@@ -430,7 +446,7 @@ module gpu3d_gxeng #(
     // lu_pk_q: e_data is the peeked entry, not the head
     logic lu_pre, lu_pk_q;
     wire ev = ev_q && !(LUNIT && lu_busy && !LU_SAFE[e_hidx] && !lu_pre) && !(FF && ff_isv && ff_cvb) &&
-              !(LUNIT && lu_pk_q);
+              !(LUNIT && lu_pk_q) && !tx_hold;
     localparam logic [10:0] DPARAM = 11'd38;   // a plain DISP (ucode.py)
     localparam logic [10:0] RESET  = 11'd40;   // ucode.py
     localparam logic [10:0] PARAM  = 11'h080;  // collected parameters (ucode.py)
@@ -476,7 +492,20 @@ module gpu3d_gxeng #(
     // (no handler). TEXCOORD waits for its handler while a TEXM write is still in flight
     wire ff_tm_busy = (we_o && wa_o == FF_A_TEXM) || (we_m && wa_m == FF_A_TEXM);
     wire ff_col = FF && pop && !mp && e_hidx == FF_HCOLOR;
-    wire ff_tex = FF && pop && !mp && e_hidx == FF_HTEXC && at_m == 2'd0 && !ff_tm_busy;
+    wire ff_tex0 = FF && pop && !mp && e_hidx == FF_HTEXC && at_m == 2'd0 && !ff_tm_busy;
+    // FF_TC1: mode 1 too, when the DISP word itself issues no MAC step (the sequence takes the MAC next)
+    wire ff_tx1 = FF && FF_TC1 && pop && !mp && e_hidx == FF_HTEXC && at_m == 2'd1 && !ff_tm_busy && b_acc == 3'(ACC_NONE);
+    wire ff_tex = ff_tex0 || ff_tx1;
+    always_ff @(posedge clk)
+        if (rst || !(FF && FF_TC1)) tx_k <= 3'd0;
+        else if (ff_tx1) tx_k <= 3'd1;
+        else if (tx_k != 3'd0) tx_k <= tx_k == 3'd7 ? 3'd0 : tx_k + 3'd1;
+`ifndef SYNTHESIS
+    // synthesis translate_off
+    always_ff @(posedge clk)
+        if (!rst && tx_on && b_acc != 3'(ACC_NONE)) $error("gpu3d_gxeng FF_TC1: a MAC step at upc %03x during the TEXCOORD sequence", upc);
+    // synthesis translate_on
+`endif
     // FF: a NORMAL outside texture mode 2 only starts the lighting unit: the DISP stays (no handler)
     wire ff_nrm = FF && pop && !mp && e_hidx == LU_HNORMAL && at_m != 2'd2 && !ff_tm_busy;
     // FF: a vertex command (VTX_16 at its second parameter) is decoded into CurVertex's latch and goes
@@ -615,7 +644,10 @@ module gpu3d_gxeng #(
         // CurVertex between the pop and M: a vertex command waits for register-file writes to it). PU: in O, from
         // P (the popped entry until the next pop), so the transform's first vector step (SV1, the clock after the
         // DISP) reads it in its O; a register-file write to CurVertex still in M then was in O at the pop (ff_cvb)
-        wire [2:0]  ffk_v = PU ? ffk_o : ffk_m;
+        // (logic + assign, not a net declaration assignment: Quartus 25.1std mis-synthesised `wire [2:0] ffk_v = PU ?
+        // ffk_o : ffk_m;` here, the case selector below: C1's garbled vertices, docs/results/ffvtx-hw-fault "netlist")
+        logic [2:0]  ffk_v;
+        assign ffk_v = PU ? ffk_o : ffk_m;
         wire [31:0] ffd_v = PU ? P : ffd_m;
         wire        ffv_w = PU ? ffw_o && ffk_o >= 3'd2 : ffw_m && ffv_m;
         always_comb begin
@@ -650,6 +682,11 @@ module gpu3d_gxeng #(
             end
             if (ffv_w) begin
                 for (int k = 0; k < 3; k++) at_v[k] <= ffv_d[k];
+            end
+            // FF_TC1: TexCoords = (Raw0 T0 + Raw1 T4 + T8 + T12) >> 12 as s16, from the lanes (bits 12..27; the
+            // handler's scalar sum, mod 2^44 as lanes 1-3 keep it)
+            if (FF_TC1 && tx_k == 3'd7) begin
+                at_t[0] <= acc[27:12]; at_t[1] <= tx_t1;
             end
             if (ffw_m && fft_m) begin
                 at_t[0] <= ffd_m[15:0]; at_t[1] <= ffd_m[31:16];
@@ -872,8 +909,8 @@ module gpu3d_gxeng #(
     logic signed [31:0] ma, mb;
     // MB's next value (FF: MB3 is CurVertex's latch by row, then 0x1000 for rows 3 and 7); a1x's lane blocks take it
     // into their own input registers, beside mb
-    wire  signed [31:0] ma_n = (FF && v_opo) ? vm0_q : b_ma ? R : qa;   // MA's next value (a4's blocks take it too)
-    wire  signed [31:0] mb_n = (b_mb == MB_R) ? R : (b_mb == MB_IMM) ? imm :
+    wire  signed [31:0] ma_n = (FF && (v_opo || tx_on)) ? vm0_q : b_ma ? R : qa;   // MA's next value (a4's blocks take it too; FF_TC1: lane 0's row)
+    wire  signed [31:0] mb_n = tx_on ? tx_mb : (b_mb == MB_R) ? R : (b_mb == MB_IMM) ? imm :
                                (FF && b_mb == MB_MB3) ? (v_row[1:0] == 2'd3 ? 32'h1000 : {{16{at_v[v_row[1:0]][15]}}, at_v[v_row[1:0]]}) : qb;
     logic signed [63:0] pr;
     logic [2:0] acc_m, acc_a;
@@ -896,7 +933,7 @@ module gpu3d_gxeng #(
         mb <= mb_n;
         pr <= ma * mb;
         if (rst) begin acc_m <= ACC_NONE; acc_a <= ACC_NONE; we_m <= 1'b0; out_m <= O_NONE; end
-        else begin acc_m <= b_acc; acc_a <= acc_m; we_m <= we_o; out_m <= b_out; end
+        else begin acc_m <= tx_on ? (tx_k == 3'd1 ? 3'(ACC_VLD) : 3'(ACC_VADD)) : b_acc; acc_a <= acc_m; we_m <= we_o; out_m <= b_out; end
         sm_m <= b_xsh;
         wa_m <= wa_o;
     end
@@ -1259,6 +1296,17 @@ module gpu3d_gxeng #(
         assign vm0_q = vm_q[0];
         wire v_mvl = !rst && (acc_m == 3'(ACC_VLD) || acc_m == 3'(ACC_VLDT));
         wire v_men = v_mvl || (!rst && acc_m == 3'(ACC_VADD));
+        // FF_TC1: the lanes' rows are 16 deep (the same blocks); the sequence reads rows 4, 5, 6, 8
+        localparam int VAW = FF_TC1 ? 4 : 3;
+`ifdef GXENG_TC1_MUT
+        // mutant (simulation only): the fourth step reads T8 again instead of T12
+        wire [VAW-1:0] vr_l = tx_on ? VAW'(tx_k == 3'd4 ? 4'd6 : 4'(3 + tx_k)) : VAW'(v_row);
+`else
+        wire [VAW-1:0] vr_l = tx_on ? VAW'(tx_k == 3'd4 ? 4'd8 : 4'(3 + tx_k)) : VAW'(v_row);
+`endif
+        // lane 1's bits 12..27 of (vah << 16) + val (a1's halves)
+        wire [27:0] tx_l1 = {vah[1][11:0], 16'd0} + val[1][27:0];
+        assign tx_t1 = tx_l1[27:12];
         genvar vc;
         for (vc = 0; vc < 4; vc++) begin : g_lane
             wire rf_clip = rf_we && rf_wa[10:4] == FF_A_CLIP[10:4] && rf_wa[1:0] == 2'(vc);
@@ -1266,10 +1314,12 @@ module gpu3d_gxeng #(
             wire rf_raw  = vc < 2 && rf_we && rf_wa == FF_A_RAWTC + 11'(vc);
             wire hw_raw  = vc < 2 && ffw_m && fft_m;
             wire [15:0] hraw = ffd_m[16 * (vc % 2) +: 16];
-            wire [2:0]  wa_l = (rf_raw || hw_raw) ? 3'd7 : {rf_tex, rf_wa[3:2]};
+            // FF_TC1: row 8 (lanes 0 and 1) holds the texture matrix's T12 + lane
+            wire rf_t12  = FF_TC1 && vc < 2 && rf_we && rf_wa[10:4] == FF_A_TEX[10:4] && rf_wa[3:2] == 2'd3 && rf_wa[1:0] == 2'(vc);
+            wire [VAW-1:0] wa_l = rf_t12 ? VAW'(8) : (rf_raw || hw_raw) ? VAW'(7) : VAW'({rf_tex, rf_wa[3:2]});
             wire [31:0] wd_l = hw_raw ? {{4{hraw[15]}}, hraw, 12'd0} : rf_raw ? {rf_wd[19:0], 12'd0} : rf_wd;
-            gpu3d_lram #(.W(32), .AW(3), .FE(1'b1)) u_vm (.clk, .we(rf_clip || rf_tex || rf_raw || hw_raw), .waddr(wa_l),
-                                               .wdata(wd_l), .raddr(v_row), .rdata(vm_q[vc]));
+            gpu3d_lram #(.W(32), .AW(VAW), .FE(1'b1)) u_vm (.clk, .we(rf_clip || rf_tex || rf_raw || hw_raw || rf_t12), .waddr(wa_l),
+                                                          .wdata(wd_l), .raddr(vr_l), .rdata(vm_q[vc]));
             // a1x: lanes 1-3's two sums in two DSP blocks each (gpu3d_lmac: altera_mult_add with its accumulator),
             // operands taken as vma and mb are, stepped in M: VLD/VLDT load the products, VADD adds them
             if (vc != 0) begin : g_mac
@@ -1287,7 +1337,7 @@ module gpu3d_gxeng #(
 `ifndef SYNTHESIS
             // synthesis translate_off
             always_ff @(posedge clk)
-                if (!rst && hw_raw && (rf_clip || rf_tex || rf_raw)) $error("gpu3d_gxeng FF: lane %0d write conflict", vc);
+                if (!rst && hw_raw && (rf_clip || rf_tex || rf_raw || rf_t12)) $error("gpu3d_gxeng FF: lane %0d write conflict", vc);
             // synthesis translate_on
 `endif
         end
@@ -1351,7 +1401,7 @@ module gpu3d_gxeng #(
 `endif
     end else begin : g_novx
         assign x_vl = '0;
-        assign vx_q = '0; assign v_row = '0; assign v_opo = 1'b0; assign vm0_q = '0;
+        assign vx_q = '0; assign v_row = '0; assign v_opo = 1'b0; assign vm0_q = '0; assign tx_t1 = '0;
     end endgenerate
 
     // ------------------------------------------------------------------

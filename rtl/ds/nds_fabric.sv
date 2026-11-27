@@ -105,6 +105,7 @@ module nds_fabric #(
     input  logic        dm_cpu,
     input  logic        dm_size32,
     input  logic [31:0] dm_addr,
+    input  logic [31:0] dm_src,             // sys_dma's source register: dm_addr whenever !dm_we (the hit test's address)
     input  logic        dm_unit,            // DMA_FAST: dm_addr (main RAM) is read and the word written to dm_dst
     input  logic        dm_more,            // DMA_RA: the run goes past this unit's quad
     input  logic [31:0] dm_dst,
@@ -175,6 +176,8 @@ module nds_fabric #(
     input  logic [31:0] boot_q,
     output logic [31:0] ram_wdata,
     // I/O hub: one-cycle request, ack (with data) one or more cycles later
+    output logic        io_cart_hit,
+    output logic [2:0]  io_cart_reg,
     output logic        io_req,
     output logic        io_pre,     // io_req without the GX hold: for what only reads (the timers' visit), off g_busy's path
     output logic        io_tmr,     // io_pre on a timer (0x100-0x10F), from a register: the timers' visit (RC11 #2438: st.S_GO -> the timer RAM -1.68)
@@ -295,10 +298,19 @@ module nds_fabric #(
     logic [21:4]  lb_tag [4];
     // each line's tag against the latched address: the hit and the write
     // invalidations share these compares
+    typedef enum logic [1:0] { SD_IDLE, SD_MAIN, SD_FILL, SD_ACK } sd_t;
+    sd_t         sd_st;
+    // SD owns the memory port and excludes foreground MAIN lookups
+    // until its response has retired.
+`ifdef FAB_CAPTURE_TAG_OWNER_MUT
+    wire [21:4] tag_compare_addr = addr[21:4];
+`else
+    wire [21:4] tag_compare_addr = sd_st == SD_MAIN ? sn_addr[21:4] : addr[21:4];
+`endif
     logic [3:0]   t_eq5, t_eq;
     always_comb for (int c = 0; c < 4; c++) begin
-        t_eq5[c] = lb_tag[c][21:5] == addr[21:5];
-        t_eq[c]  = t_eq5[c] && ((DMA_B8 != 0 && c >= 2) || lb_tag[c][4] == addr[4]);
+        t_eq5[c] = lb_tag[c][21:5] == tag_compare_addr[21:5];
+        t_eq[c]  = t_eq5[c] && ((DMA_B8 != 0 && c >= 2) || lb_tag[c][4] == tag_compare_addr[4]);
     end
     wire          lb_hit = lb_v[cls] && t_eq[cls];
     logic [2:0]   fw;            // fill word (blocks: 0..7)
@@ -361,9 +373,28 @@ module nds_fabric #(
     // the other
     logic [3:0] grant;
     // DMA_RA: the DMA's request is in slot 3 (else slot 2: a hit there, or a fill)
-    wire [21:4] dm_q = {dm_addr[21:5], DMA_B8 == 0 && dm_addr[4]};      // (DMA_B8: a DMA line's tag has bit 4 clear)
-    wire d3 = DMA_RA != 0 && lb_v[3] && lb_tag[3] == dm_q;
-    wire dm_hit = !dm_we && dm_addr[31:24] == 8'h02 && ((lb_v[2] && lb_tag[2] == dm_q) || d3);
+    // the read hit from the source register (dm_src), not dm_addr: a hit needs !dm_we, where sys_dma's dm_addr is its
+    // source register, so this is the same function without sys_dma's state -> address mux in front of the tag compare
+    // (rel15 #2718 1asR: est -> m_addr -> d3 -> grant -> the request registers' load enable -0.559 ns, 37 endpoints)
+`ifdef FAB_DSRC_MUT
+    wire [21:4] dm_qs = {dm_dst[21:5], DMA_B8 == 0 && dm_dst[4]};       // (mutant: the destination's tag)
+`else
+    wire [21:4] dm_qs = {dm_src[21:5], DMA_B8 == 0 && dm_src[4]};
+`endif
+    wire d3s = DMA_RA != 0 && lb_v[3] && lb_tag[3] == dm_qs;
+    // A DMA write invalidates every matching line and never reads the
+    // selected slot. Only a read needs the source comparison for slot 3.
+`ifdef FAB_DMA_SLOT_MUT
+    wire d3 = 1'b0;  // mutant: ignore a valid slot-3 source hit
+`else
+    wire d3 = !dm_we && d3s;
+`endif
+    wire dm_hit = !dm_we && dm_src[31:24] == 8'h02 && ((lb_v[2] && lb_tag[2] == dm_qs) || d3s);
+    // synthesis translate_off
+    always_ff @(posedge clk)
+        if (!rst && dm_req && !dm_we && dm_src !== dm_addr)
+            $display("nds_fabric: ERROR: a DMA read's dm_src %h is not dm_addr %h at %0t", dm_src, dm_addr, $time);
+    // synthesis translate_on
     logic [1:0] last;
     logic sd_busy;              // the side path below is serving the sound engine
     logic ra_busy;              // DMA_RA: a read-ahead has main RAM
@@ -376,8 +407,6 @@ module nds_fabric #(
     logic [5:0] mg;                 // DMA_PMM: clocks since the last main->main read was granted (saturating)
     wire  mm_rd = !dm_cpu && !dm_we && dm_addr[31:24] == 8'h02 && dm_dst[31:24] == 8'h02;   // (ARM9 DMA: run 35)
     wire  pc_hold = pc_hold0 || (DMA_PMM != 0 && mm_rd && mg < 6'(DMA_PMM));
-    typedef enum logic [1:0] { SD_IDLE, SD_MAIN, SD_FILL, SD_ACK } sd_t;
-    sd_t         sd_st;
     logic [1:0]  sd_fw;
     logic [31:0] sd_rdata;
     // DMA_PACE gap (dm_req held off by the pace): the DMA's own CPU stays out
@@ -622,7 +651,7 @@ module nds_fabric #(
         // every line (sound writes main RAM only for capture; a dropped line
         // is refilled, so data is unchanged, and four tag compares go)
         if (sd_st == SD_MAIN && mr_ack && sn_we)
-            for (int c = 0; c < 4; c++) if (lb_tag[c] == {sn_addr[21:5], !(DMA_B8 != 0 && c >= 2) && sn_addr[4]}) lb_v[c] <= 1'b0;
+            for (int c = 0; c < 4; c++) if (t_eq[c]) lb_v[c] <= 1'b0;
         // a write elsewhere to a line being filled leaves it invalid
         if (st == S_FILL && mr_rvalid && fw[1:0] == 2'd3) begin
             // (main RAM writes are serialised through this machine, so none
@@ -744,6 +773,19 @@ module nds_fabric #(
                    addr, mc_addr, wdata, mc_wd);
     end
 `endif
+    // Sample the stable request one edge before io_req, including a DMA
+    // unit whose source phase replaced addr with its destination.
+    wire [21:0] cart_word = addr[23:2];
+`ifdef FAB_CART_ALIAS_MUT
+    wire cart_data_word = cart_word == 22'h04_0003;
+`else
+    wire cart_data_word = cart_word == 22'h04_0004;
+`endif
+    wire cart_low_word = cart_word[21:3] == 19'h0000D && cart_word[2:0] != 3'd7;
+    always_ff @(posedge clk) begin
+        io_cart_hit <= !rst && (cart_data_word || cart_low_word);
+        io_cart_reg <= cart_data_word ? 3'd4 : cart_word[2] ? 3'd5 : {1'b0, cart_word[1:0]};
+    end
     assign io_req   = io_pre && !gx_hold && !pk_hold;
     assign dx_valid = st == S_GO && ugw && dx_ready;
     assign io_cpu   = cpu;

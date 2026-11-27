@@ -32,6 +32,14 @@ module nds_g3d_ring #(
     // side busy and the needed line's read misses its composition (MKDS's
     // pre-race pan: ~20 lines a frame shown as the rear plane)
     parameter bit          RPRI = 0,
+    // WYLD (with RPRI): a line's write gives way to the needed line's read at
+    // each block boundary, not only between lines. A line write is 32 blocks
+    // into the SDRAM write FIFO, which drains only while no read waits: one
+    // that began just before the needed line's turn held its read 2,600 clk
+    // (MKDS Figure-8 in race, line 49 delivery-late with RPRI). The write
+    // resumes at its next block: W0's idle read of the staging RAM (below)
+    // then reads that block's first word
+    parameter bit          WYLD = 0,
     // NX2: once the line being composed has been swept (its 256 reads) and the
     // needed line is in, line dline+2 is read (or copied) into the swept
     // line's slot: the display asks for a line out of order when the 2D engine
@@ -118,10 +126,32 @@ module nds_g3d_ring #(
     wire  [8:0]  lead_lim = {1'b0, dline} + 9'(LEAD);
     assign y_lim = lead_lim < wdone + 9'(3 + YLAG) ? lead_lim : wdone + 9'(3 + YLAG);
     assign st_busy = st_full;
+    // the block engine's state (its steps below)
+    typedef enum logic [2:0] { E_IDLE, E_WREQ, E_WDAT, E_RREQ, E_RDAT, E_COPY, E_LCOPY } est_t;
+    est_t        est;
+    logic [4:0]  blk;               // the write's block
+    logic        w_mid;             // WYLD: the oldest staged line's write paused at block blk
     logic [9:0]  sr_a;              // the write's next word {slot, x}
     logic [22:0] st_q;
+    // W0: the staging RAM's read is registered and rg_wack may come in E_WDAT's
+    // first clock (core_top_ds: rg_wack = rg_go), so word 0 of the next line to
+    // write ({wdone[1:0], 0}) is read while the engine is idle. Before, the
+    // first word was whatever sr_a pointed at then: right only when the last
+    // operation was the previous line's write (sr_a ends on the next slot's
+    // word 0); after a staging copy it was a stale word (x = 0 of a line in
+    // SDRAM: Golden Sun's continue screen, the bottom screen's far-left column)
+`ifdef RING_W0_MUT
+    wire  [9:0]  st_ra = rg_wack ? sr_a + 10'd1 : sr_a;
+`else
+    // (WYLD: a paused write resumes at its block, so the idle read is that block's word 0)
+`ifdef G3D_WYLD_MUT
+    wire  [9:0]  st_ra = rg_wack ? sr_a + 10'd1 : est == E_IDLE ? {wdone[1:0], 8'd0} : sr_a;   // (mutant: the line's word 0)
+`else
+    wire  [9:0]  st_ra = rg_wack ? sr_a + 10'd1 : est == E_IDLE ? {wdone[1:0], WYLD && w_mid ? blk : 5'd0, 3'd0} : sr_a;
+`endif
+`endif
     gpu3d_ram #(.W(23), .AW(10)) u_stage (.clk, .we(px_valid), .waddr({px_y[1:0], px_x}),
-        .wdata(px_color), .raddr(rg_wack ? sr_a + 10'd1 : sr_a), .rdata(st_q));
+        .wdata(px_color), .raddr(st_ra), .rdata(st_q));
 
     // ---- read side: slot = line[0] (RING3: line mod 3)
     logic [2:0]  rb_v;              // slot holds rb_y's line, complete
@@ -248,11 +278,8 @@ module nds_g3d_ring #(
         end
 
     // ---- the block engine: reads first
-    typedef enum logic [2:0] { E_IDLE, E_WREQ, E_WDAT, E_RREQ, E_RDAT, E_COPY, E_LCOPY } est_t;
-    est_t        est;
     logic        drop;              // a frame started during this transfer: finish the block, keep nothing
     logic [1:0]  w_slot;
-    logic [4:0]  blk;               // the write's block
     logic [4:0]  rblk;              // the read's block
     logic [2:0]  w;
     // RPRI: a read of the needed line waits or runs (RING3: the prefetch of need+1 does not count)
@@ -279,7 +306,7 @@ module nds_g3d_ring #(
         if (rst) begin
             wdone <= 9'd0; wdone_q <= 9'd0; wsafe <= 9'd0;
             st_full <= 4'b0000; rb_v <= 3'b000; rd_on <= 1'b0; est <= E_IDLE; drop <= 1'b0; dir <= 1'b0; rb_p <= 3'b000;
-            st_pres <= 4'b0000;
+            st_pres <= 4'b0000; w_mid <= 1'b0;
         end else begin
             wdone_q <= wdone;
             if (rg_wdrained) wsafe <= wdone_q;
@@ -303,7 +330,11 @@ module nds_g3d_ring #(
                         est <= E_LCOPY;
                     // lines finish in order: the oldest staged line is wdone's
                     end else if (st_full[wdone[1:0]] && !(RPRI && r_pend)) begin
-                        w_slot <= wdone[1:0]; blk <= 5'd0; w <= 3'd0; sr_a <= {wdone[1:0], 8'd0}; est <= E_WDAT;
+                        // (WYLD: a paused write resumes at its block; w_slot is wdone[1:0] then too)
+                        w_slot <= wdone[1:0]; w <= 3'd0; w_mid <= 1'b0;
+                        blk <= WYLD && w_mid ? blk : 5'd0;
+                        sr_a <= {wdone[1:0], WYLD && w_mid ? blk : 5'd0, 3'd0};
+                        est <= E_WDAT;
                     end else if (rd_on && !drop) begin
                         est <= E_RREQ;                        // the line being read: its next block
                     end else if (cp_ok) begin
@@ -320,7 +351,7 @@ module nds_g3d_ring #(
                         if (drop) begin drop <= 1'b0; est <= E_IDLE; end
                         else if (blk == 5'd31) begin
                             st_full[w_slot] <= 1'b0; wdone <= {1'b0, st_t[w_slot], w_slot} + 9'd1; est <= E_IDLE;
-                        end
+                        end else if (WYLD && RPRI && r_pend) begin est <= E_IDLE; w_mid <= 1'b1; end
                     end
                 end
                 E_RREQ: if (rg_rack) begin rk <= 3'd0; est <= E_RDAT; end
@@ -364,7 +395,7 @@ module nds_g3d_ring #(
             if (frame_go) begin
                 wdone <= 9'd0; wdone_q <= 9'd0; wsafe <= 9'd0; st_full <= 4'b0000; rb_v <= 3'b000; rb_p <= 3'b000; dir <= 1'b0;
                 if (est == E_LCOPY) est <= E_IDLE;              // (a line-buffer copy: dropped)
-                st_pres <= 4'b0000;
+                st_pres <= 4'b0000; w_mid <= 1'b0;
                 if (est == E_COPY) begin cp_ab <= 1'b1; end    // (the copy's last clock leaves rb_v clear)
                 else if (est != E_IDLE) drop <= 1'b1;          // a request once out completes
                 else rd_on <= 1'b0;                            // a read between its blocks: dropped
@@ -466,5 +497,14 @@ module nds_g3d_ring #(
     always_ff @(posedge clk) if (!rst && px_valid && px_x == 8'd0 && st_full[px_y[1:0]])
         $error("nds_g3d_ring: staging slot %0d still holds line %0d (line %0d)", px_y[1:0], {st_t[px_y[1:0]], px_y[1:0]}, px_y);
 `endif
+`endif
+`ifndef ALTERA_RESERVED_QIS
+    // simulation: every word the write side hands the SDRAM is the staged pixel at its {slot, x}
+    logic [22:0] st_sh [1024];
+    always @(posedge clk) if (!rst) begin
+        if (rg_wreq && rg_wack && !drop && rg_wdata[22:0] !== st_sh[{w_slot, blk, w}])
+            $error("nds_g3d_ring: ring write of line %0d x %0d is %h, staged %h", {st_t[w_slot], w_slot}, {blk, w}, rg_wdata[22:0], st_sh[{w_slot, blk, w}]);
+        if (px_valid) st_sh[{px_y[1:0], px_x}] <= px_color;
+    end
 `endif
 endmodule

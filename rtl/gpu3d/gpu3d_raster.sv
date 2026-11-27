@@ -28,6 +28,11 @@ module gpu3d_raster #(
     // cycles on KH, so it is off.
     parameter bit AREA = 0,
     parameter bit VYS_M10K = 1,       // gpu3d_front VYS_M10K
+    // EDEPTH (plan-next §14 option 4a, docs/results/texpath-mkds-20261121): early depth. A copy of the top layer's
+    // depth (its top 20 bits, {slot, x}: 1,024 x 20, 2 M10K), written with the line buffers' own writes (pixels and
+    // clears), is read for the pixel at P13; a textured pixel more than the margin past it reads no texel and no
+    // palette (p14_tex off). Timing only: the pixel still goes through P20-P22's depth test unchanged
+    parameter bit EDEPTH = 0,
     // 1: linear spans step their five attributes on one stepper, one per
     // cycle (five cycles per linear pixel, see g_lser)
     parameter bit LINSER = 0,
@@ -636,7 +641,7 @@ module gpu3d_raster #(
     // values as the MLAB rings they were, ~1 LAB per 20 bits); dly_en is
     // the clocks dly_wp moves on
     wire         dly_en = adv && !rst;
-    gpu3d_dring #(.W(12), .AW(5), .D((AREA ? 17 : 21) + TXD + PXD), .K(2), .STYLE("M10K")) u_dt20 (
+    gpu3d_dring #(.W(12), .AW(5), .D((AREA ? 17 : 21) + TXD + PXD), .K(2), .STYLE("MLAB")) u_dt20 (   // (rc15f room: an MLAB column, its M10K to the ARM9 register file; the same registered read)
         .clk, .we(adv), .en(dly_en), .wp(dly_wp), .wdata({LOV && wk_tag.lp, wk_tag.covrst, wk_tag.part, wk_tag.x}),
         .rdata(dt_x20));
     // RMERGE: u_dt10 shares an M10K with u_dz (g_rmz)
@@ -1346,8 +1351,23 @@ module gpu3d_raster #(
     logic [QA:0]   tq_n_a, tq_n_s, pq_n_a, pq_n_s;
     logic [15:0] tq_h0, pq_h0;
     wire        fq_rst = rst || frame_go;
+    // The texel queue's head in a register (tq_hq = the word at tq_rd), the MLAB read a slot ahead (tq_rd + 1): the
+    // head reaches tx_npal -> hold17 -> adv from a flop, not through the MLAB's read (#2837: u_tq rdaddr -> u_pq
+    // rdaddr -0.251 ns). Its next value by the cycle's pop (adv's late select at the last mux): the slot after, or
+    // itself; the word written this cycle when it lands on that slot (the MLAB shows a write from the next cycle)
+    logic [15:0] tq_hq, tq_m1;
+    wire  [QA-1:0] tq_rd1 = tq_rd + 1'b1;
+    wire  tq_we = tex_valid && !fq_rst;
     gpu3d_lram #(.W(16), .AW(QA), .FE(QFE)) u_tq (
-        .clk, .we(tex_valid && !fq_rst), .waddr(tq_wr), .wdata(tex_data), .raddr(tq_rd), .rdata(tq_h0));
+        .clk, .we(tq_we), .waddr(tq_wr), .wdata(tex_data), .raddr(tq_rd1), .rdata(tq_m1));
+    assign tq_h0 = tq_hq;
+`ifndef SYNTHESIS
+    // the head against the old read (the word at tq_rd) whenever the queue holds one
+    logic [15:0] tq_sh [0:(1 << QA) - 1];
+    always_ff @(posedge clk) if (tq_we) tq_sh[tq_wr] <= tex_data;
+    always_ff @(posedge clk) if (!rst && tq_n != '0 && tq_hq != tq_sh[tq_rd])
+        $fatal(1, "gpu3d_raster: texel queue head %04x != the word at tq_rd %0d (%04x)", tq_hq, tq_rd, tq_sh[tq_rd]);
+`endif
     gpu3d_lram #(.W(16), .AW(QA), .FE(QFE)) u_pq (
         .clk, .we(pal_valid && !fq_rst), .waddr(pq_wr), .wdata(pal_data), .raddr(pq_rd), .rdata(pq_h0));
     // a pixel that needs two entries takes the first one a cycle early
@@ -1825,6 +1845,90 @@ module gpu3d_raster #(
             end else begin t17_d1 <= t17_g1; t17_d2 <= t17_g2; end
         end
 
+    // ---------------- early depth (EDEPTH) ----------------
+    // The copy is read one clock ahead: its address is the P12 pixel's when the pipeline advances, else the P13
+    // pixel's, so its registered output belongs to the pixel in P13. The P12 pixel's {lp, x} comes from a 9-bit MLAB
+    // ring beside u_dt20 (stage k's copy at dly_wp - (k + 1)); the P13 pixel's is that tap registered on adv.
+    // Exact (every skipped pixel fails its depth test at P21): the pixels between P13 and the write (at most
+    // 9 + TXD + PXD) can only lower the stored depth, or raise it by 1 each in the +-1 face windows, inside the
+    // margin; the equal-depth mode (attr[14]) never skips; masks and shadow polygons read no texel anyway. A read
+    // whose address the same clock's write hit, or whose slot changed by the use (a line change), does not skip.
+    logic ed_skip13;
+    generate if (EDEPTH) begin : g_ed
+        localparam int EDB = 20;                     // copy bits (the depth's top 20; 10 / 13 fail Burnout / GS)
+        localparam int EW = EDB + 1;
+        // a top pixel with edge flags (AA / edge marking) lets a pixel pass on the lower layer (P21's t_bot_ba), so
+        // without NOBOT it is stored as never hiding anything (all ones)
+        wire  [23:0] ed_wz = (!NOBOT && lbt_wdata[50:47] != 4'd0)   /* the packed attribute's bits 3-0 */ ? 24'hFFFFFF : e_depth(lbt_wdata);
+        logic [8:0]  ed_x12, ed_x13;                 // {lp, x} at P12 (the ring tap) and P13
+        gpu3d_lram #(.W(9), .AW(5)) u_edx (.clk, .we(adv), .waddr(dly_wp), .wdata({LOV && wk_tag.lp, wk_tag.x}),
+            .raddr(dly_wp - 5'd13), .rdata(ed_x12));
+        always_ff @(posedge clk) if (adv) ed_x13 <= ed_x12;
+        function automatic logic [1:0] ed_sl(input logic lp);
+            ed_sl = (!LOV || lp == y[0]) ? s_cur : s_prev;
+        endfunction
+        wire  [8:0]  ed_xr = adv ? ed_x12 : ed_x13;  // the pixel P13 holds next clock
+        wire  [9:0]  ed_ra = {ed_sl(ed_xr[8]), ed_xr[7:0]};
+        logic [EDB-1:0] ed_q;
+        gpu3d_lram #(.W(EDB), .AW(10), .SY(1'b1)) u_edc (.clk, .we(lbt_we), .waddr(lbt_waddr),
+            .wdata(ed_wz[23 -: EDB]), .raddr(ed_ra), .rdata(ed_q));
+        logic        ed_col;                         // that read's address was written the same clock
+        logic [1:0]  ed_slq;
+        always_ff @(posedge clk) begin
+            ed_col <= lbt_we && lbt_waddr == ed_ra;
+            ed_slq <= ed_ra[9:8];
+        end
+        // hidden: z > stored + 1 + margin / 16 (the margin 64, rounded up to the copy's resolution)
+        wire  [EDB:0] ed_z = {1'b0, p13_z[23 -: EDB]};
+`ifdef G3D_EDEPTH_MUT
+        wire          ed_hid = ed_z > {1'b0, ed_q} - EW'(4096);  // (mutant: skips pixels up to 2^16 in front, which pass)
+`else
+        wire          ed_hid = ed_z > {1'b0, ed_q} + EW'(5);
+`endif
+        assign ed_skip13 = T13.v && !T13.ghost && s_textured(d13) && !s_mask(d13) && !d13.attr[14] &&
+                           !(FEAT_SHADOW && d13.attr[5:4] == 2'd3) &&   // (a shadow polygon may test the lower layer)
+                           !ed_col && ed_slq == ed_sl(ed_x13[8]) && ed_hid;
+`ifndef SYNTHESIS
+        initial if (LB2) $error("gpu3d_raster EDEPTH: the copy follows the slot RAMs (LB2 0): {slot, x}, three (TR3) or four slots");
+`endif
+`ifndef ALTERA_RESERVED_QIS
+        // the check (as the +edepth model's): the ring's x against u_dt20's at P20, and every skipped pixel fails
+        // its depth test at P21; +edstat prints the skips per frame
+        localparam int ED_S20 = (AREA ? 16 : 20) + TXD + PXD;
+        bit          ed_st; initial ed_st = $test$plusargs("edstat");
+        logic [8:0]  ed_hx [0:63];
+        longint      ed_n = 0, ed_px = 0, ed_sk_n = 0;
+        bit          ed_sk [longint];
+        initial for (int i = 0; i < 64; i++) ed_hx[i] = '0;
+        final if (ed_st) $display("edepth: textured px %0d, skipped %0d (at the end)", ed_px, ed_sk_n);
+        always_ff @(posedge clk) if (!rst) begin
+            if (ed_st && frame_go) begin
+                $display("edepth: textured px %0d, skipped %0d", ed_px, ed_sk_n);
+                ed_px = 0; ed_sk_n = 0;
+            end
+            if (adv) begin
+                if (T13.v && !T13.ghost && s_textured(d13) && !s_mask(d13)) begin ed_px++; if (ed_skip13) ed_sk_n++; end
+                if (T13.v) ed_sk[ed_n - 14] = ed_skip13;
+                if (T13.v && ed_hx[13] != ed_x13) $error("gpu3d_raster EDEPTH: the P13 x %h differs from its history %h", ed_x13, ed_hx[13]);
+                for (int k = 63; k > 0; k--) ed_hx[k] <= ed_hx[k - 1];
+                ed_hx[0] <= {LOV && wk_tag.lp, wk_tag.x};
+                ed_n <= ed_n + 1;
+            end
+            if (T20.v && ed_hx[ED_S20] != {dt_x20[11], dt_x20[7:0]})
+                $error("gpu3d_raster EDEPTH: stage history differs from u_dt20 at P20 (%h vs %h)", ed_hx[ED_S20], {dt_x20[11], dt_x20[7:0]});
+            if (T21.v && !T21.ghost) begin
+                longint q; q = ed_n - 2 - ED_S20;
+                if (ed_sk.exists(q)) begin
+                    if (ed_sk[q] && dt_pass) $error("gpu3d_raster EDEPTH: a pixel skipped at P13 passed the depth test at P21");
+                    ed_sk.delete(q);
+                end
+            end
+        end
+`endif
+    end else begin : g_ned
+        assign ed_skip13 = 1'b0;
+    end endgenerate
+
     // ---------------- stalls ----------------
     // P15: a 4x4 texel needs two texture reads (two cycles)
     wire p15_need = T15.v && !T15.ghost && p15_ntex != 2'd0;
@@ -1859,6 +1963,15 @@ module gpu3d_raster #(
     wire tq_pa = take17 || p17_rd;
 `endif
     wire pq_pa = take19 || p19_need;
+    // the texel queue's registered head (u_tq above)
+    wire  tq_pnow = adv ? tq_pa : take17;               // this cycle's pop (tq_rd's next value is tq_rd + tq_pnow)
+`ifdef G3D_TQH_MUT
+    wire  [15:0] tq_hp = (tq_we && tq_wr == tq_rd) ? tex_data : tq_m1;     // (mutant: the bypass on the wrong slot)
+`else
+    wire  [15:0] tq_hp = (tq_we && tq_wr == tq_rd1) ? tex_data : tq_m1;
+`endif
+    wire  [15:0] tq_hs = (tq_we && tq_wr == tq_rd) ? tex_data : tq_hq;
+    always_ff @(posedge clk) tq_hq <= tq_pnow ? tq_hp : tq_hs;
     assign tq_rd_a = tq_rd + QA'(tq_pa);  assign tq_rd_s = tq_rd + QA'(take17);
     assign pq_rd_a = pq_rd + QA'(pq_pa);  assign pq_rd_s = pq_rd + QA'(take19);
     assign tq_n_a = tq_n + QN'(tex_valid) - QN'(tq_pa);  assign tq_n_s = tq_n + QN'(tex_valid) - QN'(take17);
@@ -2014,7 +2127,7 @@ module gpu3d_raster #(
                 // P14: toon, texture address
                 p14_toon_a <= DS_TOON ? tv13[8:4] : p13_av[0][8:4];
                 p14_sw <= tx_sw; p14_tw <= tx_tw;
-                p14_tex <= !(T13.ghost || !s_textured(d13) || s_mask(d13));
+                p14_tex <= !(T13.ghost || !s_textured(d13) || s_mask(d13) || ed_skip13);
                 // P15: texture request(s); a 4x4 texel reads the texel word
                 // (during hold15), then the slot-1 palette info
                 p15_ta <= tx_a; p15_ss <= p14_sw[1:0];

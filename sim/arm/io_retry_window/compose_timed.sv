@@ -431,7 +431,7 @@ module tb_arm #(parameter int PHASE=0, parameter bit REPLAY=0, parameter int ARM
     .a9_req,.a9_we,.a9_addr,.a9_be,.a9_wdata,.a9_ack,.a9_rdata,.a9_tmr,.a9_ldm(1'b0),.a9_n8,.a9_rvalid(),.a9_wnext(),
     .a7_req,.a7_we,.a7_addr,.a7_be,.a7_wdata,.a7_ack,.a7_rdata,.a7_n4(1'b0),.a7_rvalid(),
     .sn_req(1'b0),.sn_we(1'b0),.sn_addr(32'd0),.sn_wdata(32'd0),.sn_n4(1'b0),.sn_ack(),.sn_rdata(),.sn_rvalid(),
-    .dm_req(1'b0),.dm_we(1'b0),.dm_cpu(1'b0),.dm_size32(1'b1),.dm_addr(32'd0),.dm_wdata(32'd0),.dm_ack(),.dm_rdata(),.dm_vcut(1'b0),.dm_unit(1'b0),.dm_more(1'b0),.dm_wgroup(1'b0),.dm_last(1'b0),.dm_dst(32'd0),
+    .dm_req(1'b0),.dm_we(1'b0),.dm_cpu(1'b0),.dm_size32(1'b1),.dm_addr(32'd0), .dm_src(32'd0),.dm_wdata(32'd0),.dm_ack(),.dm_rdata(),.dm_vcut(1'b0),.dm_unit(1'b0),.dm_more(1'b0),.dm_wgroup(1'b0),.dm_last(1'b0),.dm_dst(32'd0),
     .dx_valid(),.dx_ready(1'b1),.dx_idle,
     .mr_req(),.mr_we(),.mr_addr(),.mr_be(),.mr_wdata(),.mr_n8(),.mr_if4(),.mr_dmaw(),.mr_wgroup(),.mr_wlast(),.mr_ack(1'b0),.mr_rvalid(1'b0),.mr_wnext(1'b0),.mr_rdata(32'd0),
     .fx_req(),.fx_we(),.fx_addr(),.fx_be(),.fx_wdata(),.fx_done(1'b1),.fx_rdata(32'h8951ab3c),.boot_addr(),.boot_q(32'd0),.ram_wdata(),

@@ -242,6 +242,8 @@ module tb_ds_pocket;
         begin
             integer rot;
             if ($value$plusargs("rotation=%d", rot)) write_reg(32'h5000_0010, rot);
+            // +aspect=N: the Core Setting "Aspect Ratio" (0 Original, 1 Fill Screen: slot 6 stacked, 7 one screen)
+            if ($value$plusargs("aspect=%d", rot)) write_reg(32'h5000_002C, rot);
             // +gest_a/b/x/y=N: the Core Settings "A/B/X/Y in Touch Mode" (tools/ds/settings.py)
             if ($value$plusargs("gest_a=%d", rot)) write_reg(32'h5000_001C, rot);
             if ($value$plusargs("gest_b=%d", rot)) write_reg(32'h5000_0020, rot);
@@ -1009,6 +1011,7 @@ module tb_ds_pocket;
 `ifdef TB_PROBES   // sim/pocket_ds/run.py: the probes' files (+dmapath, +oamlog) on its include path
     `include "dma_path.svh"
     `include "oam_log.svh"
+    `include "mk_gx.svh"
 `endif
 
 `ifdef RASTER_OBSERVER
@@ -1146,6 +1149,7 @@ module tb_ds_pocket;
     // +bustrace=FILE, +dmapath, +ringelide, +blkpath
 `ifdef TB_PROBES   // run.py's include path (prequeue's full-chip lint has none)
     `include "g2d_why.svh"
+    `include "g2d_coh.svh"
     `include "bus_census.svh"
     `include "ring_elide.svh"
     `include "blk_path.svh"

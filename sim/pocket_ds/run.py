@@ -113,6 +113,8 @@ def main():
     ap.add_argument('--touchtest', type=int, help='DS frame: SELECT+L, then hold RIGHT and DOWN (TOUCH PASS/FAIL)')
     ap.add_argument('--swatch', help='hex SDRAM word address: log bridge data and SDRAM writes of its 8 words')
     ap.add_argument('--line-stats', type=int, help='DS frame: per-line VRAM blocks and busy cycles')
+    ap.add_argument('--define', action='append', default=[], metavar='NAME',
+                    help='a simulation define (+define+NAME), e.g. G2D_ABL_BLK for an ablation; builds into its own obj')
     ap.add_argument('--cwatch', help='hex ROM offset: log card reads of its 64-byte window')
     ap.add_argument('--sav', help='a .sav for slot 10, loaded before the core starts (docs/saves.md)')
     ap.add_argument('--sav-out', help='at the end, quit as the Pocket does and write the exported save here')
@@ -126,7 +128,7 @@ def main():
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     obj = (Path(a.obj_root).resolve() if a.obj_root else out) / (('obj_fst' if a.fst else 'obj') + (f'_t{a.threads}' if a.threads != 1 else '') + ('_nodebug' if a.nodebug else '')
-                 + ('_import' if a.imp else '') + ''.join('_' + p.replace('=', '') for p in a.core_param))
+                 + ('_import' if a.imp else '') + ''.join('_' + p.replace('=', '') for p in a.core_param) + ''.join('_D' + d for d in a.define))
     rom_aw = max(24, (Path(a.rom).stat().st_size - 1).bit_length() - 2)     # the tb's ROM image: 64 MiB, or larger
     if rom_aw > 24:
         obj = obj.with_name(obj.name + f'_rom{rom_aw}')
@@ -144,7 +146,7 @@ def main():
            *(['-DRING_GEN'] if a.ringgen is not None else []),
            *([f'-GSLOTS={a.slots}'] if a.slots else []), *(['+define+NODEBUG'] if a.nodebug else []), *(['+define+IMPORT'] if a.imp else []),
            *(['+define+TB_CORE_PARAMS=' + ''.join(f', .{n}({v})' for n, v in (p.split('=', 1) for p in a.core_param))] if a.core_param else []), *(['+define+DIAG_MON'] if 'DIAG=1' in a.core_param else []), *(['+define+NO_SCPU'] if 'SHELL_CPU=0' in a.core_param else []), f'-GROM_AW={rom_aw}', '--threads', str(a.threads), *(['-GPREFETCH=0'] if a.no_prefetch else []),
-           '-I' + str(rtl / 'pocket'), '-I' + str(ROOT / 'sim/pocket_ds'), '+define+TB_PROBES', '--Mdir', str(obj), *srcs]
+           '-I' + str(rtl / 'pocket'), '-I' + str(ROOT / 'sim/pocket_ds'), '+define+TB_PROBES', *[f'+define+{d}' for d in a.define], '--Mdir', str(obj), *srcs]
     # one build at a time on this machine, with 12 GB free (AGENTS.md: three at once ran the Desktop out of memory)
     lock = Path.home() / '.cache/nds-sim-build.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)

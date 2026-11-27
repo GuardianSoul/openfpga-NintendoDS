@@ -76,6 +76,12 @@ pkw2-load   pkw2.nds       pkw2-load.mln    32     -      -      known  hold=DOW
 burnout-race   burnout.nds  burnout-race.mln   16  -  -  known  hold=A
 burnout-forest burnout.nds  burnout-forest.mln 16  -  -  known  hold=A
 gsdd-battle   gsdd.nds       exports/gsdd-battle-clean 10 0    15398
+# the maintainer 2026-11-23 (RC15e): the battle's top screen flickers "when it displays the stats of the characters in the party": the
+# party status panel (portraits, HP/PP, element stats) during command selection; gsdd-battle + A at 30, 90, 150, saved at 240
+gsdd-stats   gsdd.nds       gsdd-stats.mln 40     -      -
+# the maintainer 2026-11-23 (RC15e): "the 3D battle also flickers slightly on camera pans": gsdd-battle + A at 30-440 (Fight, Attack,
+# targets), saved at 480, just before Karis's and Matthew's attacks pan the camera (melonDS frames 490-690 after gsdd-battle)
+gsdd-pan     gsdd.nds       gsdd-pan.mln   64     -      -
 # burnout-city (2026-11-11): burnout-race.mln with A held 210 frames (census --save-state-at 210): the city section at 98 mph, rivals and traffic ahead, the race camera
 burnout-city   burnout.nds  burnout-city.mln   16  -  -  known  hold=A
 burnout-race0  burnout.nds  burnout-race0.mln  16  -  -  known  hold=A

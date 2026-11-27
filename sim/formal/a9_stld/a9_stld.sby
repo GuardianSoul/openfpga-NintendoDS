@@ -1,0 +1,25 @@
+[tasks]
+bmc
+prove
+
+[options]
+bmc: mode bmc
+bmc: depth 30
+prove: mode prove
+
+[engines]
+bmc: smtbmc yices
+prove: abc pdr
+
+[script]
+plugin -i slang
+read_slang -D FORMAL -D SYNTHESIS --allow-use-before-declare --top fv_a9_stld arm_pkg.sv arm_thumb.sv arm9_core.sv fv_a9_stld.sv
+prep -top fv_a9_stld
+memory_map
+opt -fast
+
+[files]
+../../../rtl/arm/arm_pkg.sv
+../../../rtl/arm/arm_thumb.sv
+../../../rtl/arm/arm9_core.sv
+fv_a9_stld.sv

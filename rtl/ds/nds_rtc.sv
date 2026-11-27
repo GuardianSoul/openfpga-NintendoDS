@@ -128,7 +128,7 @@ module nds_rtc #(
     logic        rm_we;
     logic [3:0]  rm_wa, rm_ra;
     logic [7:0]  rm_wd, rq;
-    (* ramstyle = "M10K" *) logic [7:0] rm [0:15];   // (M10K: the chip is short of LABs)
+    (* ramstyle = "MLAB" *) logic [7:0] rm [0:15];   // (MLAB, its read registered in logic: the M10K goes to the 3D early depth, rel15 RAM chain; was M10K for LABs)
     // sequences: the second count (K_*), the reset clear; every field a RAM byte, one BCD incrementer (k_inc)
     // on the byte read in the step before: second, minute, hour, then on a new day the month and year read
     // for the month's length (K_MOR, K_YRR), day of week, day, month, year

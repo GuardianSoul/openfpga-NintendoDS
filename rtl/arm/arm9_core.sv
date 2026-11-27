@@ -42,6 +42,8 @@ module arm9_core import arm_pkg::*; #(
   input  logic [31:0] i_rdata,
   output logic        i_hsel,           // f1_pc[1]: the answer's halfword arm9_mem returns on i_rhw
   input  logic [15:0] i_rhw,            // i_rdata's halfword by i_hsel, with arm9_mem's way select last (#2566)
+  input  logic [4:0]  i_rcls,
+  input  logic [6:0]  i_rtop,           // thumb_top(i_rhw): u_thumb's kind and arm[31:28], decoded per way (RC13b)           // thumb_class(i_rhw), decoded per way in arm9_mem (#2570)
   input  logic        i_ok,
   input  logic        i_abort,
 
@@ -54,6 +56,8 @@ module arm9_core import arm_pkg::*; #(
   output logic [31:0] d_addr,
   output logic [31:0] d_wdata,
   input  logic [31:0] d_rdata,
+  input  logic [31:0] d_lw_it, d_lw_dt, d_lw_rs,   // d_rdata's sources (arm9_mem): d_ls_it ? it : d_ls_dt ? dt : rs
+  input  logic        d_ls_it, d_ls_dt,
   input  logic        d_ok,
   input  logic        d_abort,
   input  logic [1:0]  d_wait,
@@ -74,11 +78,7 @@ module arm9_core import arm_pkg::*; #(
 );
   localparam logic [2:0] TK_ARM = 3'd0, TK_B = 3'd1, TK_BL1 = 3'd2, TK_BL2 = 3'd3,
                          TK_BLX2 = 3'd4, TK_UND = 3'd5;
-  localparam logic [4:0] C_DP = 5'd0, C_MRS = 5'd1, C_MSR = 5'd2, C_MUL = 5'd3, C_MULL = 5'd4,
-                         C_SWP = 5'd5, C_HW = 5'd6, C_BX = 5'd7, C_BLXR = 5'd8, C_CLZ = 5'd9,
-                         C_QOP = 5'd10, C_SMUL = 5'd11, C_BKPT = 5'd12, C_SDT = 5'd13,
-                         C_BLK = 5'd14, C_B = 5'd15, C_BLXI = 5'd16, C_SWI = 5'd17, C_CP = 5'd18,
-                         C_UND = 5'd19, C_NOP = 5'd20, C_TBR = 5'd21;
+  // (the uop classes C_* and thumb_class: arm_pkg, shared with arm9_mem's per-way Thumb class)
   localparam logic [2:0] CS_OLD = 3'd0, CS_R0 = 3'd1, CS_R31 = 3'd2, CS_X31 = 3'd3, CS_ZERO = 3'd4;
 
   // One uop (arm_core's uop_t without the barrel's fields, with this core's)
@@ -200,6 +200,11 @@ module arm9_core import arm_pkg::*; #(
   logic        ep;                     // redirect epoch: answers of older requests are dropped
   logic        i_one;                  // after a refused fetch: one at a time until one is taken
   logic [1:0]  q_n;                    // queue entries
+  // Entry 0 (the head, read by D) is slot 0. Entries 1 and 2 are slots 1 and 2 as a ring: q_rp picks the slot that holds
+  // entry 1. The answer goes into its slot from q_n and q_rp alone (registers), so the pop reaches only the head's
+  // slot, q_rp and the count: ARM9 slack family A (#2749: d_ok -> stall -> pop -> the shift queue's write slot
+  // n = q_n - pop -> the enables of entry 1, q_w[1] -7.71 / q_hw[1] -4.33 of its -15.8 deficit)
+  logic        q_rp;
   logic [31:0] q_w  [0:2];
   logic [31:0] q_hpc;                   // the head's PC: the entries are consecutive from the last redirect
   logic        q_th [0:2];
@@ -264,7 +269,13 @@ module arm9_core import arm_pkg::*; #(
                f1_pc[1] ? i_rdata[31:16] : i_rdata[15:0], $time);
   // synthesis translate_on
   arm_thumb u_thumb (.hw(a_hw), .v5(1'b1), .arm(tx_arm), .kind(tx_kind), .boff(tx_boff), .pcalign(tx_pcalign));
-  assign a_ins = f1_th ? tx_arm : i_rdata;
+  // the condition field from arm9_mem's per-way decode (i_rtop), the rest from u_thumb (RC13b #2611 -0.510 ns)
+  assign a_ins = f1_th ? {i_rtop[3:0], tx_arm[27:0]} : i_rdata;
+  // synthesis translate_off
+  always_ff @(posedge clk)
+    if (!rst && f_take && f1_th && i_rtop !== {tx_kind, tx_arm[31:28]})   // (a refused answer reads 0)
+      $display("arm9_core: ERROR: i_rtop %h is not u_thumb's kind / condition %h at %0t", i_rtop, {tx_kind, tx_arm[31:28]}, $time);
+  // synthesis translate_on
   assign f_hw  = q_hw[0];
 
   function automatic logic [4:0] arm_class(input logic [31:0] ins);
@@ -317,39 +328,6 @@ module arm9_core import arm_pkg::*; #(
     return cls;
   endfunction
 
-  function automatic logic [4:0] thumb_class(input logic [15:0] hw);
-    logic [4:0] cls;
-    cls = C_DP;
-    case (hw[15:13])
-      3'b000, 3'b001: cls = C_DP;
-      3'b010: begin
-        if (hw[12:10] == 3'b000)      cls = (hw[9:6] == 4'hD) ? C_MUL : C_DP;
-        else if (hw[12:10] == 3'b001) cls = (hw[9:8] != 2'b11) ? C_DP : (hw[7] ? C_BLXR : C_BX);
-        else if (hw[12:11] == 2'b01)  cls = C_SDT;
-        else                          cls = hw[9] ? C_HW : C_SDT;
-      end
-      3'b011: cls = C_SDT;
-      3'b100: cls = hw[12] ? C_SDT : C_HW;
-      3'b101: begin
-        if (!hw[12])                     cls = C_DP;
-        else if (hw[11:8] == 4'b0000)    cls = C_DP;
-        else if (hw[10:9] == 2'b10)      cls = C_BLK;
-        else if (hw[11:8] == 4'b1110)    cls = C_BKPT;
-        else                             cls = C_UND;
-      end
-      3'b110: begin
-        if (!hw[12])                 cls = C_BLK;
-        else if (hw[11:8] == 4'hF)   cls = C_SWI;
-        else if (hw[11:8] == 4'hE)   cls = C_UND;
-        else                         cls = C_TBR;
-      end
-      default: begin
-        if (hw[12:11] == 2'b01) cls = !hw[0] ? C_TBR : C_UND;
-        else                    cls = C_TBR;
-      end
-    endcase
-    return cls;
-  endfunction
 
   function automatic logic [4:0] popcnt16(input logic [15:0] x);
     logic [4:0] n;
@@ -364,7 +342,15 @@ module arm9_core import arm_pkg::*; #(
     return r;
   endfunction
 
-  assign a_cls = f1_th ? thumb_class(a_hw) : arm_class(i_rdata);
+  // the Thumb class from arm9_mem (i_rcls: decoded from each way's halfword in parallel with the tag compare and
+  // selected by the hits, RC12c-full #2570 7asR I-tag -> way -> i_rhw -> thumb_class -> q_cls -1.044 ns); the same
+  // as thumb_class(a_hw), checked below
+  assign a_cls = f1_th ? i_rcls : arm_class(i_rdata);
+  // synthesis translate_off
+  always_ff @(posedge clk)
+    if (!rst && i_rcls !== thumb_class(a_hw))
+      $display("arm9_core: ERROR: i_rcls %0d is not the halfword's Thumb class %0d at %0t", i_rcls, thumb_class(a_hw), $time);
+  // synthesis translate_on
 
   // D's sequencer, the Thumb BL prefix, the instruction's class and target
   logic [1:0]  ustep;
@@ -1099,6 +1085,14 @@ module arm9_core import arm_pkg::*; #(
     (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rfm0 [0:31];
     (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rfm1 [0:31];
     (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rfm2 [0:31];
+    // the three reads as kept nets, so the operand registers rf_a / rf_b / rf_c stay fabric flip-flops the fitter can
+    // place beside the shifter and adder and duplicate, not the MLABs' own output registers (rel15f block #2790: all
+    // 46 failing m_wd endpoints from rfm1's dataout_reg[10] -> e_b -> rotator -> adder, +0.146 ns; forwarded flops on
+    // the same cone are all above +1.0). The same values, the same cycles
+    (* keep = 1 *) logic [31:0] rd_a, rd_b, rd_c;
+    assign rd_a = rfm0[u.ra];
+    assign rd_b = rfm1[u.rb];
+    assign rd_c = rfm2[u.rc];
     always_ff @(posedge clk) begin
       if (rf_we) begin
         rfm0[rf_wa] <= rf_wd;
@@ -1106,9 +1100,9 @@ module arm9_core import arm_pkg::*; #(
         rfm2[rf_wa] <= rf_wd;
       end
       if (rf_re) begin
-        rf_a <= rfm0[u.ra];
-        rf_b <= rfm1[u.rb];
-        rf_c <= rfm2[u.rc];
+        rf_a <= rd_a;
+        rf_b <= rd_b;
+        rf_c <= rd_c;
       end
     end
   end else begin : g_rfk
@@ -1146,7 +1140,29 @@ module arm9_core import arm_pkg::*; #(
   logic        m_fw;                   // M's write value is known (not a load or product)
   logic [31:0] w_wd;
   logic        w_fw;
-  assign e_exec = eu.valid && cond_pass(eu.cond, cpsr[31:28]) && !m_rdr && !w_rdr;
+  // Decode the condition with D's uop. The flags must still be live in E.
+  logic [14:0] e_condition;
+  wire e_n = cpsr[31], e_cc = cpsr[29], e_vflag = cpsr[28];
+`ifdef ARM9_COND_STALE_Z_MUT
+  logic delayed_z;
+  always_ff @(posedge clk) delayed_z <= !rst && cpsr[30];
+  wire e_eq_z = delayed_z;
+`else
+  wire e_eq_z = cpsr[30];
+`endif
+  wire e_hi = e_cc && !cpsr[30];
+  wire e_ge = e_n == e_vflag;
+  wire e_gt = e_ge && !cpsr[30];
+  wire [14:0] e_predicates = {1'b1, !e_gt, e_gt, !e_ge, e_ge, !e_hi, e_hi,
+                             !e_vflag, e_vflag, !e_n, e_n, !e_cc, e_cc, !e_eq_z, e_eq_z};
+  assign e_exec = eu.valid && (|(e_condition & e_predicates)) && !m_rdr && !w_rdr;
+`ifndef SYNTHESIS
+  always_ff @(posedge clk)
+    if (!rst && eu.valid && !m_rdr && !w_rdr &&
+        e_exec !== cond_pass(eu.cond, cpsr[31:28]))
+      $error("arm9_core: live condition mismatch pc=%h cond=%h flags=%h redirect=%b fetch=%h",
+             eu.pc, eu.cond, cpsr[31:28], e_rdr, i_addr);
+`endif
   assign e_live = e_exec && !stall;
 
   function automatic logic [31:0] fwd(input logic [4:0] r, input logic [31:0] rf);
@@ -1202,7 +1218,14 @@ module arm9_core import arm_pkg::*; #(
   // w_wd from w_wd's input (RC11 #2438 / #2450 7asR: w_wd -> e_b -> shifter -> a_off -> address adder -> the ITCM
   // address, -1.47 / -1.39 ns; w_wd's fanout and the select's AND leave the path). Checked against oh_b[2] & w_wd
   logic [31:0] e_bw;
-  assign e_b_o = ohpick({oh_b[4:3], 1'b0, oh_b[1], 1'b0}, 32'h0, kconst) | e_bw;
+  // e_bw is loaded unmasked and masked here by oh_b[2] (registered beside it): the select's compare left D's path
+  // into e_bw's 32 enables (rc15f #2846 5asR: q_cls -> decode -> rb -> fsel -> e_bw's mask, -0.072 ns); e_b_o's
+  // inputs are all registers, so the register file still enters e_b at the last level
+`ifdef ARM9_EBWM_MUT
+  assign e_b_o = ohpick({oh_b[4:3], 1'b0, oh_b[1], 1'b0}, 32'h0, kconst) | ({32{oh_b[1]}} & e_bw);   // (mutant: the M select)
+`else
+  assign e_b_o = ohpick({oh_b[4:3], 1'b0, oh_b[1], 1'b0}, 32'h0, kconst) | ({32{oh_b[2]}} & e_bw);
+`endif
   assign e_c_o = ohpick({oh_c[4:1], 1'b0}, 32'h0, eu.pcv_c);
   assign e_a = oh_a[0] ? rf_a : e_a_o;
   assign e_b = oh_b[0] ? rf_b : e_b_o;
@@ -1218,8 +1241,8 @@ module arm9_core import arm_pkg::*; #(
                              e_c !== ohpick(oh_c, rf_c, eu.pcv_c)))
       $error("arm9_core: operand mux differs from the one-hot AND-OR (selects %b %b %b, pc %h)", oh_a, oh_b, oh_c, eu.pc);
   always_ff @(posedge clk)
-    if (!rst && e_bw !== (oh_b[2] ? w_wd : 32'h0))
-      $error("arm9_core: port B's W register %h, oh_b[2] & w_wd %h (pc %h)", e_bw, oh_b[2] ? w_wd : 32'h0, eu.pc);
+    if (!rst && oh_b[2] && e_bw !== w_wd)
+      $error("arm9_core: port B's W register %h, w_wd %h (pc %h)", e_bw, w_wd, eu.pc);
   always_ff @(posedge clk)
     if (!rst && eu.valid && kconst !== (kb_imm ? eu.imm : eu.pcv))
       $error("arm9_core: kconst %h, port B's constant %h (pc %h)", kconst, kb_imm ? eu.imm : eu.pcv, eu.pc);
@@ -1310,13 +1333,14 @@ module arm9_core import arm_pkg::*; #(
 
   logic [31:0] x_rot, sh_out, e_ad;
   logic        sh_c, sh_cold, qsat_d;
+  logic [31:0] x_rot4;                 // x_rot before its last stage (sh_rot[0]), for the address offset
   always_comb begin
-    x_rot = e_b;
-    if (sh_rot[4]) x_rot = {x_rot[15:0], x_rot[31:16]};
-    if (sh_rot[3]) x_rot = {x_rot[7:0],  x_rot[31:8]};
-    if (sh_rot[2]) x_rot = {x_rot[3:0],  x_rot[31:4]};
-    if (sh_rot[1]) x_rot = {x_rot[1:0],  x_rot[31:2]};
-    if (sh_rot[0]) x_rot = {x_rot[0],    x_rot[31:1]};
+    x_rot4 = e_b;
+    if (sh_rot[4]) x_rot4 = {x_rot4[15:0], x_rot4[31:16]};
+    if (sh_rot[3]) x_rot4 = {x_rot4[7:0],  x_rot4[31:8]};
+    if (sh_rot[2]) x_rot4 = {x_rot4[3:0],  x_rot4[31:4]};
+    if (sh_rot[1]) x_rot4 = {x_rot4[1:0],  x_rot4[31:2]};
+    x_rot = sh_rot[0] ? {x_rot4[0], x_rot4[31:1]} : x_rot4;
     for (int i = 0; i < 32; i++)
       sh_out[i] = sh_keep[i] ? x_rot[i] : ((sh_fasr & e_b[31]) | (sh_frrx & cpsr[29] & (i == 31)));
     sh_cold = 1'b0;
@@ -1423,8 +1447,26 @@ module arm9_core import arm_pkg::*; #(
   // a_imm: B is the uop's immediate, unshifted (registered with it): the offset is eu.imm itself, not through the
   // operand mux and its kb_imm select (RC8 #2251: kb_imm -> e_b -> address adder -> the DTCM address, -0.10 ns)
   logic        a_imm;
-  assign a_off   = a_imm ? eu.imm : sh_none ? e_b : sh_out;
+  // the offset's rotated word enters at its last level, with the rotator's last stage, keep and the offset select in
+  // one: a_rk (registers only) takes the rotator, a_ot is the other choice (rc15f #2847 7asR: register file -> e_b ->
+  // rotator -> sh_out -> a_off -> address adder -> w_addr, -0.411 ns at 0 C). The same as a_imm ? imm : sh_none ? e_b
+  // : sh_out
+  logic [31:0] a_rk, a_ot;
+  always_comb
+    for (int i = 0; i < 32; i++) begin
+      a_rk[i] = !a_imm && !sh_none && sh_keep[i];
+`ifdef ARM9_AOFF_MUT
+      a_ot[i] = a_imm ? eu.imm[i] : sh_none ? ((sh_fasr & e_b[31]) | (sh_frrx & cpsr[29] & (i == 31))) :
+                ((sh_fasr & e_b[31]) | (sh_frrx & cpsr[29] & (i == 31)));   // (mutant: an unshifted register offset as the fill)
+`else
+      a_ot[i] = a_imm ? eu.imm[i] : sh_none ? e_b[i] : ((sh_fasr & e_b[31]) | (sh_frrx & cpsr[29] & (i == 31)));
+`endif
+      a_off[i] = a_rk[i] ? (sh_rot[0] ? x_rot4[(i + 1) % 32] : x_rot4[i]) : a_ot[i];
+    end
 `ifndef SYNTHESIS
+  always_ff @(posedge clk)
+    if (!rst && eu.valid && !a_imm && a_off !== (sh_none ? e_b : sh_out))
+      $error("arm9_core: register address offset %h, the operand mux's %h (pc %h)", a_off, sh_none ? e_b : sh_out, eu.pc);
   always_ff @(posedge clk)
     if (!rst && eu.valid && a_imm && a_off !== (sh_none ? e_b : sh_out))
       $error("arm9_core: immediate address offset %h, the operand mux's %h (pc %h)", a_off, sh_none ? e_b : sh_out, eu.pc);
@@ -1495,7 +1537,9 @@ module arm9_core import arm_pkg::*; #(
   // E's CPSR write
   logic        e_aflags;                 // the ALU writes NZCV (FL_DP, no exception entry or SPSR restore)
   logic [3:0]  e_nzcv;
-  assign e_aflags = e_live && eu.flags == FL_DP && !eu.exc && !(eu.restore && !eu.wpc && spsr_ok);
+  logic        e_afl_ns;                 // e_aflags without stall
+  assign e_afl_ns = e_exec && eu.flags == FL_DP && !eu.exc && !(eu.restore && !eu.wpc && spsr_ok);
+  assign e_aflags = e_afl_ns && !stall;
   // Z of an add without the carry chain: x + y + ci is zero exactly when every bit's x^y equals the carry into it,
   // and that carry is (x|y) one bit down (ci at bit 0) (#1939 block fit: bypass -> shifter -> adder -> res -> zero
   // test -> CPSR Z, -1.26 ns)
@@ -1585,14 +1629,20 @@ module arm9_core import arm_pkg::*; #(
     e_rdr = 1'b0;
     e_tgt = eu.link;
     t = cpsr[5];
-    if (e_exec) begin                     // (while M stalls this repeats harmlessly: D cannot issue meanwhile)
+    // the target is chosen without the condition (it only reaches r_tgt, read under flush): the flags enter at
+    // e_rdr alone (#2842 5asR: cpsr_s -> condition -> e_exec inside the target case -> r_tgt -> i_addr -> ITCM
+    // address, -0.750 ns)
+    case (eu.rdr)
+      RD_IMM:  e_tgt = eu.imm;
+      RD_ALU:  if (eu.rdx) e_tgt = e_b;
+      default: ;
+    endcase
+    if (e_exec)                           // (while M stalls this repeats harmlessly: D cannot issue meanwhile)
       case (eu.rdr)
-        RD_IMM:  begin e_rdr = 1'b1; e_tgt = eu.imm; end
-        RD_LINK: begin e_rdr = 1'b1; e_tgt = eu.link; end
-        RD_ALU:  if (eu.rdx) begin e_rdr = 1'b1; e_tgt = e_b; end
+        RD_IMM, RD_LINK: e_rdr = 1'b1;
+        RD_ALU:  e_rdr = eu.rdx;
         default: ;
       endcase
-    end
     if (eu.exc) t = 1'b0;
     if (eu.set_thumb) t = 1'b1;
     if (eu.clr_thumb) t = 1'b0;
@@ -1691,7 +1741,9 @@ module arm9_core import arm_pkg::*; #(
   logic        m_msr, m_psr_spsr, m_msr_go;
   logic [3:0]  m_msr_mask;
   logic [31:0] m_msr_v;
-  assign m_msr_go = m_v && m_exec && m_msr && !w_rdr && !stall;
+  logic m_msr_ns;                        // m_msr_go without stall
+  assign m_msr_ns = m_v && m_exec && m_msr && !w_rdr;
+  assign m_msr_go = m_msr_ns && !stall;
   always_comb begin
     m_msr_v = cpsr;
     if (m_msr_mask[3]) m_msr_v[31:24] = m_res[31:24] & psr_mask[31:24];
@@ -1726,12 +1778,28 @@ module arm9_core import arm_pkg::*; #(
       for (int k = 2; k < 4; k++) m_lmode[k] = m_msigned ? 2'd1 : 2'd2;
     end
   end
-  always_comb begin
+  // each source word is formatted, the TCM match selects last (rc15f #2844 5asR: w_ra -> rd_itcm -> the word's select
+  // -> these lanes -> e_bw -0.784 ns); formatting d_rdata itself is the same function (checked below, m_ldv_ref)
+  function automatic logic [31:0] lfmt(input logic [31:0] w, input logic [3:0][1:0] src, input logic [3:0][1:0] md,
+                                       input logic [1:0] sgn);
     logic sg;
-    sg = d_rdata[{m_lsgn, 3'd7}];
+    logic [31:0] v;
+    sg = w[{sgn, 3'd7}];
     for (int k = 0; k < 4; k++)
-      m_ldv[k*8 +: 8] = m_lmode[k] == 2'd0 ? d_rdata[{m_lsrc[k], 3'd0} +: 8] : m_lmode[k] == 2'd1 ? {8{sg}} : 8'h00;
-  end
+      v[k*8 +: 8] = md[k] == 2'd0 ? w[{src[k], 3'd0} +: 8] : md[k] == 2'd1 ? {8{sg}} : 8'h00;
+    return v;
+  endfunction
+  logic [3:0][1:0] lsrc_p, lmode_p;
+  always_comb for (int k = 0; k < 4; k++) begin lsrc_p[k] = m_lsrc[k]; lmode_p[k] = m_lmode[k]; end
+  logic [31:0] lf_it, lf_dt, lf_rs;
+  assign lf_it = lfmt(d_lw_it, lsrc_p, lmode_p, m_lsgn);
+  assign lf_dt = lfmt(d_lw_dt, lsrc_p, lmode_p, m_lsgn);
+  assign lf_rs = lfmt(d_lw_rs, lsrc_p, lmode_p, m_lsgn);
+`ifdef ARM9_LFMT_MUT
+  assign m_ldv = d_ls_it ? lf_dt : d_ls_dt ? lf_dt : lf_rs;   // (mutant: an ITCM load gets the DTCM word)
+`else
+  assign m_ldv = d_ls_it ? lf_it : d_ls_dt ? lf_dt : lf_rs;
+`endif
 `ifndef SYNTHESIS
   always_ff @(posedge clk)
     if (!rst && m_v && m_exec && m_ld && m_ok && m_ldv !== m_ldv_ref)
@@ -1831,13 +1899,14 @@ module arm9_core import arm_pkg::*; #(
     if (rst) begin
       fpc <= reset_pc0; fth <= 1'b0;
       f1_v <= 1'b0; ep <= 1'b0; i_one <= 1'b0;
-      q_n <= 2'd0;
+      q_n <= 2'd0; q_rp <= 1'b0;
       cpsr_s <= psr13({24'h0, 8'hD3});
       mcl <= mclass(5'h13);
       cpsr_q <= psr13({24'h0, 8'hD3});
       halted <= 1'b0; irq_r <= 1'b0; fiq_r <= 1'b0;
       ustep <= 2'd0; bl_v <= 1'b0;
       eu <= '0;
+      e_condition <= '0;
       m_v <= 1'b0; m_pend <= 1'b0; m_ans <= 1'b0;
       w_v <= 1'b0;
       wq_en <= 1'b0;
@@ -1866,27 +1935,29 @@ module arm9_core import arm_pkg::*; #(
       // the queue: D takes the head when it issues an instruction's last uop
       begin
         logic pop;
-        logic [1:0] n;
+        logic [1:0] rs;                     // the ring slot the answer goes into (1 or 2)
         pop = have && !stall && !inject && !mf;     // (not d_go: a flush clears the queue anyway)
-        n = q_n;
-        if (pop) begin
-          for (int e = 0; e < 2; e++) begin
-            q_w[e] <= q_w[e + 1]; q_th[e] <= q_th[e + 1]; q_ab[e] <= q_ab[e + 1];
-            q_hw[e] <= q_hw[e + 1]; q_cls[e] <= q_cls[e + 1]; q_kind[e] <= q_kind[e + 1]; q_pa[e] <= q_pa[e + 1];
-          end
-          n = n - 2'd1;
-          q_hpc <= q_hpc + (q_th[0] ? 32'd2 : 32'd4);
-        end
         // (docs/arm9-fetch-queue.md, design B) the answer goes into the first free slot every clock, taken or not: an
         // answer not taken lies beyond the count and is overwritten. i_ok (f_take) reaches only q_n, no data register
         // (RC10 #2361: I-tag -> i_ok -> f_take -> the slot's enable -> q_w -0.588); the shift queue kept in
         // simulation (so_*) is checked against these entries every clock
-        if (n == 2'd0) q_hpc <= f1_pc;                 // into an empty queue: the head's PC is the answer's
-        if (n != 2'd3) begin
-          q_w[n]  <= a_ins; q_th[n] <= f1_th; q_ab[n] <= i_abort;
-          q_hw[n] <= a_hw; q_cls[n] <= a_cls; q_kind[n] <= f1_th ? tx_kind : TK_ARM; q_pa[n] <= f1_th && tx_pcalign;
+        rs = (q_n == 2'd1) ? (q_rp ? 2'd2 : 2'd1) : (q_rp ? 2'd1 : 2'd2);
+        if (q_n == 2'd1 || q_n == 2'd2) begin        // behind the head: entry q_n's ring slot
+          q_w[rs]  <= a_ins; q_th[rs] <= f1_th; q_ab[rs] <= i_abort;
+          q_hw[rs] <= a_hw; q_cls[rs] <= a_cls; q_kind[rs] <= f1_th ? i_rtop[6:4] : TK_ARM; q_pa[rs] <= f1_th && tx_pcalign;
         end
-        q_n <= flush ? 2'd0 : n + {1'b0, f_take};
+        if (pop && q_n >= 2'd2) begin               // the head takes entry 1 from the ring
+          q_w[0] <= q_w[q_rp ? 2 : 1]; q_th[0] <= q_th[q_rp ? 2 : 1]; q_ab[0] <= q_ab[q_rp ? 2 : 1];
+          q_hw[0] <= q_hw[q_rp ? 2 : 1]; q_cls[0] <= q_cls[q_rp ? 2 : 1]; q_kind[0] <= q_kind[q_rp ? 2 : 1];
+          q_pa[0] <= q_pa[q_rp ? 2 : 1];
+          q_rp <= !q_rp;
+        end else if (q_n == 2'd0 || pop) begin        // an empty queue, or its last entry leaves: the answer is the head
+          q_w[0]  <= a_ins; q_th[0] <= f1_th; q_ab[0] <= i_abort;
+          q_hw[0] <= a_hw; q_cls[0] <= a_cls; q_kind[0] <= f1_th ? i_rtop[6:4] : TK_ARM; q_pa[0] <= f1_th && tx_pcalign;
+        end
+        if (pop) q_hpc <= q_hpc + (q_th[0] ? 32'd2 : 32'd4);
+        if (q_n - {1'b0, pop} == 2'd0) q_hpc <= f1_pc;    // into an empty queue: the head's PC is the answer's
+        q_n <= flush ? 2'd0 : q_n - {1'b0, pop} + {1'b0, f_take};
       end
 
       // ---- D
@@ -1905,12 +1976,13 @@ module arm9_core import arm_pkg::*; #(
       end
       if (!stall) begin
         eu <= u;
+        for (int c = 0; c < 15; c++) e_condition[c] <= u.cond == 4'(c);
         fs_a <= fsel(u.ra); fs_b <= fsel(u.rb); fs_c <= fsel(u.rc);
         oh_a <= onehot(fsel(u.ra), u.a_pc); oh_b <= onehot(fsel(u.rb), u.b_imm || u.b_pc); oh_c <= onehot(fsel(u.rc), u.c_pc);
 `ifdef ARM9_EBW_MUT
-        e_bw <= (fsel(u.rb) == 2'd2 && !(u.b_imm || u.b_pc)) ? m_wd : 32'h0;
+        e_bw <= m_wd;
 `else
-        e_bw <= (fsel(u.rb) == 2'd2 && !(u.b_imm || u.b_pc)) ? (m_ld ? m_ldv : m_wd) : 32'h0;
+        e_bw <= m_ld ? m_ldv : m_wd;          // (masked in E by oh_b[2])
 `endif
         kb_imm <= u.b_imm;
 `ifdef ARM9_KCONST_MUT
@@ -1988,17 +2060,25 @@ module arm9_core import arm_pkg::*; #(
         m_ans <= m_rq;
       end
       if (w_rdr) m_v <= 1'b0;
-      if (w_cw && w_go)                     cpsr_s <= psr13(w_cpsr_n);
-      else if (m_msr_go && !m_psr_spsr)     cpsr_s <= psr13(m_msr_v);
-      else if (e_live)                      cpsr_s <= psr13(e_cpsr_n);
-      if (w_cw && w_go)                     mcl <= mclass(w_cpsr_n[4:0]);
-`ifndef ARM9_MCL_MUT
-      else if (m_msr_go && !m_psr_spsr)     mcl <= mclass(m_msr_v[4:0]);
+      // w_go, m_msr_go and e_live all need !stall: the writer is chosen without stall, which gates it last
+      // (#2843 7asR: arm9_mem's hit -> d_ok -> stall -> the priority muxes -> cpsr_s, -0.722 ns)
+`ifdef ARM9_CPSR_STALL_MUT
+      if (1'b1) begin
+`else
+      if (!stall) begin
 `endif
-      else if (e_live)                      mcl <= mclass(e_cpsr_n[4:0]);
-      // the ALU's flags take a select of their own at the end (#1905: shifter -> adder -> V -> the CPSR's case
-      // and priority muxes, -1.16 ns); e_cpsr_n's flag bits are the same, this only shortens the path
-      if (!(w_cw && w_go) && !m_msr_go && e_aflags) cpsr_s[12:9] <= e_nzcv;
+        if (w_cw && w_v)                    cpsr_s <= psr13(w_cpsr_n);
+        else if (m_msr_ns && !m_psr_spsr)   cpsr_s <= psr13(m_msr_v);
+        else if (e_exec)                    cpsr_s <= psr13(e_cpsr_n);
+        if (w_cw && w_v)                    mcl <= mclass(w_cpsr_n[4:0]);
+`ifndef ARM9_MCL_MUT
+        else if (m_msr_ns && !m_psr_spsr)   mcl <= mclass(m_msr_v[4:0]);
+`endif
+        else if (e_exec)                    mcl <= mclass(e_cpsr_n[4:0]);
+        // the ALU's flags take a select of their own at the end (#1905: shifter -> adder -> V -> the CPSR's case
+        // and priority muxes, -1.16 ns); e_cpsr_n's flag bits are the same, this only shortens the path
+        if (!(w_cw && w_v) && !m_msr_ns && e_afl_ns) cpsr_s[12:9] <= e_nzcv;
+      end
 
       // ---- M -> W
       if (!stall) begin
@@ -2090,6 +2170,8 @@ module arm9_core import arm_pkg::*; #(
     if (!rst && f_take && !flush && q_n != 2'd0 &&
         f1_pc != q_hpc + {29'h0, q_n} * (q_th[0] ? 32'd2 : 32'd4))
       $error("arm9_core: queue push at %h, the queue expects %h", f1_pc, q_hpc + {29'h0, q_n} * (q_th[0] ? 32'd2 : 32'd4));
+  always_ff @(posedge clk)
+    if (!rst && f_take && !flush && q_n == 2'd3) $error("arm9_core: an answer taken into a full queue");
   // simulation: the shift queue as it was (writes only on f_take), stepped beside it; every clock the valid entries,
   // the count and the head's PC are the same
   logic [1:0]  so_n;
@@ -2124,10 +2206,13 @@ module arm9_core import arm_pkg::*; #(
     if (!rst) begin
       if (so_n !== q_n) $error("arm9_core: queue count %0d, the shift queue's %0d", q_n, so_n);
       if (so_n != 2'd0 && so_hpc !== q_hpc) $error("arm9_core: queue head pc %h, the shift queue's %h", q_hpc, so_hpc);
-      for (int i = 0; i < 3; i++) if (i < int'(so_n))
-        if (q_w[i] !== so_w[i] || q_th[i] !== so_th[i] || q_ab[i] !== so_ab[i] || q_hw[i] !== so_hw[i] ||
-            q_cls[i] !== so_cls[i] || q_kind[i] !== so_kind[i] || q_pa[i] !== so_pa[i])
-          $error("arm9_core: queue entry %0d %h, the shift queue's %h", i, q_w[i], so_w[i]);
+      for (int i = 0; i < 3; i++) if (i < int'(so_n)) begin
+        int k;
+        k = i == 0 ? 0 : (i == 1) == !q_rp ? 1 : 2;     // entry i's slot: 0 the head, 1 and 2 the ring from q_rp
+        if (q_w[k] !== so_w[i] || q_th[k] !== so_th[i] || q_ab[k] !== so_ab[i] || q_hw[k] !== so_hw[i] ||
+            q_cls[k] !== so_cls[i] || q_kind[k] !== so_kind[i] || q_pa[k] !== so_pa[i])
+          $error("arm9_core: queue entry %0d %h, the shift queue's %h", i, q_w[k], so_w[i]);
+      end
     end
   // simulation: the field reads cover the decode's (a miss would be a missed hazard); +a9hz counts the holds the
   // field check adds over the decode's (time against the DS)

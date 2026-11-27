@@ -29,6 +29,8 @@ module cpu_domain #(
   parameter int ARM7_CACHE = 1,
   parameter int A7_IL      = 7,
   parameter int A7_DL      = 6,
+  parameter int A7_TPUMP   = 0,
+  parameter     A9_RF      = "MLAB",        // arm9_core's register file: MLAB (read in D, registered in logic) or M10K (registered in the block; same cycles)           // nds_arm7_port TPUMP (CPU_FAST 0 only: the port on clk_sys, clk_2x its double)
   parameter int A9_EVB     = 0,         // arm9_mem EVB: the eviction buffer
   parameter int A9_EARLYD  = 0,         // arm9_mem EARLYD
   parameter int A7_BOOTF   = 0,         // 1: the ARM7's boot ROM accesses go through the fabric (nds_top BOOT_SRAM)
@@ -42,6 +44,7 @@ module cpu_domain #(
 ) (
   input  logic        clk,              // clk_sys
   input  logic        clk_cpu,          // CPU_FAST: the CPUs' clock
+  input  logic        clk_2x,           // A7_TPUMP: 2 x clk_sys, phase 0 (the ARM7 port's pumped tag stores)
   input  logic        rst,              // the ARM7 port's reset
   input  logic        cpu_rst,          // the CPUs' reset
   input  logic        cpu_rst9,         // copies of cpu_rst (same edge) for arm9_core and arm7_ds alone (CPU_FAST 0)
@@ -119,7 +122,7 @@ module cpu_domain #(
 
   logic        c_b9_n8;
   generate if ((A9_SOLO & 2) == 0) begin : g_one
-  arm_cpu #(.SEP_RST(CPU_FAST == 0), .A7_DS((A9_SOLO & 4) != 0), .A9_CORE((A9_SOLO & 8) != 0), .A9_RF("MLAB"), .ARM9_EVB(A9_EVB != 0), .ARM9_EARLYD(A9_EARLYD != 0), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .ARM9_EVBW(A9_EVBW != 0 && CPU_FAST == 0), .ARM9_WAYS(ARM9_WAYS), .ARM9_IWAYS(ARM9_IWAYS), .ARM9_BURST(A9_BURST != 0), .A9_SOLO((A9_SOLO & 1) != 0), .SLOW(CPU_FAST == 0)) u_cpu (
+  arm_cpu #(.SEP_RST(CPU_FAST == 0), .A7_DS((A9_SOLO & 4) != 0), .A9_CORE((A9_SOLO & 8) != 0), .A9_RF(A9_RF), .ARM9_EVB(A9_EVB != 0), .ARM9_EARLYD(A9_EARLYD != 0), .A9_OPT(A9_OPT), .A9_XD(A9_XD), .A9_XI(A9_XI), .ARM9_EVBW(A9_EVBW != 0 && CPU_FAST == 0), .ARM9_WAYS(ARM9_WAYS), .ARM9_IWAYS(ARM9_IWAYS), .ARM9_BURST(A9_BURST != 0), .A9_SOLO((A9_SOLO & 1) != 0), .SLOW(CPU_FAST == 0)) u_cpu (
       .clk(cclk), .rst(c_cpu_rst), .rst9(cpu_rst9), .rst7(cpu_rst7), .run(c_run),
       .reset_pc0(32'hFFFF_8000), .reset_pc1(32'h0000_8004), .hivecs7(1'b0),
       .wake7(c_wake7), .irq(c_irq), .fiq(2'b00),
@@ -166,7 +169,7 @@ module cpu_domain #(
   end endgenerate
 
   generate if (ARM7_CACHE != 0) begin : g_a7c
-    nds_arm7_port #(.IL(A7_IL), .DL(A7_DL), .BOOT_FAB(FAST || A7_BOOTF != 0)) u_p7 (.clk(cclk), .rst(c_rst),
+    nds_arm7_port #(.IL(A7_IL), .DL(A7_DL), .TPUMP(!FAST && A7_TPUMP != 0), .BOOT_FAB(FAST || A7_BOOTF != 0)) u_p7 (.clk(cclk), .clk2(clk_2x), .rst(c_rst),
         .wramcnt(c_wramcnt),
         .i_req(a7_i_req), .i_addr(a7_i_addr), .i_rdata(a7_i_rdata), .i_ok(a7_i_ok),
         .d_req(a7_d_req), .d_we(a7_d_we), .d_be(a7_d_be), .d_addr(a7_d_addr), .d_wdata(a7_d_wdata),

@@ -30,7 +30,7 @@ module tb_meta_fabric;
 `define A7F 1
 `endif
     nds_fabric #(.MR_BLOCK(1), .LDM_HIT_EARLY(1), .LDM_STREAM4(1), .A7_FIRST(`A7F)) u_fab (.clk, .rst, .dm_unit(1'b0), .dm_more(1'b0), .dm_dst(32'd0), .dx_valid(), .dx_ready(1'b1), .dx_idle(1'b1), .wramcnt(2'd3), .exmemcnt9(8'd0), .pb_busy(1'b0),
-        .dm_req(1'b0), .dm_we(1'b0), .dm_cpu(1'b0), .dm_size32(1'b1), .dm_addr(32'd0), .dm_wdata(32'd0), .dm_ack(), .dm_rdata(),
+        .dm_req(1'b0), .dm_we(1'b0), .dm_cpu(1'b0), .dm_size32(1'b1), .dm_addr(32'd0), .dm_src(32'd0), .dm_wdata(32'd0), .dm_ack(), .dm_rdata(),
         .a9_ldm,.a9_ldm_meta,.a9_req, .a9_we, .a9_addr, .a9_be, .a9_wdata, .a9_ack, .a9_rdata, .a9_n8, .a9_rvalid, .a9_wnext,
         .a7_req, .a7_we, .a7_addr, .a7_be, .a7_wdata, .a7_ack, .a7_rdata,
         .sn_req(1'b0), .sn_we(1'b0), .sn_addr(32'd0), .sn_wdata(32'd0), .sn_ack(), .sn_rdata(),

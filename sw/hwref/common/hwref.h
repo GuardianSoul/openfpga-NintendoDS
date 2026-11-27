@@ -56,6 +56,7 @@ void hw_done(void) __attribute__((noreturn));
 #include <setjmp.h>
 extern jmp_buf* hw_chain;
 extern bool hw_fat_ok;
+extern bool hw_save_ok;   // no SD (the Pocket): "fat:" is the FLASH save (hwref.c)
 // hwref.nds menu: "new only". Programs with panels already captured on the
 // DS (rules3d) then run only their new ones.
 extern bool hw_new_only;

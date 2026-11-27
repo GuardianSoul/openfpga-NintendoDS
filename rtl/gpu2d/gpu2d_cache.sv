@@ -24,20 +24,32 @@
 // own counter did.
 module gpu2d_cgen #(
     parameter int SW = 6,       // the widest IDXW it serves
-    parameter int GW = 10
+    parameter int GW = 10,
+    // E2: one generation per engine, {count, engine} (never equal, never 0): `clear` starts engine `sel`'s;
+    // `gen` is engine sel's from a register a clock behind (sel and the count are settled clocks before the
+    // job's first lookup and fill), gen_o's two halves engine A's and B's (the caches' scrubber keeps both)
+    parameter bit E2 = 0
 ) (
     input  logic          clk,
     input  logic          clear,
+    input  logic          sel,       // E2: the job's engine
     input  logic          idle,
     output logic [GW-1:0] gen,
+    output logic [2*GW-1:0] gen_o,
     output logic [SW-1:0] scrub,
     output logic [SW-1:0] scrub_q,
     output logic          scrub_v
 );
     logic [GW-1:0] g = GW'(1);  // power-up value
-    assign gen = g;
+    logic [GW-2:0] ga = (GW-1)'(1), gb = (GW-1)'(1);
+    logic [GW-1:0] gen_r = '0;
+    assign gen   = !E2 ? g : gen_r;
+    assign gen_o = !E2 ? {g, g} : {gb, 1'b1, ga, 1'b0};
     always_ff @(posedge clk) begin
-        if (clear) g <= g == {GW{1'b1}} ? GW'(1) : g + GW'(1);
+        gen_r <= sel ? {gb, 1'b1} : {ga, 1'b0};
+        if (clear && !E2) g <= g == {GW{1'b1}} ? GW'(1) : g + GW'(1);
+        if (clear && E2 && !sel) ga <= ga == {(GW-1){1'b1}} ? (GW-1)'(1) : ga + (GW-1)'(1);
+        if (clear && E2 && sel)  gb <= gb == {(GW-1){1'b1}} ? (GW-1)'(1) : gb + (GW-1)'(1);
         if (idle) scrub <= scrub + 1'b1;
         scrub_q <= scrub;
         scrub_v <= idle;
@@ -49,7 +61,7 @@ module gpu2d_cgen #(
     always_ff @(posedge clk) begin
         if (idle && scrub == '1) since_rev <= 0;
         else if (clear) since_rev <= since_rev + 1;
-        if (since_rev >= (1 << GW) - 2) $fatal(1, "gpu2d_cache: scrubber starved for %0d jobs", since_rev);
+        if (since_rev >= (1 << (E2 ? GW - 1 : GW)) - 2) $fatal(1, "gpu2d_cache: scrubber starved for %0d jobs", since_rev);
     end
     // synthesis translate_on
 endmodule
@@ -84,12 +96,16 @@ module gpu2d_cache
     parameter bit ER = 0,
     // LGEN (gpu2d_bg CFL): LCDC-space blocks are stored with {1, lgen} in a generation field one bit wider, the
     // others with {0, gen}; the scrubber retires every entry but {0, gen}'s. Not with TAG_DATA
-    parameter bit LGEN = 0
+    parameter bit LGEN = 0,
+    // E2 (gpu2d_cgen E2): the scrubber keeps entries of gen_o's two generations (engine A's and B's), not gen's
+    parameter bit E2 = 0
 ) (
     input  logic        clk,
     input  logic        idle,        // owner idle: scrub
     input  logic [GW-1:0]   gen,     // gpu2d_cgen
+    input  logic [2*GW-1:0] gen_o,   // E2: gpu2d_cgen's engine A and B generations
     input  logic [GW-1:0]   lgen,    // LGEN: the LCDC blocks' generation (the owner's job number)
+    input  logic [1:0]      lvol,    // LGEN: engine [e]'s BG-space blocks are job-local too (gpu2d_bg VOL)
     input  logic            inv_v,   // gpu2d_wrange: invalidate inv_blk's slot (after a fill's tag write; not TAG_DATA)
     input  blk_t            inv_blk,
     input  logic [(TAG_DATA ? IDXW + 2 : IDXW)-1:0] scrub,
@@ -119,7 +135,7 @@ module gpu2d_cache
 
     localparam int GX = GW + (LGEN ? 1 : 0);
     function automatic logic [GX-1:0] gsel(input blk_t b);
-        if (LGEN && b[17:15] == SP_LCDC) return GX'({1'b1, lgen});
+        if (LGEN && (b[17:15] == SP_LCDC || (b[17:15] == SP_BG && lvol[b[14]]))) return GX'({1'b1, lgen});
         return GX'(gen);
     endfunction
     blk_t       q_blk;
@@ -177,7 +193,7 @@ module gpu2d_cache
         assign tag_q = d_q[64 +: GX+TW];
         // the scrub read of the last clock: clear that word's copy if it is
         // of an older generation (with whatever data: the word then misses)
-        assign s_we = !fill_we && scrub_v && tag_q[GX+TW-1:TW] != GX'(gen) && tag_q[GX+TW-1:TW] != '0;
+        assign s_we = !fill_we && scrub_v && (E2 ? tag_q[GX+TW-1:TW] != GX'(gen_o[GW-1:0]) && tag_q[GX+TW-1:TW] != GX'(gen_o[2*GW-1:GW]) : tag_q[GX+TW-1:TW] != GX'(gen)) && tag_q[GX+TW-1:TW] != '0;
         assign d_we = fill_we || s_we;
         assign d_wa = fill_we ? {fidx, fill_beat} : scrub_q;
         assign d_wd = {16'(fill_we ? {gsel(fill_blk), tag_of(fill_blk)} : '0), fill_data};
@@ -211,7 +227,7 @@ module gpu2d_cache
             tag_wd = fill_last ? {gsel(fill_blk), tag_of(fill_blk)} : '0;
             if (!tag_we && inv_v) begin tag_we = 1'b1; tag_wa = idx_of(inv_blk); tag_wd = '0; end
             // the scrub read of the last clock: retire it if it is an older generation
-            else if (!tag_we && scrub_v && tag_q[GX+TW-1:TW] != GX'(gen) && tag_q[GX+TW-1:TW] != '0) begin
+            else if (!tag_we && scrub_v && (E2 ? tag_q[GX+TW-1:TW] != GX'(gen_o[GW-1:0]) && tag_q[GX+TW-1:TW] != GX'(gen_o[2*GW-1:GW]) : tag_q[GX+TW-1:TW] != GX'(gen)) && tag_q[GX+TW-1:TW] != '0) begin
                 tag_we = 1'b1; tag_wa = scrub_q; tag_wd = '0;
             end
         end

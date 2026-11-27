@@ -1,11 +1,15 @@
 // nds_video against an earlier revision: DS lines with random pixels, random SDRAM acks, each side's own read
 // answers (four words a request, a word of its address); every output compared every clock, the request fields
-// while their request is up.
-module tb_video_eq #(parameter int SEED = 1, parameter int FRAMES = 6);
+// while their request is up. Rotation changes each frame. FILL=1: the new side's "Aspect Ratio" input changes each
+// frame too, and its slot word must be the old one's slot 1 (one screen) turned to 6 when fill is on and rotation
+// off (stacked stays 0), every other output equal; FILL=0 ties it off (the old side has no such input).
+module tb_video_eq #(parameter int SEED = 1, parameter int FRAMES = 6, parameter bit FILL = 0);
     logic clk = 1'b0; always #5 clk = !clk;
     logic rst = 1'b1, vid_t = 1'b0;
     logic px_valid = 1'b0, px_eng = 1'b0, line_start = 1'b0, swap = 1'b0, touch = 1'b0, pen = 1'b0;
     logic [1:0] layout_in = 2'd0, rotation = 2'd0;
+    logic fill = 1'b0, slot_now = 1'b0, fill_at = 1'b0;
+    int fslots = 0, f7 = 0, slots = 0;
     logic [7:0] px_line = 8'd0, px_x = 8'd0, cur_x = 8'd100, cur_y = 8'd80;
     logic [17:0] px_rgb = 18'd0;
     logic [8:0] vcount = 9'd0;
@@ -18,7 +22,7 @@ module tb_video_eq #(parameter int SEED = 1, parameter int FRAMES = 6);
     old_nds_video u_old (.clk, .reset(rst), .vid_t, .layout_in, .rotation, .touch, .pen, .cur_x, .cur_y, .px_valid, .px_eng, .px_line, .px_x, .px_rgb,
         .line_start, .vcount, .swap, .frame_pulse(fp_o), .w_req(wr_o), .w_addr(wad_o), .w_data(wd_o), .w_ack(wa_o),
         .r_req(rr_o), .r_addr(rad_o), .r_ack(ra_o), .r_rvalid(rv_o), .r_rdata(rd_o), .underruns(), .layout(lay_o), .rgb(rgb_o), .de(de_o), .hs(hs_o), .vs(vs_o));
-    nds_video u_new (.clk, .reset(rst), .vid_t, .layout_in, .rotation, .touch, .pen, .cur_x, .cur_y, .px_valid, .px_eng, .px_line, .px_x, .px_rgb,
+    nds_video u_new (.clk, .reset(rst), .vid_t, .layout_in, .rotation, .fill, .touch, .pen, .cur_x, .cur_y, .px_valid, .px_eng, .px_line, .px_x, .px_rgb,
         .line_start, .vcount, .swap, .frame_pulse(fp_n), .w_req(wr_n), .w_addr(wad_n), .w_data(wd_n), .w_ack(wa_n),
         .r_req(rr_n), .r_addr(rad_n), .r_ack(ra_n), .r_rvalid(rv_n), .r_rdata(rd_n), .underruns(), .layout(lay_n), .rgb(rgb_n), .de(de_n), .hs(hs_n), .vs(vs_n));
     int unsigned rng = 32'(SEED) * 2654435761 + 7;
@@ -41,12 +45,15 @@ module tb_video_eq #(parameter int SEED = 1, parameter int FRAMES = 6);
             if (vc == 0) begin
                 frames++;
                 if (frames == FRAMES) begin
-                    $display("%s frames %0d wreqs %0d rreqs %0d errs %0d", errs == 0 && wreqs > 100 && rreqs > 100 ? "PASS" : "FAIL", frames, wreqs, rreqs, errs);
+                    $display("%s frames %0d wreqs %0d rreqs %0d errs %0d", errs == 0 && wreqs > 100 && rreqs > 100 && (!FILL || (fslots > f7 && f7 > 0)) ? "PASS" : "FAIL", frames, wreqs, rreqs, errs);
+                    $display("slot words %0d, Fill %0d (one screen %0d)", slots, fslots, f7);
                     $finish;
                 end
                 swap <= rnd() % 8 == 0;
                 touch <= rnd() % 2 == 0; pen <= rnd() % 2 == 0;
-                layout_in <= rnd() % 4 == 0 ? 2'(rnd() % 3) : 2'd0;
+                layout_in <= rnd() % 2 == 0 ? 2'(rnd() % 3) : 2'd0;
+                rotation <= rnd() % 2 == 0 ? 2'd0 : 2'(rnd() % 3);
+                fill <= FILL && frames % 2 == 1;    // every other frame (rnd() here left one-screen Fill frames out)
             end
             line_start <= 1'b1; vcount <= 9'(vc);
         end
@@ -70,10 +77,16 @@ module tb_video_eq #(parameter int SEED = 1, parameter int FRAMES = 6);
             if (rw_o >= 0 && !ra_o) begin rv_o <= 1'b1; rd_o <= {8'd0, ra_ao} + 32'(3 - rw_o); rw_o--; end
             if (rw_n >= 0 && !ra_n) begin rv_n <= 1'b1; rd_n <= {8'd0, ra_an} + 32'(3 - rw_n); rw_n--; end
         end
+        // the clock the outputs take a slot word (old side), and whether the new side's should be a Fill slot
+        if (u_old.ph) begin
+            slot_now <= !u_old.de1 && u_old.slot1; fill_at <= fill && rotation == 2'd0 && u_old.slot_n[0];
+            if (!u_old.de1 && u_old.slot1) begin slots++; if (fill && rotation == 2'd0) begin fslots++; if (u_old.slot_n[0]) f7++; end end   // f7: one-screen Fill words
+        end
         if (wa_o) wreqs++;
         if (ra_o) rreqs++;
-        if (!rst && cyc > 30 && ({wr_o, rr_o, de_o, hs_o, vs_o, fp_o, lay_o} !== {wr_n, rr_n, de_n, hs_n, vs_n, fp_n, lay_n} || rgb_o !== rgb_n ||
-            (wr_o && {wad_o, wd_o} !== {wad_n, wd_n}) || (rr_o && rad_o !== rad_n))) begin
+        if (!rst && cyc > 30 && ({wr_o, rr_o, de_o, hs_o, vs_o, fp_o, lay_o} !== {wr_n, rr_n, de_n, hs_n, vs_n, fp_n, lay_n} ||
+            (wr_o && {wad_o, wd_o} !== {wad_n, wd_n}) || (rr_o && rad_o !== rad_n) ||
+            rgb_n !== (slot_now && fill_at ? (rgb_o ^ 24'h00E000) : rgb_o))) begin
             if (errs < 6) $display("clk %0d: w %b %b %h %h %h %h r %b %b %h %h rgb %h %h", cyc, wr_o, wr_n, wad_o, wad_n, wd_o, wd_n, rr_o, rr_n, rad_o, rad_n, rgb_o, rgb_n);
             errs++;
         end

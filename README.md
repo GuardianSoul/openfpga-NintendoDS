@@ -3,14 +3,16 @@
 An experimental FPGA core that runs Nintendo DS games on the Analogue Pocket. The DS
 itself (both CPUs, the memory system, the 2D and 3D engines, sound and the
 other hardware) was written from scratch for this core, against
-measurements of a real DS.
+[measurements of a real DS](TIMING.md).
 
-> **Status (0.5.3, 2026-11-14): experimental.** Several big 3D games boot
-> and play, with sound and saves. Some 3D effects are switched off to fit
-> the chip, the heaviest 3D scenes can run a little below full speed, and
-> some 3D scenes show line glitches. See [Pocket limitations](#pocket-limitations),
-> [Known issues](#known-issues) and [COMPATIBILITY.md](COMPATIBILITY.md)
-> before you try it.
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/guardiansoul7)
+
+> **Status (0.5.4, 2026-11-27): experimental.** Many games boot and play,
+> with sound and saves, but the core has fundamental speed limits: its 3D
+> geometry engine is about 2–3 times slower than a DS's, so 3D-heavy games
+> can slow down or show missing lines, and some 3D effects are switched
+> off to fit the chip. See [Pocket limitations](#pocket-limitations) and
+> [Known issues](#known-issues) before you try it.
 
 ## What you need
 
@@ -88,8 +90,8 @@ Under **Core Settings** in the Pocket menu. Defaults are in bold.
 | Setting | Choices | What it does |
 | --- | --- | --- |
 | Screen Rotation | **Off**, Left, Right | Turns the picture for games played with the DS held like a book |
-| SELECT + L/R | **Swap Screens**, Off | The layout combos above; Off sends L and R to the game with Select |
-| SELECT + A/B/X/Y | **Toggle Touch**, Off | The touch mode combo; Off sends the buttons to the game with Select |
+| Screen Toggle | **SELECT + L/R**, Off | The layout combos above; Off sends L and R to the game with Select |
+| Cursor Toggle | **SELECT + A/B/X/Y**, Off | The touch mode combo; Off sends the buttons to the game with Select |
 | Touch: Cursor Speed | Slow, **Normal**, Fast | How fast the D-pad moves the touch cursor (1, 3 or 6 pixels a frame) |
 | Touch: A Button | None, **Touch**, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | What A does in touch mode: None sends the button to the game; Touch touches while held; the others run a gesture from the cursor |
 | Touch: B Button, X Button, Y Button | **None**, Touch, Circle, Big Circle, Swipe Up, Swipe Left, Swipe Down, Swipe Right | The same for B, X and Y |
@@ -108,15 +110,21 @@ The Pocket lacks some of the DS's hardware, so these can't work:
 
 ## Known issues
 
-As of 0.5.3 (2026-11-14):
+As of 0.5.4 (2026-11-27):
 
 - **3D effects are switched off** to fit the chip: shadow polygons, toon and
   highlight shading, fog, edge marking and anti-aliasing. Games draw without
   them. The 2D mosaic effect is off too. These are temporary: the source
   can build them all, and they come back as room is found.
-- **The heaviest 3D scenes can still run a little below full speed.**
-- **Line glitches:** the busiest 3D scenes can draw too slowly, which shows
-  as grey, black or missing lines.
+- **The heaviest 3D scenes can still run a little below full speed.** The
+  geometry engine is about 2–3 times slower than a DS's there.
+- **Line glitches:** the busiest 3D scenes can still draw too slowly, which
+  shows as grey, black or missing lines, though far less often than in 0.5.3.
+- **2D flicker:** screens that rewrite their 2D graphics very often can
+  still flicker slightly.
+- **Games that work the second CPU hard:** a few games run far more code
+  on the DS's ARM7 than most. On the Pocket the ARM7's memory is external,
+  so in those games the music can play slowly and the game can stall.
 - **Loading stutter:** a short stutter can remain when a game loads a lot of
   new data at once.
 - **No sleep mode, save states or firmware menu.** Games start directly.
@@ -125,8 +133,9 @@ As of 0.5.3 (2026-11-14):
 ### Known differences from a real DS
 
 The core's rules come from measurements on a real DS. Where the Pocket's
-memory or chip budget forces a difference, it is recorded. The main ones as
-of 0.5.3:
+memory or chip budget forces a difference, it is recorded. The core's
+timing against a real DS, measured on the Pocket, is listed row by row in
+[TIMING.md](TIMING.md). The main differences as of 0.5.4:
 
 - The ARM9's caches are larger than the DS's: 16 KiB instruction (4-way,
   as on the DS) and 8 KiB data (2-way), instead of 8 KiB and 4 KiB, both
@@ -147,6 +156,13 @@ of 0.5.3:
   line.
 - A `BOX_TEST` command inside an open vertex list locks up a real DS. The
   core doesn't reproduce the lock-up.
+- The geometry engine runs behind the DS's timing model, so the polygon
+  counter (`RAM_COUNT`) read right after the engine reports idle can show a
+  partial count; it reaches the full count shortly after. No polygons are
+  lost.
+- DMA copies from one VRAM bank to another, and 16-bit DMA to VRAM, palette
+  or I/O, are slower than on the DS.
+- The ARM9's memory protection unit doesn't raise data aborts.
 - Sound capture of a single channel captures the mix instead. Capture
   levels and a few WiFi register details (start-up counter, baseband reads)
   differ.
@@ -175,6 +191,8 @@ timing, not an emulator's shortcuts:
   the 2D engine, sound and more.
 - They ran on a DS and a DS Lite from a SuperCard DSTWO and saved their
   results to its SD card, over 43 hardware runs.
+- The same programs also run on the Pocket, where they write their results
+  into the game save. [TIMING.md](TIMING.md) compares the two, row by row.
 - Each measured rule went into a ledger of about 150 rules, with the core's
   status for each one: follows, parked with a reason, or a known
   difference.

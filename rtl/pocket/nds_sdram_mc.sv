@@ -21,12 +21,6 @@ module nds_sdram_mc #(
     parameter integer POWERUP_CYCLES = 20480,   // >= 200 us at 100.54 MHz
     parameter integer REFRESH_CYCLES = 780,     // 8192 per 64 ms
     parameter integer CHAIN = 32,               // write-chain words per row opening
-    parameter integer SOFT_MIN = 0,             // c_soft ends a write chain once it has this many words (0: never)
-    parameter integer WURG = 0,
-    // WOPEN bit 0 (with OPEN): a write chain leaves its row open (no auto-precharge): the next chain into that row
-    // writes without ACTIVE, and a READ there hits; a PRECHARGE waits tWR after the last WRITE. Bit 1: a chain's
-    // WRITEs go on every clock (step wraps 7 -> 1 in S_CH, not through 0, which paused the chain a clock in eight)
-    parameter integer WOPEN = 0,                 // 1: bw_urg (the write FIFO nearly full) starts write chains ahead of a waiting read (not a hurrying one)
     parameter integer RD_LAT = 4,               // CL+1: a READ at edge e has beat 0 in dq_in after edge e+RD_LAT
     // 1: reads leave their row open (one per bank): a read of an open row starts its READs at once, back to
     // back with the last request's (no ACTIVE, tRCD, auto-precharge or tRP); a read of another row first
@@ -36,7 +30,11 @@ module nds_sdram_mc #(
     // 1: one register stage between the engine and the pins' I/O registers: the chip sees the same commands a
     // clk_mem later, and the read capture moves with them (RD_LAT + 1); the engine's own timeline is unchanged.
     // Gives the command/address decode (ref_owed, conf_q, the bus grant) a whole clock (#1029/#1032/#1033)
-    parameter integer OUT_REG = 0
+    parameter integer OUT_REG = 0,
+    // OB_M10K (with OPEN): the open rows (ob_rowm, 4 x 13) in an M10K with a registered read, addressed
+    // by c_rb_nx (the bank c_rb holds next clock) instead of an MLAB read at c_rb: the same row each clock it is
+    // used (below), one memory LAB less
+    parameter integer OB_M10K = 0
 ) (
     input  wire         clk,                    // clk_mem
     input  wire         init,                   // hold in power-up/initialisation
@@ -44,10 +42,10 @@ module nds_sdram_mc #(
     // request: held until c_ready (one clock)
     input  wire         c_valid,
     input  wire         c_hurry,            // port 0 (video reads) waits: a write chain ends early
-    input  wire         c_soft,             // a softer hurry: the chain ends once it has SOFT_MIN words
     input  wire         c_we,
     input  wire [23:0]  c_addr,                 // word address
     input  wire [14:0]  c_rb,                   // c_addr[22:8] (bank, row), registered at the grant
+    input  wire [1:0]   c_rb_nx,                // OB_M10K: c_rb[14:13] next clock (nds_sdram_bus: g_rb's D)
     input  wire [3:0]   c_n,                    // read: words, 1-8, within one 1 KiB row
     input  wire         c_wrap,                 // read: the words wrap within c_addr's 8-word group (a block read from its needed word)
     input  wire [31:0]  c_wdata,
@@ -63,7 +61,6 @@ module nds_sdram_mc #(
     input  wire [31:0]  bw_data,
     input  wire [1:0]   bw_he,                  // the halves to write {high, low}: DQM masks the other
     output wire         bw_read,                // pops the head (the cycle its low half is written)
-    input  wire         bw_urg,                 // WURG: the write FIFO is nearly full (a synchronised level)
     output wire         ref_late,               // (diagnostics) a refresh waits behind another one
     // pins
     inout  wire [15:0]  SDRAM_DQ,
@@ -160,20 +157,25 @@ module nds_sdram_mc #(
     reg [7:0]  q_inc = 0;                   // chain: the next word's column bits (the row is q_addr's while q_row)
     reg        q_row = 0;
     // OPEN: each bank's open row, and the clocks since the last READ (a PRECHARGE waits out its burst).
-    // Without WOPEN bit 0 the row has one write and one read (the request's bank): an MLAB (ob_rowm). WOPEN bit 0
-    // also reads and writes it at the write bank (3 read ports, 2 writes; no MLAB form): registers (ob_rowr).
-    // WOP picks one; the other has no write and no read.
-    localparam bit WOP = OPEN != 0 && (WOPEN & 1) != 0;
+    // The row has one write and one read (the request's bank): an MLAB (ob_rowm), or an M10K (OB_M10K).
     reg [3:0]  ob_v = 0;
     (* ramstyle = "MLAB, no_rw_check" *) reg [12:0] ob_rowm [0:3];
-    reg [12:0] ob_rowr [0:3];
+    // OB_M10K: ob_rowm (as ob_rowk) in an M10K, read through its address register at c_rb_nx, so ob_q is
+    // ob_rowk[c_rb] each clock except the one after its write (an M10K read on a write's edge gives the old row).
+    // That clock is the first of S_RD (the write is the read's ACTIVE in IDLE), whose c_hit IDLE never uses: S_RD
+    // lasts two clocks or more, and IDLE takes hit_q from the clock before it.
+    (* ramstyle = "M10K, no_rw_check" *) reg [12:0] ob_rowk [0:3];
+    reg [12:0] ob_q = 13'd0;
+`ifdef OB_M10K_MUT
+    always @(posedge clk) ob_q <= ob_rowk[c_rb[14:13]];       // mutant: read a clock late (at c_rb, not c_rb_nx)
+`else
+    always @(posedge clk) ob_q <= ob_rowk[c_rb_nx];
+`endif
     reg [2:0]  rd_age = 0;                  // 5 after a READ: a PRECHARGE at <= 3 (out of its burst), a write at 0 (data off the bus)
     reg [2:0]  act_age = 0;                 // clocks since the last ACTIVE (saturating): a PRECHARGE at >= 5 (tRAS)
-    reg  [1:0] wr_age = 2'd3;               // WOPEN: clocks since the last WRITE (saturating): a PRECHARGE at >= 2 (tWR)
-    wire       pre_ok = rd_age <= 3'd3 && act_age >= 3'd5 && ((WOPEN & 1) == 0 || wr_age >= 2'd2);
-    wire       wop = WOP;
+    wire       pre_ok = rd_age <= 3'd3 && act_age >= 3'd5;
     wire [1:0] cb = c_rb[14:13];
-    wire [12:0] ob_rc = WOP ? ob_rowr[cb] : ob_rowm[cb];       // the request's bank's open row
+    wire [12:0] ob_rc = OB_M10K != 0 ? ob_q : ob_rowm[cb];       // the request's bank's open row
     wire       c_hit  = OPEN != 0 && ob_v[cb] && ob_rc == c_rb[12:0] && !c_we;
     wire       c_conf = OPEN != 0 && ob_v[cb] && !c_hit;                // the bank holds another row (or a write)
     // the decision registered (#969: g -> c_rb -> the row compare -> a[10], -2.046 ns): hit_q/conf_q are last
@@ -182,10 +184,7 @@ module nds_sdram_mc #(
     wire       d_hit  = dv_q && hit_q;
     wire       d_conf = dv_q && conf_q;
     wire [1:0] wb = bank_of(bw_addr);
-    wire [12:0] ob_rw = WOP ? ob_rowr[wb] : 13'd0;     // the write bank's open row (WOPEN bit 0 only)
-    // WURG: a nearly full write FIFO goes ahead of a waiting read (a video/deadline hurry still wins)
-    wire       w_urg = WURG != 0 && bw_urg && bw_valid && !c_hurry;
-    wire       wgo = bw_valid && (!c_valid || w_urg);
+    wire       wgo = bw_valid && !c_valid;
 
     // the chain's head is consumed with its low half; the next head is there
     // (or not) during the high half, which decides whether the chain goes on
@@ -204,8 +203,6 @@ module nds_sdram_mc #(
         hit_q <= c_hit; conf_q <= c_conf; dv_q <= c_valid;
         if (act_age != 3'd7) act_age <= act_age + 1'b1;
         if (cmd == C_ACT) act_age <= 3'd1;
-        if (wr_age != 2'd3) wr_age <= wr_age + 1'b1;
-        if (cmd == C_WRITE) wr_age <= 2'd0;
 
         if (init) begin
             st <= S_INIT; ready <= 1'b0; power_done <= 1'b0; init_step <= 0; st1 <= 1'b0; st2 <= 1'b0; stn <= 1'b0;
@@ -233,18 +230,14 @@ module nds_sdram_mc #(
                     if (pre_ok) begin cmd <= C_PRE; a <= 13'h0400; ob_v <= 4'd0; gap <= 4'd2; dv_q <= 1'b0; end   // all banks, tRP
                 end else if (ref_owed != 0) begin
                     cmd <= C_REF; ref_owed <= ref_owed - 1'b1; gap <= 4'd9;      // tRFC
-                end else if (wop && wgo && ob_v[wb] && ob_rw == row_of(bw_addr) && rd_age == 0) begin
-                    // WOPEN: the chain's row is open: WRITEs from the next clock, no ACTIVE
-                    ba <= wb; q_addr <= bw_addr; chain_n <= 0; ch_hi <= 1'b0; step <= 3'd1; st1 <= 1'b1; st2 <= 1'b0; stn <= 1'b1; st <= S_CH;
-                    dv_q <= 1'b0;
-                end else if (OPEN != 0 && wgo && ob_v[wb] && !(wop && ob_rw == row_of(bw_addr))) begin
-                    // OPEN: the chain's bank holds an open row: close it first (WOPEN: another row)
+                end else if (OPEN != 0 && wgo && ob_v[wb]) begin
+                    // OPEN: the chain's bank holds an open row: close it first
                     if (pre_ok) begin cmd <= C_PRE; ba <= wb; a <= 13'h0000; ob_v[wb] <= 1'b0; gap <= 4'd2; dv_q <= 1'b0; end
-                end else if (OPEN != 0 && c_valid && !w_urg && !dv_q) begin
+                end else if (OPEN != 0 && c_valid && !dv_q) begin
                     // OPEN: the request's hit/conflict decision is registered this clock
-                end else if (OPEN != 0 && c_valid && !w_urg && d_conf) begin
+                end else if (OPEN != 0 && c_valid && d_conf) begin
                     if (pre_ok) begin cmd <= C_PRE; ba <= cb; a <= 13'h0000; ob_v[cb] <= 1'b0; gap <= 4'd2; dv_q <= 1'b0; end
-                end else if (OPEN != 0 && c_valid && !w_urg && d_hit) begin
+                end else if (OPEN != 0 && c_valid && d_hit) begin
                     // OPEN: the row is open: the READs start next clock, gapless after the last request's
                     ba <= cb;
                     q_addr <= c_addr; q_left <= c_n; q_wrap <= c_wrap; step <= 3'd1; st1 <= 1'b1; st2 <= 1'b0; stn <= 1'b1;
@@ -263,7 +256,7 @@ module nds_sdram_mc #(
                     // bank and row from the bus's copy taken at the grant
                     // (c_addr is a port mux on g: #845 g -> a[9] -0.985 ns)
                     cmd <= C_ACT; ba <= c_rb[14:13]; a <= c_rb[12:0];
-                    if (OPEN != 0 && !c_we) begin ob_v[cb] <= 1'b1; if (WOP) ob_rowr[cb] <= c_rb[12:0]; else ob_rowm[cb] <= c_rb[12:0]; end
+                    if (OPEN != 0 && !c_we) begin ob_v[cb] <= 1'b1; if (OB_M10K != 0) ob_rowk[cb] <= c_rb[12:0]; else ob_rowm[cb] <= c_rb[12:0]; end
                     dv_q <= 1'b0;
                     q_addr <= c_addr; q_left <= c_n; q_wrap <= c_wrap; q_wdata <= c_wdata; q_be <= c_be; step <= 0; st1 <= 1'b0; st2 <= 1'b0; stn <= 1'b0;
                     c_ready <= 1'b1;
@@ -295,8 +288,7 @@ module nds_sdram_mc #(
                 end
             end
             default: begin   // S_CH: halves of the chain's words, back to back
-                if ((WOPEN & 2) != 0 && step == 3'd7) begin step <= 3'd1; st1 <= 1'b1; st2 <= 1'b0; stn <= 1'b1; end
-                else begin step <= step + 1'b1; st1 <= step == 3'd0; st2 <= step == 3'd1; stn <= step != 3'd7; end
+                step <= step + 1'b1; st1 <= step == 3'd0; st2 <= step == 3'd1; stn <= step != 3'd7;
                 if (stn) begin
                     logic last;
                     // the chain ends after a high half when the next word is
@@ -304,10 +296,9 @@ module nds_sdram_mc #(
                     // video port waits (its line deadline; other ports wait
                     // the chain out, so the ring's writes keep moving)
                     last = ch_hi && (!bw_valid || !q_row || bw_addr != {q_addr[23:8], q_inc}
-                                     || chain_n == CHAIN[5:0] - 1'b1 || ref_owed != 0 || c_hurry
-                                     || (SOFT_MIN != 0 && c_soft && chain_n >= 6'(SOFT_MIN - 1)));
+                                     || chain_n == CHAIN[5:0] - 1'b1 || ref_owed != 0 || c_hurry);
                     cmd <= C_WRITE; dq_oe <= 1'b1; dqm <= {2{ch_hi ? !q_he : !bw_he[0]}};
-                    a <= col_a(col_of(ch_hi ? q_addr : bw_addr) | {9'd0, ch_hi}, last && !wop);
+                    a <= col_a(col_of(ch_hi ? q_addr : bw_addr) | {9'd0, ch_hi}, last);
                     dq_out <= ch_hi ? q_wdata[31:16] : bw_data[15:0];
                     if (!ch_hi) begin
                         q_addr <= bw_addr; q_wdata <= bw_data; q_he <= bw_he[1];
@@ -317,8 +308,7 @@ module nds_sdram_mc #(
                     end else chain_n <= chain_n + 1'b1;
                     ch_hi <= !ch_hi;
                     if (last) begin
-                        st <= S_IDLE; gap <= wop ? 4'd1 : 4'd4;
-                        if (WOP) begin ob_v[ba] <= 1'b1; ob_rowr[ba] <= q_addr[20:8]; dv_q <= 1'b0; end
+                        st <= S_IDLE; gap <= 4'd4;
                     end
                 end
             end

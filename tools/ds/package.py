@@ -139,7 +139,12 @@ def main():
         {'width': 256, 'height': 384, 'aspect_w': 2, 'aspect_h': 3, 'rotation': 270, 'mirror': 0},
         {'width': 256, 'height': 384, 'aspect_w': 2, 'aspect_h': 3, 'rotation': 90, 'mirror': 0},
         {'width': 256, 'height': 192, 'aspect_w': 4, 'aspect_h': 3, 'rotation': 270, 'mirror': 0},
-        {'width': 256, 'height': 192, 'aspect_w': 4, 'aspect_h': 3, 'rotation': 90, 'mirror': 0}]}})
+        {'width': 256, 'height': 192, 'aspect_w': 4, 'aspect_h': 3, 'rotation': 90, 'mirror': 0},
+        # Core Setting "Aspect Ratio: Fill Screen" (nds_video): top only or bottom only, unrotated, at the Pocket's
+        # own 10:9 and 16:9 docked, as openfpga-PlayStation's Fill modes; stacked and rotated layouts keep their shape
+        # (APF takes 8 modes: 7 is free)
+        {'width': 256, 'height': 192, 'aspect_w': 10, 'aspect_h': 9, 'dock_aspect_w': 16, 'dock_aspect_h': 9,
+         'rotation': 0, 'mirror': 0}]}})
     write('input.json', {'input': {'magic': 'APF_VER_1', 'controllers': [
         {'type': 'default', 'mappings': [
             {'id': 0, 'name': 'A', 'key': 'pad_btn_a'},

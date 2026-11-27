@@ -35,7 +35,7 @@ module lane_ownership #(parameter GROUP=0, SERVICE=0) (input logic clk_sys,clk_m
 `endif
 `endif
  .LDM_STREAM4(1), .A7_FIRST(1), .LDM_HIT_EARLY(1), .OAM_SHARE(1)) u_fab (.clk, .rst, .dm_vcut(1'b0), .dm_unit(1'b0), .dm_more(1'b0), .dm_dst(32'd0), .dx_valid(), .dx_ready(1'b1), .dx_idle(1'b1), .wramcnt(2'd3), .exmemcnt9(8'd0), .pb_busy(1'b0),
-        .dm_req,.dm_we, .dm_cpu(1'b0), .dm_size32(1'b1), .dm_addr,.dm_wdata,.dm_ack, .dm_rdata(),
+        .dm_req,.dm_we, .dm_cpu(1'b0), .dm_size32(1'b1), .dm_addr, .dm_src(dm_addr),.dm_wdata,.dm_ack, .dm_rdata(),
         .a9_ldm,.a9_ldm_meta, .a9_tmr(4'b0), .a9_req, .a9_we, .a9_addr, .a9_be, .a9_wdata, .a9_ack, .a9_rdata, .a9_n8, .a9_rvalid, .a9_wnext,
         .a7_n4(1'b0), .a7_req, .a7_we, .a7_addr, .a7_be(4'hf), .a7_wdata, .a7_ack, .a7_rdata,
         .sn_n4(1'b0), .sn_req,.sn_we,.sn_addr,.sn_wdata,.sn_ack, .sn_rdata(),

@@ -38,7 +38,7 @@
 //     entries lookups and checks see as invalid; a fill end supersedes
 //     queued invalidations of its line.
 //
-// PUMP = 1 (CHECK = 1, M10K, no WLATE; clk2 = 2 x clk, phase 0, from the same
+// PUMP = 1 (CHECK = 1, M10K; WLATE = 0 below, or registered-write mode below; clk2 = 2 x clk, phase 0, from the same
 // PLL; docs/phase2-integration.md "Double-pumped RAMs"): the two copies are one
 // true dual-port M10K (gpu3d_tdp2c), 2 -> 1 block. Port A, on clk, is the
 // lookup's read (unchanged: the block's output from the clk edge E). Port B,
@@ -64,6 +64,8 @@ module nds_lcache #(
     // with M10K: the RAM's write port takes a register, not this cycle's
     // write decision (the ARM7 port: x_valid -> its tag RAM, nds-fit #676)
     parameter bit WLATE = 1'b0,
+    parameter bit MATCH_ONLY = 1'b0, // pumped check returns match/valid, not a raw tag
+    parameter bit INV_TAGGED = 1'b0, // caller checked c_v and c_tag against inv_tag
     parameter bit PUMP  = 1'b0          // the copies as one double-pumped block (above)
 ) (
     input  logic          clk,
@@ -79,6 +81,7 @@ module nds_lcache #(
     input  logic [LB-1:0] c_idx,
     output logic          c_v,
     output logic [TW-1:0] c_tag,
+    output logic          c_hit,       // valid check matches caller-held inv_tag
     // fill
     input  logic          f_busy,
     input  logic [LB-1:0] f_idx,
@@ -88,6 +91,7 @@ module nds_lcache #(
     // invalidate one line / all
     input  logic          inv,
     input  logic [LB-1:0] inv_idx,
+    input  logic [TW-1:0] inv_tag,
     input  logic          inv_all,
     output logic          busy
 );
@@ -122,31 +126,52 @@ module nds_lcache #(
         always_ff @(posedge clk) begin pv <= we; pa <= wa; pd <= {wv, wt}; end
         assign ww = pv; assign wwa = pa; assign wwd = pd;
         always_ff @(posedge clk) begin
-            f1 <= pv && pa == ra; f2 <= pv && pa == c_idx; fd <= pd;
+            // Pumped WLATE writes committed on the preceding middle edge:
+            // the read already sees the word that the plain store forwards.
+            f1 <= !PUMP && pv && pa == ra;
+            f2 <= !PUMP && pv && pa == c_idx;
+            fd <= PUMP ? '0 : pd;
         end
     end else begin : g_wd
         assign ww = we; assign wwa = wa; assign wwd = {wv, wt};
         assign f1 = 1'b0; assign f2 = 1'b0; assign fd = '0;
     end endgenerate
+    // WLATE's registered write can reach the middle edge directly. Its RAM write
+    // is half a cycle before the plain RAM's edge, but both next-edge reads expose
+    // the same word through f1/f2 forwarding. Never feed a live invalidation
+    // decision into this half-clock path; WLATE=0 retains its original buffer.
+    logic check_match;
     generate if (PUMP) begin : g_pump
         logic          tg = 1'b0, tq = 1'b0, ph = 1'b0;
         logic          bw = 1'b0;
         logic [LB-1:0] bwa;
         logic [EW-1:0] bwd, qb, hb;
+        logic hm;
         always_ff @(posedge clk) tg <= !tg;
         always_ff @(posedge clk2) begin
             tq <= tg;
             ph <= tg == tq;
-            if (!ph) begin bw <= ww; bwa <= wwa; bwd <= wwd; end
-            if (ph) hb <= qb;
+            if (!ph && !WLATE) begin bw <= ww; bwa <= wwa; bwd <= wwd; end
+            if (ph) begin
+                if (MATCH_ONLY) begin
+                    // B read was issued at the preceding coincident edge. The
+                    // caller holds that query's tag after its main-clock edge.
+                    // Do not export a wide tag into the second half-cycle.
+                    hb <= {qb[EW-1:TW], {TW{1'b0}}};
+                    hm <= qb[TW-1:0] == inv_tag;
+                end else hb <= qb;
+            end
         end
         gpu3d_tdp2c #(.W(EW), .AW(LB)) u_m (.clk_a(clk), .a_addr(ra), .a_q(mq),
-            .clk_b(clk2), .b_addr(ph ? bwa : c_idx), .b_we(ph && bw), .b_d(bwd), .b_q(qb));
+            .clk_b(clk2), .b_addr(ph ? (WLATE ? wwa : bwa) : c_idx),
+            .b_we(ph && (WLATE ? ww : bw)), .b_d(WLATE ? wwd : bwd), .b_q(qb));
         assign mq2 = hb;
+        assign check_match = hm;
 `ifndef ALTERA_RESERVED_QIS
-        initial if (CHECK == 0 || LATE) $error("nds_lcache: PUMP needs CHECK = 1 and M10K without WLATE");
+        initial if (CHECK == 0 || MLAB) $error("nds_lcache: PUMP needs CHECK = 1 and M10K");
 `endif
     end else begin : g_plain
+        assign check_match = 1'b0;
         always_ff @(posedge clk) begin
             if (ww) mem[wwa] <= wwd;
             mq <= mem[ra];
@@ -225,13 +250,18 @@ module nds_lcache #(
     logic          inv_w;               // the new invalidation is written now
     logic [LB-1:0] cq_a;
     // the tag the checked entry holds now (an invalidation writes it back)
-    wire  [TW-1:0] c_tnow = (lw_v && lw_a == cq_a) ? lw_t : rq2_t;
+    wire  [TW-1:0] c_tnow = (lw_v && lw_a == cq_a) ? lw_t : (INV_TAGGED ? inv_tag : rq2_t);
     always_comb begin
         we = 1'b0; wa = f_idx; wt = f_tag; wv = '0; inv_w = 1'b0;
         if (f_end) begin
             we = 1'b1; wv = f_ok ? cur : '0;
         end else if (qh_v) begin
             we = 1'b1; wa = qa[qh]; wt = qt[qh];
+        end else if (INV_TAGGED) begin
+            // All payload selection settles before the returned check result.
+            // A checked invalidation cannot overlap the sweep (c_v is false).
+            if (sw_wv) begin we = 1'b1; wa = sw_wa; wt = rq_t; end
+            else begin we = inv; wa = inv_idx; wt = c_tnow; inv_w = inv; end
         end else if (inv) begin
             we = 1'b1; wa = inv_idx; wt = c_tnow; inv_w = 1'b1;
         end else if (G == 0 && sw_wv) begin
@@ -262,12 +292,34 @@ module nds_lcache #(
     wire [VW-1:0] cvs = (lw_v && lw_a == cq_a) ? lw_d : rq2_v;
     assign c_v   = CHECK != 0 && cvs == cur && !(f_busy && f_idx == cq_a) && !queued(cq_a) && !sw_on && !sw_wv && !pend;
     assign c_tag = rq2_t;
+    assign c_hit = c_v && (MATCH_ONLY ? check_match : (rq2_t == inv_tag));
 
     assign busy = sw_on || sw_wv || pend;
 
+    logic [CQ-1:0] inv_alloc, qv_base;
+    always_comb begin
+        logic picked;
+        picked = 1'b0; inv_alloc = '0; qv_base = qv;
+        for (int i = 0; i < CQ; i++) begin
+            if (f_end && qa[i] == f_idx) qv_base[i] = 1'b0;
+            if (!f_end && qh_v && qh == i) qv_base[i] = 1'b0;
+            if (!picked && !qv[i]) begin
+                picked = 1'b1;
+                inv_alloc[i] = (f_end || qh_v) && !(f_end && inv_idx == f_idx);
+            end
+        end
+    end
     always_ff @(posedge clk) begin
         lw_v <= we; lw_a <= wa; lw_d <= wv; lw_t <= wt;
         sc_q <= G != 0 && !l_en; sc_a <= sp; sc_hold <= 1'b0;
+        if (INV_TAGGED) begin
+            qv <= qv_base | ({CQ{inv}} & inv_alloc);
+            // Entries remain invalid unless the late check succeeds. Their
+            // payload can be written early, without a check-to-data path.
+            for (int i = 0; i < CQ; i++) if (inv_alloc[i]) begin
+                qa[i] <= inv_idx; qt[i] <= c_tnow;
+            end
+        end else begin
         // the queue: a fill end supersedes queued invalidations of its line;
         // the head leaves when written; a new invalidation not written joins
         if (f_end) for (int i = 0; i < CQ; i++) if (qa[i] == f_idx) qv[i] <= 1'b0;
@@ -279,6 +331,7 @@ module nds_lcache #(
                 if (!done && !qv[i] && !(!f_end && qh_v && qh == i)) begin
                     qv[i] <= 1'b1; qa[i] <= inv_idx; qt[i] <= c_tnow; done = 1'b1;
                 end
+        end
         end
         if (G == 0) begin
             // the sweep reads entry sp, and writes it back invalid with its
@@ -315,7 +368,12 @@ module nds_lcache #(
     end
 
 `ifndef ALTERA_RESERVED_QIS
+    initial if (MATCH_ONLY && (!PUMP || !WLATE || !INV_TAGGED || G != 0 || !CHECK))
+        $error("nds_lcache: match service needs pumped registered tagged G0 check");
+    initial if (INV_TAGGED && (G != 0 || !CHECK)) $error("nds_lcache: tagged invalidations need G0/CHECK");
     always_ff @(posedge clk) begin
+        if (INV_TAGGED && !rst && inv && (!c_v || (MATCH_ONLY ? !c_hit : inv_tag !== c_tag)))
+            $error("nds_lcache: supplied invalidation tag was not checked against the valid entry");
         if (inv && !inv_w && !(f_end && inv_idx == f_idx) && &qv)
             $display("nds_lcache: invalidation queue overflow (an invalidation is lost)");
         if (f_end && f_ok && !dirty[cur]) $display("nds_lcache: internal: cur not marked dirty");

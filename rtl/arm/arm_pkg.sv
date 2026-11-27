@@ -174,4 +174,70 @@ package arm_pkg;
     endcase
   endfunction
 
+  // uop classes (arm9_core's queue q_cls) and the Thumb halfword's class: shared by arm9_core and arm9_mem, which
+  // decodes it per I way (RC12c-full #2570); arm_core keeps its own copies of the constants
+  localparam logic [4:0] C_DP = 5'd0, C_MRS = 5'd1, C_MSR = 5'd2, C_MUL = 5'd3, C_MULL = 5'd4,
+                         C_SWP = 5'd5, C_HW = 5'd6, C_BX = 5'd7, C_BLXR = 5'd8, C_CLZ = 5'd9,
+                         C_QOP = 5'd10, C_SMUL = 5'd11, C_BKPT = 5'd12, C_SDT = 5'd13,
+                         C_BLK = 5'd14, C_B = 5'd15, C_BLXI = 5'd16, C_SWI = 5'd17, C_CP = 5'd18,
+                         C_UND = 5'd19, C_NOP = 5'd20, C_TBR = 5'd21;
+
+  function automatic logic [4:0] thumb_class(input logic [15:0] hw);
+    logic [4:0] cls;
+    cls = C_DP;
+    case (hw[15:13])
+      3'b000, 3'b001: cls = C_DP;
+      3'b010: begin
+        if (hw[12:10] == 3'b000)      cls = (hw[9:6] == 4'hD) ? C_MUL : C_DP;
+        else if (hw[12:10] == 3'b001) cls = (hw[9:8] != 2'b11) ? C_DP : (hw[7] ? C_BLXR : C_BX);
+        else if (hw[12:11] == 2'b01)  cls = C_SDT;
+        else                          cls = hw[9] ? C_HW : C_SDT;
+      end
+      3'b011: cls = C_SDT;
+      3'b100: cls = hw[12] ? C_SDT : C_HW;
+      3'b101: begin
+        if (!hw[12])                     cls = C_DP;
+        else if (hw[11:8] == 4'b0000)    cls = C_DP;
+        else if (hw[10:9] == 2'b10)      cls = C_BLK;
+        else if (hw[11:8] == 4'b1110)    cls = C_BKPT;
+        else                             cls = C_UND;
+      end
+      3'b110: begin
+        if (!hw[12])                 cls = C_BLK;
+        else if (hw[11:8] == 4'hF)   cls = C_SWI;
+        else if (hw[11:8] == 4'hE)   cls = C_UND;
+        else                         cls = C_TBR;
+      end
+      default: begin
+        if (hw[12:11] == 2'b01) cls = !hw[0] ? C_TBR : C_UND;
+        else                    cls = C_TBR;
+      end
+    endcase
+    return cls;
+  endfunction
+
+  // The Thumb expansion's kind and condition field (arm_thumb's kind and arm[31:28], v5): decoded per I way in
+  // arm9_mem beside thumb_class (RC13b #2611 1asR: I-tag -> i_rhw -> u_thumb kind / Equal -> a_ins[31:28] -> q_w
+  // -0.510 ns); {kind[2:0], cond[3:0]}, checked against u_thumb in arm9_core every cycle
+  function automatic logic [6:0] thumb_top(input logic [15:0] hw);
+    logic [2:0] k; logic [3:0] c;
+    k = 3'd0; c = 4'hE;                                   // TK_ARM, always
+    case (hw[15:13])
+      3'b101: if (hw[12] && hw[11:8] != 4'b0000 && hw[10:9] != 2'b10 && hw[11:8] != 4'b1110) begin
+                k = 3'd5; c = 4'h0;                       // TK_UND, arm 0
+              end
+      3'b110: if (hw[12]) begin
+                if (hw[11:8] == 4'hE)      begin k = 3'd5; c = 4'h0; end   // TK_UND
+                else if (hw[11:8] != 4'hF) begin k = 3'd1; c = hw[11:8]; end // B<cond>
+              end
+      3'b111: case (hw[12:11])
+                2'b00: k = 3'd1;                          // B
+                2'b01: k = !hw[0] ? 3'd4 : 3'd5;          // BLX suffix / UND
+                2'b10: k = 3'd2;                          // BL prefix
+                default: k = 3'd3;                        // BL suffix
+              endcase
+      default: ;
+    endcase
+    return {k, c};
+  endfunction
 endpackage

@@ -41,7 +41,12 @@ module gpu3d_gxfront #(
     parameter int SP_AW = 12,             // 4,096 entries (32 KiB): the deepest measured, sm64-pipes, ~2,600 (docs/geometry-engine.md)
     parameter logic [23:0] SP_BASEW = 24'h0C0000,  // byte 0x300000 (free SDRAM, docs/phase2-integration.md)
     parameter int SP_ON = 512,         // SPILL: on-chip entries before spilling (tests: fewer)
-    parameter bit GATH16 = 1'b0        // SPILL: a 16-entry gather (same MLAB) instead of 8: the writes wait less for a block write behind the ring
+    parameter bit GATH16 = 1'b0,       // SPILL: a 16-entry gather (same MLAB) instead of 8: the writes wait less for a block write behind the ring
+    // SP_LEAN (SPILL): the same spill, its decisions from two counters instead of the pointers' differences: g = sw - swb
+    // (entries gathered, not block-written, 0..2^GA) and sq = sw - sr (spilled, not back on chip). inA = sq <= g, a block
+    // ready g >= 4, the gather full g = 2^GA, a block read's drain test sq > g + 4 nb: no 16-bit subtracts or adder; sw
+    // keeps only the gather's GA bits. The simulation also computes the pointer forms and stops on any difference
+    parameter bit SP_LEAN = 1'b0
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -425,7 +430,10 @@ module gpu3d_gxfront #(
         logic [SP_AW-1:0] sw, swb, sr;     // gather write, next block to write, refill read (entry indices)
         logic [2:0]  nb;                    // blocks before swb not yet seen drained into SDRAM (swd = swb - 4 nb: swb a clock old,
         logic        adv_q;                 //   taken while drained, as the ring's wsafe); adv_q: swb advanced last clock
-        wire  [SP_AW:0] sq = {1'b0, sw - sr};   // spilled entries not yet back on chip (at most SPN - 64: sp_full)
+        logic [SP_AW:0] sqc;                // SP_LEAN: sw - sr, counted
+        logic [GA:0]    gc;                 // SP_LEAN: sw - swb, counted
+        wire  [SP_AW:0] sq = SP_LEAN ? sqc : {1'b0, sw - sr};   // spilled entries not yet back on chip (at most SPN - 64: sp_full)
+        wire  [GA:0]    gq = SP_LEAN ? gc : (GA+1)'(sw - swb);  // gathered entries not yet block-written (at most 2^GA)
         assign sp_used = 13'(occ) + 13'(sq);
         logic [SP_AW:0] ul;                 // (at most occ + sq < SPN + 512)
         logic [39:0] g_q;
@@ -442,7 +450,10 @@ module gpu3d_gxfront #(
         // refill: from the gather (sr's block not written yet) one entry a clock, or a block read
         // sr in the gather (at or past swb, the oldest unwritten block) or already in SDRAM (behind swb)
         wire [SP_AW-1:0] srb = sr - swb;
-        wire inA    = srb < SP_AW'(GATH16 ? 32 : 16);   // (behind swb: srb >= 64, sq <= SPN - 64)
+        wire inA_p  = srb < SP_AW'(GATH16 ? 32 : 16);   // (behind swb: srb >= 64, sq <= SPN - 64)
+        // SP_LEAN: sr - swb = g - sq, which is in [0, g] while sr is in the gather and wraps far above 2^GA behind it
+        wire sq_lo  = sq[SP_AW:GA+1] == '0;            // SP_LEAN: sq <= 2^(GA+1) - 1
+        wire inA    = SP_LEAN ? sq_lo && sq[GA:0] <= gq : inA_p;
         wire gfill  = sq != '0 && inA && !ract && !wact && occ < 10'd512;   // (the gather's read port: the block writer's first)
         wire rvw    = ract && sp_rvalid && rw[0] && 2'(rw[2:1]) >= rj0;     // a block word completing a wanted entry
         wire ent_we = direct || gfill || rvw;
@@ -452,13 +463,14 @@ module gpu3d_gxfront #(
         gpu3d_lram #(.W(40), .AW(GA), .FE(GAT_FE)) u_gat (.clk, .we(push), .waddr(sw[GA-1:0]), .wdata(ram_wd),
                                             .raddr(wact ? {swb[GA-1:2], wsec} : sr[GA-1:0]), .rdata(g_q));
         // (no capacity term: occ + sq reaches 511 + SPN - 8 only past the last term's SPN - 64)
-        assign sp_full  = (sq != '0 || occ >= 10'(SP_ON)) && (sw - swb) >= SP_AW'(1 << GA) ||
-                          !(sq == '0 && occ < 10'(SP_ON)) && sq >= (SP_AW+1)'(SPN - 64);   // (inA's modular window)
+        assign sp_full  = (sq != '0 || occ >= 10'(SP_ON)) && (SP_LEAN ? gq[GA] : (sw - swb) >= SP_AW'(1 << GA)) ||
+                          !(sq == '0 && occ < 10'(SP_ON)) && (SP_LEAN ? sq[SP_AW] || &sq[SP_AW-1:6]   // (SPN - 64: bits 6 up all ones)
+                                                                      : sq >= (SP_AW+1)'(SPN - 64));   // (inA's modular window)
         assign e_avail  = ul != '0 && occ > 10'(w1) + 10'(w2);
         assign e_more   = ul != '0;
         // the block writer: swb's block once its 4 entries are in the gather (skipped if the refill took it already)
-        wire wskip = !wact && nb != 3'd7 && inA && srb >= SP_AW'(4);
-        wire wneed = !wact && nb != 3'd7 && !wskip && (sw - swb) >= SP_AW'(4);
+        wire wskip = !wact && nb != 3'd7 && inA && (SP_LEAN ? gq - sq[GA:0] >= (GA+1)'(4) : srb >= SP_AW'(4));
+        wire wneed = !wact && nb != 3'd7 && !wskip && (SP_LEAN ? gq >= (GA+1)'(4) : (sw - swb) >= SP_AW'(4));
         wire adv   = wskip || wact && sp_wack && wwd && wsec == 2'd3;
         assign sp_wreq  = wact;
         assign sp_waddr = SP_BASEW + 24'({swb[SP_AW-1:2], wsec, wwd});
@@ -468,14 +480,18 @@ module gpu3d_gxfront #(
         // (swb - sr > 4 nb: with sr behind swb (!inA), the block count -srb/4 above nb, i.e. no carry out of
         // srb's blocks + nb)
         wire [SP_AW-2:0] rnb = {1'b0, srb[SP_AW-1:2]} + (SP_AW-1)'(nb);
-        wire rneed = !ract && sq != '0 && !inA && !rnb[SP_AW-2] && occ <= 10'd508;
+        wire rneed_p = !ract && sq != '0 && !inA_p && !rnb[SP_AW-2] && occ <= 10'd508;
+        // SP_LEAN: the block at sr is drained when swb - sr = sq - g > 4 nb (the pointer form's no-carry test); that
+        // also says sq != 0 and sr behind swb. g + 4 nb is at most 2^GA + 28
+        wire [5:0] g4nb = 6'(gq) + 6'({nb, 2'b00});
+        wire rneed = SP_LEAN ? !ract && (sq[SP_AW:6] != '0 || sq[5:0] > g4nb) && occ <= 10'd508 : rneed_p;
         logic rreq_q;
         assign sp_rreq  = rreq_q;
         assign sp_raddr = SP_BASEW + 24'({sr[SP_AW-1:2], 3'd0});
         always_ff @(posedge clk) begin
             w2 <= w1; w1 <= ent_we;
             if (rst) begin
-                oc <= '0; occ <= '0; sw <= '0; swb <= '0; nb <= '0; adv_q <= 1'b0; sr <= '0; ul <= '0;
+                oc <= '0; occ <= '0; sw <= '0; swb <= '0; nb <= '0; adv_q <= 1'b0; sr <= '0; ul <= '0; sqc <= '0; gc <= '0;
                 wact <= 1'b0; wsec <= '0; wwd <= 1'b0; ract <= 1'b0; rreq_q <= 1'b0; rw <= '0; w1 <= 1'b0; w2 <= 1'b0;
             end else begin
                 ul <= ul + (SP_AW+1)'(do_exec) - (SP_AW+1)'(pop);
@@ -483,6 +499,12 @@ module gpu3d_gxfront #(
                 if (ent_we) oc <= oc + 9'd1;
                 if (push) sw <= sw + SP_AW'(1);
                 if (gfill || rvw) sr <= sr + SP_AW'(1);
+`ifdef GX_SPLEAN_MUT
+                gc  <= gc + (GA+1)'(push) - ((wact && sp_wack && wwd && wsec == 2'd3) ? (GA+1)'(4) : '0);   // (mutant: a skipped block not counted)
+`else
+                gc  <= gc + (GA+1)'(push) - (adv ? (GA+1)'(4) : '0);
+`endif
+                sqc <= sqc + (SP_AW+1)'(push) - (SP_AW+1)'(gfill || rvw);
                 adv_q <= adv;
                 nb <= sp_wdrained ? 3'(adv_q) + 3'(adv) : nb + 3'(adv);
                 // the block writer
@@ -524,6 +546,17 @@ module gpu3d_gxfront #(
         always_ff @(posedge clk)
             if (!rst && !inA && (SP_AW'(swb - sr) > SP_AW'({nb, 2'b00})) == rnb[SP_AW-2])
                 $error("gpu3d_gxfront SPILL: the read test's carry form disagrees (swb %0d sr %0d nb %0d)", swb, sr, nb);
+        // SP_LEAN: the counters and every decision against the pointer forms, each clock
+        always_ff @(posedge clk) if (SP_LEAN && !rst) begin
+            if (sqc != {1'b0, sw - sr} || gc != (GA+1)'(sw - swb))
+                $fatal(1, "gpu3d_gxfront SP_LEAN: sq %0d != sw - sr %0d or g %0d != sw - swb %0d", sqc, SP_AW'(sw - sr), gc, SP_AW'(sw - swb));
+            if (inA != inA_p || rneed != rneed_p || wskip != (!wact && nb != 3'd7 && inA_p && srb >= SP_AW'(4))
+                || wneed != (!wact && nb != 3'd7 && !wskip && (sw - swb) >= SP_AW'(4))
+                || sp_full != ((sq != '0 || occ >= 10'(SP_ON)) && (sw - swb) >= SP_AW'(1 << GA)
+                               || !(sq == '0 && occ < 10'(SP_ON)) && sq >= (SP_AW+1)'(SPN - 64)))
+                $fatal(1, "gpu3d_gxfront SP_LEAN: a decision differs from the pointer form (inA %0d/%0d rneed %0d/%0d sq %0d g %0d nb %0d)",
+                       inA, inA_p, rneed, rneed_p, sq, gq, nb);
+        end
         logic [SP_AW-1:0] swb_q, swd;       // the drain point as first built (swb a clock old, taken while drained)
         always_ff @(posedge clk) begin
             dp_q <= dp; swb_q <= rst ? '0 : swb;

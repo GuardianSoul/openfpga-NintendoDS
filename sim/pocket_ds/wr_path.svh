@@ -36,7 +36,7 @@
     longint wp_e[8]; logic [14:0] wp_lrow; logic [2:0] wp_pst = 0; bit wp_lv = 0; longint wp_same = 0, wp_rdh = 0, wp_rdn = 0;
     always @(posedge dut.clk_mem) if (wp_on && !dut.rst_sys) begin
         if (`WP_M.st == 3'd4 && `WP_M.stn && `WP_M.ch_hi && (!`WP_M.bw_valid || !`WP_M.q_row || `WP_M.bw_addr != {`WP_M.q_addr[23:8], `WP_M.q_inc}
-              || `WP_M.chain_n == 6'd31 || `WP_M.ref_owed != 0 || `WP_M.c_hurry || (`WP_M.SOFT_MIN != 0 && `WP_M.c_soft && `WP_M.chain_n >= 6'(`WP_M.SOFT_MIN - 1)))) begin
+              || `WP_M.chain_n == 6'd31 || `WP_M.ref_owed != 0 || `WP_M.c_hurry)) begin
             if (!`WP_M.bw_valid) wp_e[0]++;
             else if (!`WP_M.q_row) wp_e[1]++;
             else if (`WP_M.bw_addr != {`WP_M.q_addr[23:8], `WP_M.q_inc}) wp_e[2]++;

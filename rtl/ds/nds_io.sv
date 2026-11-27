@@ -15,11 +15,14 @@
 //   both     0xF00-0xF27 core registers for the boot program (BOOTCTL, a
 //            scratch word, touch calibration, ROM size, core ID, memory
 //            state, save types, the APF's date and time)
-module nds_io (
+module nds_io #(parameter bit CART_EARLY = 0) (
     input  logic        clk,
     input  logic        rst,
     // from the fabric
     input  logic        io_req,
+    input  logic        io_pre,
+    input  logic        io_cart_hit,
+    input  logic [2:0]  io_cart_reg,
     input  logic        io_cpu,
     input  logic        io_we,
     input  logic [3:0]  io_be,
@@ -92,9 +95,10 @@ module nds_io (
     always_comb begin
         dev = D_NONE;
         creg = 3'd0;
-        if (!a9 && wa[21]) dev = D_WIFI;                                    // ARM7 0x4800000-0x4FFFFFF: the WiFi block
+        if (CART_EARLY && io_cart_hit) begin dev = D_CART; creg = io_cart_reg; end
+        else if (!a9 && wa[21]) dev = D_WIFI;                                    // ARM7 0x4800000-0x4FFFFFF: the WiFi block
         else if (wa == 22'h04_0000) dev = D_SYS;                            // 0x4100000 IPCFIFORECV
-        else if (wa == 22'h04_0004) begin dev = D_CART; creg = 3'd4; end    // 0x4100010 card data
+        else if (!CART_EARLY && wa == 22'h04_0004) begin dev = D_CART; creg = 3'd4; end    // 0x4100010 card data
         else if (wa[21:12] == 10'd0) begin
             // 0x04000000-0x04003FFF
             if (a9 && (wa[11:0] <= 12'h017 || wa[11:0] == 12'h019 || wa[11:0] == 12'h01B ||
@@ -103,7 +107,7 @@ module nds_io (
             else if ((wa[11:0] >= 12'h02C && wa[11:0] <= 12'h03B) || (wa[11:0] >= 12'h040 && wa[11:0] <= 12'h043) ||
                      (wa[11:0] >= 12'h060 && wa[11:0] <= 12'h062) || wa[11:0] == 12'h082 || wa[11:0] == 12'h084 ||
                      wa[11:0] == 12'h085 || (a9 && wa[11:0] >= 12'h0A0 && wa[11:0] <= 12'h0AF)) dev = D_SYS;
-            else if (wa[11:0] >= 12'h068 && wa[11:0] <= 12'h06E) begin dev = D_CART; creg = wa[2:0] == 3'd0 ? 3'd0 : wa[2:0] == 3'd1 ? 3'd1 : wa[2:0] == 3'd2 ? 3'd2 : wa[2:0] == 3'd3 ? 3'd3 : 3'd5; end
+            else if (!CART_EARLY && wa[11:0] >= 12'h068 && wa[11:0] <= 12'h06E) begin dev = D_CART; creg = wa[2:0] == 3'd0 ? 3'd0 : wa[2:0] == 3'd1 ? 3'd1 : wa[2:0] == 3'd2 ? 3'd2 : wa[2:0] == 3'd3 ? 3'd3 : 3'd5; end
             else if (!a9 && wa[11:0] == 12'h070) dev = D_SPI;
             else if (!a9 && wa[11:0] == 12'h04E) dev = D_RTC;
             else if (!a9 && wa[11:0] >= 12'h100 && wa[11:0] <= 12'h147) dev = snd_real ? D_SND : D_MISC;
@@ -113,8 +117,9 @@ module nds_io (
     end
     assign sys_req  = io_req && dev == D_SYS;
     assign disp_req = io_req && dev == D_DISP;
-    assign cart_req = io_req && dev == D_CART;
-    assign cart_reg = creg;
+    // Cartridge addresses cannot hit either of the fabric's GX holds.
+    assign cart_req = CART_EARLY ? io_pre && io_cart_hit : io_req && dev == D_CART;
+    assign cart_reg = CART_EARLY ? io_cart_reg : creg;
     assign spi_req  = io_req && dev == D_SPI;
     assign rtc_req  = io_req && dev == D_RTC;
 

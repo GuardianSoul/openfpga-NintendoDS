@@ -46,6 +46,7 @@ module nds_disp
     parameter bit WST_RF = 1,         // gpu2d: per-pass state words read from its register file
     parameter int TEX_IDXW = 6,       // gpu2d: log2 blocks in the BG texel cache
     parameter int OTEX_IDXW = 6,      // gpu2d: log2 blocks in the OBJ texel cache
+    parameter bit OPFT = 0,           // gpu2d OPFT (nds_top G2D_OPFT)
     parameter bit MOSAIC   = 1,       // 0: no BG/OBJ mosaic (fit setting): MOSAIC reads as size 0
     parameter bit CAPTURE  = 1,       // 0: no display capture (gpu2d CAPTURE, a temporary fit setting): DISPCAPCNT bit 31 still clears at the frame's end
     parameter bit OAM_CPU  = 0,       // gpu2d OAM_CPU: CPU OAM reads through the 2D engine's OAM
@@ -63,9 +64,12 @@ module nds_disp
     parameter bit CFL = 0,            // gpu2d CFL (nds_top G2D_CFL)
     parameter int THASH = 1,          // gpu2d THASH (nds_top G2D_THASH)
     parameter bit CWF = 0,            // gpu2d CWF (nds_top G2D_CWF)
-    parameter int AMF = 0             // gpu2d AMF (nds_top G2D_CFL 2: 1, 3: 2)
+    parameter int AMF = 0,            // gpu2d AMF (nds_top G2D_CFL 2: 1, 3: 2)
+    parameter int WSPLIT = 0          // gpu2d WSPLIT (nds_top G2D_WSPLIT)
 ) (
-    input  logic        vram_wr,        // VRAM or VRAMCNT written (the 2D engine's caches)
+    input  logic        vram_wr,        // VRAM or VRAMCNT written (the 2D engine's caches; WSPLIT: the BG side's)
+    input  logic        vram_wr_o,      // WSPLIT: a write that can reach an OBJ view's blocks, or VRAMCNT
+    input  logic [1:0]  vram_wr_e,      // WSPLIT 2: one that can reach engine [e]'s BG view's blocks, or VRAMCNT
     input  logic        vw_v,           // G2D_CFL 2: a CPU/DMA write through a BG/OBJ view, its 2D block
     input  logic [17:0] vw_blk,
     // 3D layer (nds_gpu3d): engine A's BG job for l3d_line reads x = l3d_raddr
@@ -820,8 +824,8 @@ module nds_disp
     logic [7:0]  fifo_raddr;
     // PERSIST: the 2D engine keeps its VRAM block caches across lines until
     // VRAM or VRAMCNT is written (a 4-bit tile block serves eight lines)
-    gpu2d #(.PERSIST(1), .OAM_CPU(OAM_CPU), .WST_RF(WST_RF), .TEX_IDXW(TEX_IDXW), .OTEX_IDXW(OTEX_IDXW), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .TAG_MLAB(TAG_MLAB), .CFL(CFL), .AMF(AMF), .THASH(THASH), .CBD(CBD), .ER(ER), .CWF(CWF)) u_gpu2d (
-        .clk, .rst, .vram_wr, .vw_v, .vw_blk,
+    gpu2d #(.PERSIST(1), .OAM_CPU(OAM_CPU), .WST_RF(WST_RF), .TEX_IDXW(TEX_IDXW), .OTEX_IDXW(OTEX_IDXW), .OPFT(OPFT), .MOSAIC(MOSAIC), .CAPTURE(CAPTURE), .TAG_MLAB(TAG_MLAB), .CFL(CFL), .AMF(AMF), .THASH(THASH), .CBD(CBD), .ER(ER), .CWF(CWF), .WSPLIT(WSPLIT)) u_gpu2d (
+        .clk, .rst, .vram_wr, .vram_wr_o, .vram_wr_e, .vw_v, .vw_blk,
         .st_we, .st_eng, .st_addr, .st_data,
         .pal_we, .pal_waddr(po_waddr), .pal_wdata(po_wdata), .pal_be(po_be), .pal_cq,
         .oam_cre, .oam_cra(po_waddr), .oam_cgnt, .oam_cq,

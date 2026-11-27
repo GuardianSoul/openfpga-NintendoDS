@@ -38,11 +38,18 @@ SETTINGS = [
     # rotated modes 2 (Left) and 3 (Right) for book-style games
     ('Screen Rotation', 8, 0x5000_0010, 4, 2, 0, [
         (0, 'Off'), (1, 'Left'), (2, 'Right')]),
-    # option labels : what the combo does, or Off
-    ('SELECT + L/R', 9, 0x5000_0014, 0, 1, 0, [
-        (0, 'Swap Screens'), (1, 'Off')]),
-    ('SELECT + A/B/X/Y', 10, 0x5000_0018, 1, 1, 0, [
-        (0, 'Toggle Touch'), (1, 'Off')]),
+    # Aspect Ratio (2026-11-14; openfpga-PlayStation's "Aspect Ratio: Original / Fill Screen"): single-screen layouts
+    # only (top only, bottom only): Fill Screen sends them through video.json mode 6 at the Pocket's 10:9, 16:9
+    # docked. Stacked stays Original (two screens can't fill the Pocket); rotated single screens too (APF has 8
+    # scaler modes: their two Fill twins don't fit)
+    ('Aspect Ratio', 15, 0x5000_002C, 18, 1, 0, [
+        (0, 'Original'), (1, 'Fill Screen')]),
+    # the maintainer 2026-11-27: "Screen Toggle" and "Cursor Toggle", named for what they toggle (ids, values and
+    # defaults unchanged, so saved choices carry over; 0 = the combo on, listed first so it is the default)
+    ('Screen Toggle', 9, 0x5000_0014, 0, 1, 0, [
+        (0, 'SELECT + L/R'), (1, 'Off')]),
+    ('Cursor Toggle', 10, 0x5000_0018, 1, 1, 0, [
+        (0, 'SELECT + A/B/X/Y'), (1, 'Off')]),
     # Cursor Speed: Slow 1, Normal 3, Fast 6 px/frame (the maintainer wants it faster;
     # ids 3 and 5 were earlier speed sets, so a new id resets saved positions)
     ('Touch: Cursor Speed', 6, 0x5000_0008, 2, 2, 1, [
@@ -53,10 +60,11 @@ SETTINGS = [
 ] + [(f'Touch: {b} Button', vid, addr, bit, 3, dv, GESTURES)
      for b, vid, addr, bit, dv in [('A', 11, 0x5000_001C, 6, 1), ('B', 12, 0x5000_0020, 9, 0),
                                    ('X', 13, 0x5000_0024, 12, 0), ('Y', 14, 0x5000_0028, 15, 0)]]
-PACKET_BITS = 18
+PACKET_BITS = 19
 MAX_LABEL = 19   # 18 until "Touch: Cursor Speed" (2026-11-06); the menu showed 19 in #217
 # RTL names of settings renamed in the menu, so the header's localparams stay put
-TAGS = {f'Touch: {b} Button': f'{b}_IN_TOUCH_MODE' for b in 'ABXY'} | {'Touch: Cursor Speed': 'CURSOR_SPEED'}
+TAGS = {f'Touch: {b} Button': f'{b}_IN_TOUCH_MODE' for b in 'ABXY'} | {'Touch: Cursor Speed': 'CURSOR_SPEED',
+        'Screen Toggle': 'SELECT_LR', 'Cursor Toggle': 'SELECT_ABXY'}
 
 
 def interact_variables():

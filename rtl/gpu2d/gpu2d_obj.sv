@@ -22,6 +22,10 @@ module gpu2d_obj
     parameter bit MOSAIC   = 1,
     parameter bit EXT_TAG_MLAB = 0,  // ext-palette cache tags in its data words (gpu2d_cache TAG_DATA)
     parameter int OHASH = 0,         // the texel cache's index (gpu2d_cache HASH; 1: the block's upper bits, the engine with them, folded in)
+    // OPFT (the 2D block-read fix, alt-speed-room 2026-11-20): the prefetch scan looks each block up in the texel cache
+    // (its port is free until the drawing scan) and queues only the blocks it misses: an OBJ's tile row serves 8 lines,
+    // so most of a line's row blocks are cached from the line before (burnout-race: 87K of 129K OBJ prefetches)
+    parameter bit OPFT = 0,
     parameter int AMF = 0            // gpu2d_bg AMF, for OBJ-view writes and the texel cache
 ) (
     input  logic        clk,
@@ -225,13 +229,13 @@ module gpu2d_obj
     logic [9:0]     c_gen;
     logic [CSW-1:0] c_scrub, c_scrub_q;
     logic           c_scrub_v;
-    gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .idle(os == O_IDLE), .gen(c_gen), .scrub(c_scrub),
+    gpu2d_cgen #(.SW(CSW)) u_cgen (.clk, .clear(cclear), .sel(1'b0), .idle(os == O_IDLE), .gen(c_gen), .gen_o(), .scrub(c_scrub),
         .scrub_q(c_scrub_q), .scrub_v(c_scrub_v));
-    gpu2d_cache #(.ER(ER), .IDXW(TEX_IDXW), .HASH(OHASH), .HALF(1)) u_tc (.clk, .idle(os == O_IDLE), .gen(c_gen), .lgen(c_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[TEX_IDXW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(TEX_IDXW), .HASH(OHASH), .HALF(1)) u_tc (.clk, .idle(os == O_IDLE), .gen(c_gen), .gen_o({c_gen, c_gen}), .lgen(c_gen), .inv_v(w_inv), .inv_blk(w_blk), .scrub(c_scrub[TEX_IDXW-1:0]),
         .scrub_q(c_scrub_q[TEX_IDXW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(t_ablk), .a_word(t_aword), .a_half(t_aword_h),
         .q(t_q), .hit(t_hit), .cur_blk(t_cur), .cur_word(t_curw),
         .fill_we(fill_we[0]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
-    gpu2d_cache #(.ER(ER), .IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .VLO(8)) u_ec (.clk, .idle(os == O_IDLE), .gen(c_gen), .lgen(c_gen), .inv_v(1'b0), .inv_blk('0), .scrub(c_scrub[ESW-1:0]),
+    gpu2d_cache #(.ER(ER), .IDXW(EXT_IDXW), .TAG_DATA(EXT_TAG_MLAB), .VLO(8)) u_ec (.clk, .idle(os == O_IDLE), .gen(c_gen), .gen_o({c_gen, c_gen}), .lgen(c_gen), .inv_v(1'b0), .inv_blk('0), .scrub(c_scrub[ESW-1:0]),
         .scrub_q(c_scrub_q[ESW-1:0]), .scrub_v(c_scrub_v), .hold(stall), .a_blk(e_ablk), .a_word(e_aword), .a_half(2'd0),
         .q(e_q), .hit(e_hit), .cur_blk(e_cur), .cur_word(e_curw),
         .fill_we(fill_we[1]), .fill_blk(fill_fblk), .fill_beat, .fill_first, .fill_last, .fill_data);
@@ -283,6 +287,17 @@ module gpu2d_obj
     assign pf_ok   = os == O_PSCAN && e_on && !e_skip && !e_type[0];
     assign pf_push = os == O_PPUSH && !pf_n[PFQW];
     assign pf_in   = {SP_OBJ, j_eng, 1'b0, 13'((p_base & o_mask_n) >> 5)};
+    // OPFT: the candidate looked up in O_PPUSH (pf_c*) is queued a clock later if the cache missed it (t_hit is that
+    // lookup's answer: no hold while the drawing pipeline is empty) and the queue still has room
+    logic             pf_cv = 1'b0, pf_push_e;
+    blk_t             pf_cblk, pf_in_e;
+    logic [6:0]       pf_cidx, pf_idx_e;
+    always_ff @(posedge clk) begin
+        pf_cv <= OPFT && !rst && pf_push; pf_cblk <= pf_in; pf_cidx <= p_idx;
+    end
+    assign pf_push_e = OPFT ? pf_cv && !t_hit && !pf_n[PFQW] : pf_push;
+    assign pf_in_e   = OPFT ? pf_cblk : pf_in;
+    assign pf_idx_e  = OPFT ? pf_cidx : p_idx;
     // (a texel miss stalls in the clock it shows, so t_cur still holds its block)
     always_ff @(posedge clk) tmiss_q <= fill_req[0];
     assign tcur_q = t_cur;
@@ -298,24 +313,24 @@ module gpu2d_obj
     assign pf_stale = os >= O_REQ && pfr_idx < n;
     assign pf_pop  = pf_n != 0 && !pfr_v;
     gpu2d_ram #(.W($bits(blk_t) + 7), .AW(PFQW)) u_pfq (
-        .clk, .we(pf_push), .waddr(pf_wp), .wdata({p_idx, pf_in}),
+        .clk, .we(pf_push_e), .waddr(pf_wp), .wdata({pf_idx_e, pf_in_e}),
         .raddr(pf_pop ? pf_rp + 1'b1 : pf_rp), .rdata({pf_rdi, pf_rd}));
     assign pf_head  = pf_bypv ? pf_byp  : pf_rd;
     assign pf_headi = pf_bypv ? pf_bypi : pf_rdi;
     assign fill_req[2] = pfr_v && !pf_stale;
     assign fill_blk[2] = pfr_blk;
     always_ff @(posedge clk) begin
-        pf_bypv <= pf_push && (pf_n == 0 || (pf_n == 1 && pf_pop));
-        pf_byp  <= pf_in;
-        pf_bypi <= p_idx;
+        pf_bypv <= pf_push_e && (pf_n == 0 || (pf_n == 1 && pf_pop));
+        pf_byp  <= pf_in_e;
+        pf_bypi <= pf_idx_e;
         if (rst || os == O_INIT) begin
             pf_wp <= '0; pf_rp <= '0; pf_n <= '0; pf_bypv <= 1'b0; pfr_v <= 1'b0;
         end else begin
             if (pf_pop) begin pfr_v <= 1'b1; pfr_blk <= pf_head; pfr_idx <= pf_headi; end
             else if (pf_ack || pf_take || (pfr_v && pf_stale)) pfr_v <= 1'b0;
-            if (pf_push) pf_wp <= pf_wp + 1'b1;
+            if (pf_push_e) pf_wp <= pf_wp + 1'b1;
             if (pf_pop)  pf_rp <= pf_rp + 1'b1;
-            pf_n <= pf_n + (pf_push ? 1'b1 : 1'b0) - (pf_pop ? 1'b1 : 1'b0);
+            pf_n <= pf_n + (pf_push_e ? 1'b1 : 1'b0) - (pf_pop ? 1'b1 : 1'b0);
         end
     end
     assign stat_stall = stall;
@@ -348,6 +363,7 @@ module gpu2d_obj
         end
         p0_a = o_base + (o_aff ? arow : 18'd0) + p0_off;
         t_ablk  = {SP_OBJ, j_eng, 1'b0, 13'((p0_a & o_mask) >> 5)};
+        if (OPFT && os == O_PPUSH) t_ablk = pf_in;          // OPFT: the scan's candidate, answered next clock
         t_aword = p0_a[4:3];
         t_aword_h = p0_a[2:1];
     end

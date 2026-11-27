@@ -7,10 +7,16 @@
 // them.
 module nds_blk_arb
     import gpu2d_pkg::*;
-(
+#(
+    // TXF (the 2D block-read fix): the 3D texture / palette blocks (b) go first unless the 2D engine's line is near its
+    // deadline (a_hurry: nds_disp HURRY_AT); 0: the 2D engine (a) always first. The 2D side keeps its line's slack, the
+    // raster stops waiting behind 2D prefetch bursts
+    parameter bit TXF = 0
+) (
     input  logic clk,
     input  logic rst,
     input  logic a_req,
+    input  logic a_hurry,        // TXF: the 2D engine's blocks are urgent (hurry2d)
     input  blk_t a_blk,
     input  logic [1:0] a_word,   // a's first 64-bit word (gpu2d CWF; b's blocks start at 0)
     output logic a_ack,
@@ -25,7 +31,7 @@ module nds_blk_arb
     input  logic g_ack,
     input  logic g_rvalid
 );
-    wire pick_b = !a_req;
+    wire pick_b = TXF ? b_req && !(a_req && a_hurry) : !a_req;
     assign g_req = a_req || b_req;
     assign g_blk = pick_b ? b_blk : a_blk;
     assign g_word = pick_b ? 2'd0 : a_word;

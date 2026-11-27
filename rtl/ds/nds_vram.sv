@@ -246,6 +246,24 @@ module nds_vram
         endcase
     endfunction
 
+`ifdef G2D_ABL_BLK
+    // (G2D_ABL_BLK, simulation only, from rc7-ablate 578b5c883: the 2D view and offset of a block, as g_view/g_off)
+    function automatic logic [23:0] abl_gvo(input blk_t b);
+        logic [3:0] v; logic [19:0] o;
+        o = {1'b0, b[13:0], 5'd0};
+        case (b[17:15])
+            SP_BG:     begin v = b[14] ? V_BBG : V_ABG;     if (b[14]) o[19:17] = 3'd0; end
+            SP_OBJ:    begin v = b[14] ? V_BOBJ : V_AOBJ;   o[19:18] = 2'd0; if (b[14]) o[17] = 1'b0; end
+            SP_BGEXT:  begin v = b[14] ? V_BBGX : V_ABGX;   o[19:15] = 5'd0; end
+            SP_OBJEXT: begin v = b[14] ? V_BOBJX : V_AOBJX; o[19:13] = 7'd0; end
+            SP_LCDC:   begin v = V_LCDC;                    o[19] = 1'b0; end
+            SP_TEX:    begin v = V_TEX;                     o[19] = 1'b0; end
+            SP_TPAL:   begin v = V_TPAL;                    o[19:17] = 3'd0; end
+            default:   v = V_NONE;
+        endcase
+        return {v, o};
+    endfunction
+`endif
     // view offset -> physical byte address (first bank wins)
     function automatic logic [20:0] resolve(input logic [71:0] vc, input logic [3:0] v, input logic [19:0] o);
         logic [20:0] r;

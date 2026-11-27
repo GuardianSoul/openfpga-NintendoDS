@@ -55,7 +55,7 @@ module tb_side import gpu2d_pkg::*; #(parameter SIDE=0);
 `endif
  .A7_IO(1),.A7_FIRST(1),.MR_BLOCK(1),.MAIN_IF_QUAD(1),.MAIN_IF_FLOW(1),.SOUND_MEM_QUAD(1),.LDM_STREAM4(1),.LDM_SERVICE(3),.LDM_HIT_EARLY(1),.IO_GRANT_EARLY(1),.DMA_FAST(1),.DMA_RA(2),.VRAM_WRITE_CUT(3),.DMA_VRAM_OVERLAP(1),.DMA_WRITE_CAPTURE_ACK(1),.DMA_READ_EARLY(1))fab(
  .clk,.rst,.wramcnt(2'd3),.exmemcnt9(8'd0),.pb_busy(1'b0),
- .dm_req,.dm_we,.dm_cpu,.dm_size32(1'b1),.dm_addr,.dm_wdata,.dm_ack,.dm_rdata,.dm_unit(1'b1),.dm_dst,.dm_more(1'b0),.dm_wgroup(1'b0),.dm_last(1'b1),.dm_vcut(1'b0),.dx_valid(),.dx_ready(1'b1),.dx_idle(1'b1),
+ .dm_req,.dm_we,.dm_cpu,.dm_size32(1'b1),.dm_addr, .dm_src(dm_addr),.dm_wdata,.dm_ack,.dm_rdata,.dm_unit(1'b1),.dm_dst,.dm_more(1'b0),.dm_wgroup(1'b0),.dm_last(1'b1),.dm_vcut(1'b0),.dx_valid(),.dx_ready(1'b1),.dx_idle(1'b1),
  .a9_req,.a9_we,.a9_n8,.a9_ldm(1'b0),.a9_ldm_meta(7'd0),.a9_addr,.a9_be(4'hf),.a9_tmr(4'd0),.a9_wdata,.a9_ack,.a9_rdata,.a9_rvalid,.a9_wnext(),
  .a7_req(fr),.a7_we(fw),.a7_addr(fa),.a7_be(fb),.a7_wdata(fd),.a7_n4(fn),.a7_ifseq(fseq),.a7_ifgen(fgen),.a7_ifword(fword),.a7_ack(fack),.a7_rdata(fq),.a7_rvalid(frvalid),
  .sn_req,.sn_we,.sn_n4(!sn_we),.sn_addr,.sn_wdata,.sn_ack,.sn_rdata,.sn_rvalid,

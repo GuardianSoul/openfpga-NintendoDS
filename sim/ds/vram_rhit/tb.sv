@@ -29,7 +29,7 @@ module tb_rhit;
   wire[31:0]byteaddr=32'h06000000|{8'd0,c_addr,2'b00}|((c_be==4'hC)?32'd2:32'd0);
   nds_fabric #(.OAM_SHARE(1)) fabric(
    .clk,.rst,.wramcnt(2'd0),.pb_busy(1'b0),
-   .dm_req(c_req&&c_dma),.dm_we(c_we),.dm_cpu(c_cpu),.dm_size32(c_be==15),.dm_addr(byteaddr),
+   .dm_req(c_req&&c_dma),.dm_we(c_we),.dm_cpu(c_cpu),.dm_size32(c_be==15),.dm_addr(byteaddr), .dm_src(byteaddr),
    .dm_unit(1'b0),.dm_more(1'b0),.dm_dst(32'd0),.dx_ready(1'b1),.dx_idle(1'b1),.dm_wdata(c_wdata),.dm_ack,.dm_rdata,
    .a9_req((c_req&&!c_dma)||map_req),.a9_we(map_req||c_we),.a9_addr(map_req?32'h04000240:byteaddr),.a9_be(map_req?4'hF:c_be),.a9_tmr(4'd0),.a9_wdata(map_req?32'h00808100:c_wdata),.a9_n8(1'b0),.a9_ack,.a9_rdata,
    .a7_req(1'b0),.a7_we(1'b0),.a7_addr(32'd0),.a7_be(4'd0),.a7_wdata(32'd0),

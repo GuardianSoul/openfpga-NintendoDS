@@ -84,6 +84,8 @@ module arm_cpu import arm_pkg::*; #(
   logic [31:0] i_addr, i_rdata;
   logic        i_hsel;                  // arm9_core: the answer's halfword (f1_pc[1]); i_rhw that halfword
   logic [15:0] i_rhw, m_i_rhw;
+  logic [4:0]  i_rcls, m_i_rcls;
+  logic [6:0]  i_rtop, m_i_rtop;         // thumb_top(i_rhw), arm9_mem's per-way decode          // thumb_class(i_rhw), arm9_mem's per-way decode
   logic        d_req, d_tid, d_priv, d_we, d_ok, d_abort, m9_kill;
   logic [1:0]  d_size;
   logic [3:0]  d_be;
@@ -93,6 +95,8 @@ module arm_cpu import arm_pkg::*; #(
   logic [31:0] cp_wdata;
   logic        m_i_ok, m_i_abort, m_d_ok, m_d_abort, m_d_wait, m_hivecs;
   logic [31:0] m_i_rdata, m_d_rdata;
+  logic [31:0] m_lw_it, m_lw_dt, m_lw_rs, d_lw_rs;   // arm9_mem's load-word sources (arm9_core's formatter)
+  logic        m_ls_it, m_ls_dt, d_ls_it, d_ls_dt;
   logic        f2_tid, wb_tid;              // which context the answer is for
   logic        haltst, halt7;               // the ARM7's HALTCNT store / accepted
 
@@ -108,9 +112,11 @@ module arm_cpu import arm_pkg::*; #(
       .hivecs({hivecs7, m_hivecs}), .irq(irq), .fiq(fiq),
       .halt_req({halt7, 1'b0}), .wake({wake7, irq[0]}),
       .i_req(i_req), .i_tid(i_tid), .i_priv(i_priv), .i_addr(i_addr), .i_addr_s(i_addr_s), .i_addr_r(i_addr_r), .i_rdr(i_rdr), .i_rdata(i_rdata),
-      .i_hsel(i_hsel), .i_rhw(i_rhw), .i_ok(i_ok), .i_abort(i_abort),
+      .i_hsel(i_hsel), .i_rhw(i_rhw), .i_rcls(i_rcls), .i_rtop(i_rtop), .i_ok(i_ok), .i_abort(i_abort),
       .d_req(d_req), .d_tid(d_tid), .d_priv(d_priv), .d_we(d_we), .d_size(d_size), .d_be(d_be),
-      .d_addr(d_addr), .d_wdata(d_wdata), .d_rdata(d_rdata), .d_ok(d_ok), .d_abort(d_abort),
+      .d_addr(d_addr), .d_wdata(d_wdata), .d_rdata(d_rdata),
+      .d_lw_it(m_lw_it), .d_lw_dt(m_lw_dt), .d_lw_rs(d_lw_rs), .d_ls_it(d_ls_it), .d_ls_dt(d_ls_dt),
+      .d_ok(d_ok), .d_abort(d_abort),
       .d_wait({1'b0, m_d_wait}), .d_kill(m9_kill),
       .cp_req(cp_req), .cp_we(cp_we), .cp_op(cp_op), .cp_wdata(cp_wdata),
       .dbg_wen(c_dbg_wen), .dbg_wa(c_dbg_wa), .dbg_wd(c_dbg_wd), .dbg_retire(c_dbg_retire),
@@ -137,13 +143,14 @@ module arm_cpu import arm_pkg::*; #(
   assign m9_dreq  = d_req && !d_tid;
   assign m9_cpreq = cp_req && !d_tid;
 
-  arm9_mem #(.RESET_CTRL(RESET_CTRL9), .WAYS(ARM9_WAYS), .IWAYS(ARM9_IWAYS != 0 ? ARM9_IWAYS : ARM9_WAYS), .BURST(ARM9_BURST), .SLOW(SLOW), .EVB(ARM9_EVB), .EVBW(ARM9_EVBW), .EARLYD(ARM9_EARLYD), .OPT(A9_OPT), .XD(A9_XD), .XI(A9_XI)) u_mem9 (
+  arm9_mem #(.RESET_CTRL(RESET_CTRL9), .WAYS(ARM9_WAYS), .IWAYS(ARM9_IWAYS != 0 ? ARM9_IWAYS : ARM9_WAYS), .BURST(ARM9_BURST), .SLOW(SLOW), .A9C_RETURN(A9_CORE), .EVB(ARM9_EVB), .EVBW(ARM9_EVBW), .EARLYD(ARM9_EARLYD), .OPT(A9_OPT), .XD(A9_XD), .XI(A9_XI)) u_mem9 (
     .clk(clk), .rst(rst),
     .i_req(m9_ireq), .i_priv(i_priv), .i_addr(i_addr), .i_addr_s(i_addr_s), .i_addr_r(i_addr_r), .i_rdr(i_rdr),
-    .i_rdata(m_i_rdata), .i_hsel(i_hsel), .i_rhw(m_i_rhw), .i_ok(m_i_ok), .i_abort(m_i_abort),
+    .i_rdata(m_i_rdata), .i_hsel(i_hsel), .i_rhw(m_i_rhw), .i_rcls(m_i_rcls), .i_rtop(m_i_rtop), .i_ok(m_i_ok), .i_abort(m_i_abort),
     .d_req(m9_dreq), .d_kill(m9_kill), .d_we(d_we), .d_priv(d_priv), .d_be(d_be), .d_addr(d_addr),
     .d_wdata(d_wdata), .cp_req(m9_cpreq), .cp_we(cp_we), .cp_op(cp_op), .cp_wdata(cp_wdata),
-    .d_rdata_f(m_d_rdata), .d_ok(m_d_ok), .d_abort(m_d_abort), .d_wait(m_d_wait),
+    .d_rdata_f(m_d_rdata), .d_lw_it(m_lw_it), .d_lw_dt(m_lw_dt), .d_lw_rs(m_lw_rs), .d_ls_it(m_ls_it), .d_ls_dt(m_ls_dt),
+    .d_ok(m_d_ok), .d_abort(m_d_abort), .d_wait(m_d_wait),
     .hivecs(m_hivecs),
     .b_n8(b9_n8), .b_wnext(b9_wnext), .dg_fill(dg_fill), .b_req(b9_req), .b_we(b9_we), .b_addr(b9_addr), .b_wdata(b9_wdata), .b_be(b9_be), .b_tmr(b9_tmr),
     .b_ack(b9_ack), .b_rdata(b9_rdata));
@@ -192,9 +199,14 @@ module arm_cpu import arm_pkg::*; #(
 
   assign i_rdata = f2_tid ? a7_i_rdata : m_i_rdata;
   assign i_rhw   = f2_tid ? (i_hsel ? a7_i_rdata[31:16] : a7_i_rdata[15:0]) : m_i_rhw;
+  assign i_rcls  = f2_tid ? thumb_class(i_hsel ? a7_i_rdata[31:16] : a7_i_rdata[15:0]) : m_i_rcls;
+  assign i_rtop  = f2_tid ? thumb_top(i_hsel ? a7_i_rdata[31:16] : a7_i_rdata[15:0]) : m_i_rtop;
   assign i_ok    = f2_tid ? a7_i_ok : m_i_ok;
   assign i_abort = f2_tid ? 1'b0 : m_i_abort;
   assign d_rdata = wb_tid ? a7_d_rdata : m_d_rdata;
+  assign d_lw_rs = wb_tid ? a7_d_rdata : m_lw_rs;
+  assign d_ls_it = !wb_tid && m_ls_it;
+  assign d_ls_dt = !wb_tid && m_ls_dt;
   assign d_ok    = wb_tid ? a7_d_ok : m_d_ok;
   assign d_abort = wb_tid ? 1'b0 : m_d_abort;
 endmodule

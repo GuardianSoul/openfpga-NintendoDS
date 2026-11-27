@@ -22,7 +22,7 @@ module tb_dma_vram16;
   .m_req(dm_req),.m_we(dm_we),.m_cpu(dm_cpu),.m_size32(dm_size32),.m_addr(dm_addr),.m_unit(dm_unit),.m_dst(dm_dst),.m_more(dm_more),.m_wdata(dm_wdata),.m_ack(dm_ack),.m_rdata(dm_rdata),.busy,.irq9,.irq7,.dbg_run,.lat_lost);
  wire mr_req,mr_we;wire[21:2]mr_addr;wire[3:0]mr_be;wire[31:0]mr_wdata;logic mr_ack=0;
  nds_fabric #(.OAM_SHARE(1),.MR_BLOCK(1),.DMA_FAST(1),.DMA_RA(1),.DMA_B8(1),.DMA_GX(3),.DMA_IOF(1),.DMA_PW(1),.DMA_PMM(36)) fabric(
-  .clk,.rst,.wramcnt(2'd0),.pb_busy(1'b0),.dm_req,.dm_we,.dm_cpu,.dm_size32,.dm_addr,.dm_unit,.dm_more,.dm_dst,.dx_ready(1'b1),.dx_idle(1'b1),.dm_wdata,.dm_ack,.dm_rdata,
+  .clk,.rst,.wramcnt(2'd0),.pb_busy(1'b0),.dm_req,.dm_we,.dm_cpu,.dm_size32,.dm_addr, .dm_src(dm_addr),.dm_unit,.dm_more,.dm_dst,.dx_ready(1'b1),.dx_idle(1'b1),.dm_wdata,.dm_ack,.dm_rdata,
   .a9_req(c_req),.a9_we(c_we),.a9_addr(32'h06000000|{8'd0,c_addr,2'b00}),.a9_be(c_be),.a9_tmr(4'd0),.a9_wdata(c_wdata),.a9_n8(1'b0),.a9_ack(c_ack),.a9_rdata(c_rdata),
   .a7_req(1'b0),.a7_we(1'b0),.a7_addr(32'd0),.a7_be(4'd0),.a7_wdata(32'd0),.sn_req(1'b0),.sn_we(1'b0),.sn_addr(32'd0),.sn_wdata(32'd0),
   .mr_req,.mr_we,.mr_addr,.mr_be,.mr_wdata,.mr_ack,.mr_rvalid(1'b0),.mr_rdata(32'd0),.mr_wnext(1'b0),

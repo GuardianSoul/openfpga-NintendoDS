@@ -152,7 +152,7 @@ arm-images: $(B)/exc.hex $(B)/hazard0.hex $(B)/hazard1.hex $(B)/cache.hex \
             $(B)/bpred7.hex $(B)/bpred9.hex $(B)/halt.hex \
             $(B)/hazard_c.hex $(B)/rockwrestler_c.hex $(B)/jsmolka_thumb9c.hex \
             $(B)/stress_c.hex $(B)/stress1.hex $(B)/jsmolka_arm.hex $(B)/jsmolka_thumb.hex \
-            $(B)/armwrestler.hex $(B)/armwrestler.hooks $(B)/rockwrestler.hex $(B)/lzcopy.hex $(B)/swflush.hex $(B)/evict.hex $(B)/hdirty.hex $(B)/ldruse2.hex $(B)/hum.hex $(B)/mrcuse.hex $(B)/ldunc.hex $(B)/dtcmcp.hex $(B)/blxs.hex $(B)/biosic.hex
+            $(B)/armwrestler.hex $(B)/armwrestler.hooks $(B)/rockwrestler.hex $(B)/lzcopy.hex $(B)/swflush.hex $(B)/evict.hex $(B)/hdirty.hex $(B)/ldruse2.hex $(B)/hum.hex $(B)/mrcuse.hex $(B)/ldunc.hex $(B)/dtcmcp.hex $(B)/blxs.hex $(B)/biosic.hex $(B)/adcstall.hex
 
 $(B)/%.o: sim/arm/tests/%.s sim/arm/tests/cp15.inc
 	@mkdir -p $(B)
@@ -241,6 +241,13 @@ $(B)/ldruse2.bin: $(B)/ldruse2.o
 	$(OBJCOPY) -O binary $(B)/ldruse2.elf $@
 
 $(B)/ldruse2.hex: $(B)/ldruse2.bin
+	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
+
+$(B)/adcstall.bin: $(B)/adcstall.o
+	$(LLD) --image-base=0 -Ttext=0x02000000 --entry=_start $< -o $(B)/adcstall.elf
+	$(OBJCOPY) -O binary $(B)/adcstall.elf $@
+
+$(B)/adcstall.hex: $(B)/adcstall.bin
 	$(PYTHON) sim/arm/tools/mkhex.py $@ $<@0x02000000
 
 $(B)/hum.o: sim/arm/tests/hum.s sim/arm/tests/cp15.inc

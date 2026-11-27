@@ -43,6 +43,8 @@ def tests(b, assets):
          "ARM9: DC_FlushAll reaches every dirty line of a cache with extra sets"),
         ("ldruse2_9", [f"+img0={b}/ldruse2.hex", "+pc0=02000000", "+run=1"],
          "ARM9: a use two instructions after an uncached load sees the loaded value"),
+        ("adcstall9", [f"+img0={b}/adcstall.hex", "+pc0=02000000", "+run=1"],
+         "ARM9: a flag-setting ADCS in E behind an uncached load stalling M takes its carry-in before the CPSR write"),
         ("evict9", [f"+img0={b}/evict.hex", "+pc0=02000000", "+run=1"],
          "ARM9: 10 KB of distinct words through the write-back cache, every dirty eviction checked via the alias"),
         ("evict9_slowbus", [f"+img0={b}/evict.hex", "+pc0=02000000", "+run=1", "+blat=9"],

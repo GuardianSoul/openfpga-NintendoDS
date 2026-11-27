@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define VERSION "gxcount 3"
+#define VERSION "gxcount 5"
 #define F1 4096
 
 static void vtx(s32 x, s32 y) { gxp_put(0x23, ((u32)x & 0xFFFF) | ((u32)y << 16)); gxp_put(0x23, 0); }
@@ -228,6 +228,25 @@ static void progress(const char* name)
 	if (f) { fprintf(f, "start %s\n", name); fclose(f); }
 }
 
+// v5: RAM_COUNT again once it has stopped changing (equal over 100,000
+// cycles, at most ~5,000,000 = 150 ms), before the SWAP: on the DS equal to
+// the first read; on the Pocket the engine finishes behind the busy model
+// (R219 KNOWN DIFFERENCE), so this read shows whether every polygon was
+// stored, and the next probe starts after the engine is done (v4's fixed 6 ms
+// was short for the 2,048-polygon cases, Pocket run 6).
+static u32 late_ramcount(void)
+{
+	u32 prev = gxp_ramcount();
+	for (int i = 0; i < 50; i++) {
+		u32 t0 = now32();
+		while (now32() - t0 < 100000) {}
+		u32 rc = gxp_ramcount();
+		if (rc == prev) return rc;
+		prev = rc;
+	}
+	return prev;
+}
+
 int main(void)
 {
 	hw_init(VERSION " - polygon/vertex RAM counts");
@@ -241,7 +260,7 @@ int main(void)
 	gxp_swap(0);
 
 	Buf csv = {0};
-	buf_printf(&csv, "probe,polys,verts,overflow,gxstat,timeouts\n");
+	buf_printf(&csv, "probe,polys,verts,overflow,gxstat,timeouts,polys_late,verts_late\n");
 	for (int i = 0; i < NPROBES && !gxp_timeouts; i++) {
 		const Probe* p = &s_probes[i];
 		iprintf("\x1b[4;0H%2d/%d %-16s", i + 1, NPROBES, p->name);
@@ -253,10 +272,11 @@ int main(void)
 		u32 rc = gxp_ramcount();
 		u32 ovf = (R_DISP3DCNT >> 13) & 1;
 		u32 st = R_GXSTAT;
+		u32 rcl = late_ramcount();
 		gxp_swap(0);
-		buf_printf(&csv, "%s,%lu,%lu,%lu,%08lx,%lu\n", p->name, (unsigned long)(rc & 0xFFF),
+		buf_printf(&csv, "%s,%lu,%lu,%lu,%08lx,%lu,%lu,%lu\n", p->name, (unsigned long)(rc & 0xFFF),
 		           (unsigned long)((rc >> 16) & 0x1FFF), (unsigned long)ovf, (unsigned long)st,
-		           (unsigned long)gxp_timeouts);
+		           (unsigned long)gxp_timeouts, (unsigned long)(rcl & 0xFFF), (unsigned long)((rcl >> 16) & 0x1FFF));
 	}
 	static const s32 steps[10] = { -2048, -1024, -256, -64, -16, 16, 64, 256, 1024, 2048 };
 	static const char hists[3] = { 0, 'h', 'l' };
@@ -273,15 +293,16 @@ int main(void)
 		u32 rc = gxp_ramcount();
 		u32 ovf = (R_DISP3DCNT >> 13) & 1;
 		u32 gst = R_GXSTAT;
+		u32 rcl = late_ramcount();
 		gxp_swap(0);
-		buf_printf(&csv, "%s,%lu,%lu,%lu,%08lx,%lu\n", name, (unsigned long)(rc & 0xFFF),
+		buf_printf(&csv, "%s,%lu,%lu,%lu,%08lx,%lu,%lu,%lu\n", name, (unsigned long)(rc & 0xFFF),
 		           (unsigned long)((rc >> 16) & 0x1FFF), (unsigned long)ovf, (unsigned long)gst,
-		           (unsigned long)gxp_timeouts);
+		           (unsigned long)gxp_timeouts, (unsigned long)(rcl & 0xFFF), (unsigned long)((rcl >> 16) & 0x1FFF));
 	}
 	if (gxp_timeouts) buf_printf(&csv, "# stopped: geometry engine timeout\n");
 	buf_write(&csv, "gxcount.csv");
 	Buf info = {0};
-	buf_printf(&info, "%s\nbuilt %s %s\nidentity matrices (w = 1); counts read before each SWAP; overflow = DISP3DCNT bit 13\n",
+	buf_printf(&info, "%s\nbuilt %s %s\nidentity matrices (w = 1); counts read when busy clears and again once stable (_late), before each SWAP; overflow = DISP3DCNT bit 13\n",
 	           VERSION, __DATE__, __TIME__);
 	buf_write(&info, "gxcount_info.txt");
 	hw_done();

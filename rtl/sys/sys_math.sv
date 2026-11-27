@@ -32,6 +32,11 @@
 //
 // Writes follow melonDS's handlers: DIVCNT/SQRTCNT take 16- and 32-bit
 // writes, the operands only 32-bit writes; each restarts its unit.
+//
+// SQRT_PARAM lives in an M10K (u_par), not in flip-flops: the root reads the parameter word holding its next
+// nibble; it starts one clock after its start (S_PRE), so the first read sees a parameter written at the start,
+// and still ends in 17 of its 25 clks. Like the RAM, the parameter keeps its value through rst (power-on 0).
+// (DEN in two more M10Ks as well made 308 of 308 blocks, and #2716 could not place the RAMs.)
 module sys_math #(
     parameter bit PUMP = 0              // u_res double-pumped on clk2 (sys_ram64p)
 ) (
@@ -49,7 +54,7 @@ module sys_math #(
     output logic        late        // simulation check: a result missed its deadline
 );
     logic [15:0] divcnt, sqrtcnt;
-    logic [63:0] num, den, param;
+    logic [63:0] num, den;
     logic        quot_neg, remr_neg;    // the committed results' signs (magnitudes in u_res)
     logic        quot_z, remr_z;        // their low words are 0 (the high word's negation carry)
     logic        bq, br, bs;            // the committed bank of quotient, remainder, root
@@ -78,6 +83,7 @@ module sys_math #(
     wire [63:0]  n64 = m0 ? {{32{num[31]}}, num[31:0]} : num;
     wire [63:0]  d64 = m2 ? den : {{32{den[31]}}, den[31:0]};
     wire         dneg = d64[63];
+    wire         w32e = we && be == 4'hF && !rst;   // (as the old registers: no write during rst)
     wire         d_fin = dst == D_WAIT && dcnt == 6'd1 && tick && !div_start;
 
     // the one 65-bit adder: |N| (setup), R' -/+ D (iterate)
@@ -98,7 +104,7 @@ module sys_math #(
     wire        ge   = !sum[64];
 
     // ---- square root
-    typedef enum logic [1:0] {S_IDLE, S_ITER, S_WAIT} sstate_t;
+    typedef enum logic [1:0] {S_IDLE, S_ITER, S_WAIT, S_PRE} sstate_t;
     sstate_t     sst;
     logic [4:0]  scnt;
     logic [3:0]  sit;               // index of the next parameter nibble
@@ -107,6 +113,10 @@ module sys_math #(
     logic [33:0] srem;              // partial remainder, signed
     logic [31:0] sacc;
     wire         s_fin = sst == S_WAIT && scnt == 5'd1 && tick && !sqrt_start;
+    // SQRT_PARAM's two words; the word read is the next cycle's nibble's (in S_ITER sit - 1: the high word up to 8)
+    logic [31:0] pw;
+    sys_ram #(.W(32), .AW(1)) u_par (.clk, .we(w32e && wa[3:1] == 3'b111), .waddr(wa[0]), .wdata,
+        .raddr(sit[3] && !(sst == S_ITER && sit == 4'd8)), .rdata(pw));
 
     // Non-restoring square root. Keep the full 34-bit 4Q+1 / 4Q+3
     // trial term: truncating it to 32 bits rounds some 64-bit roots up.
@@ -127,7 +137,7 @@ module sys_math #(
     logic        sq_tg = 1'b0, sq_tq = 1'b0;
     wire         sq_mid = sq_tg != sq_tq;
     always_comb begin
-        nib = param[{sit, 2'b00} +: 4];
+        nib = pw[{sit[2:0], 2'b00} +: 4];
         r1 = sq_step(srem, sacc, PUMP && !sq_mid ? nib[1:0] : nib[3:2]); q1 = {sacc[30:0], !r1[33]};
         r2 = sq_step(r1, q1, nib[1:0]);    q2 = {q1[30:0], !r2[33]};
     end
@@ -149,7 +159,7 @@ module sys_math #(
         if (rst) begin
             divcnt <= '0; sqrtcnt <= '0; num <= '0; den <= '0;
             n_min <= 1'b0; d_m1 <= 1'b0; d_zl <= 1'b1; d_zh <= 1'b1;
-            param <= '0; dst <= D_IDLE; quot_neg <= 1'b0; remr_neg <= 1'b0; sst <= S_IDLE; dcnt <= '0; scnt <= '0;
+            dst <= D_IDLE; quot_neg <= 1'b0; remr_neg <= 1'b0; sst <= S_IDLE; dcnt <= '0; scnt <= '0;
             cq <= 1'b1; cr <= 1'b1; cs <= 1'b1;
         end else begin
             // divider
@@ -186,6 +196,7 @@ module sys_math #(
             // square root
             if (sst != S_IDLE && scnt != 5'd0 && tick) scnt <= scnt - 5'd1;
             case (sst)
+                S_PRE: sst <= S_ITER;
                 S_ITER: begin
                     sit <= sit - 4'd1;
                     if (sit == 4'd0) sst <= S_WAIT;
@@ -205,8 +216,6 @@ module sys_math #(
                     4'd5:  num[63:32]  <= wdata;
                     4'd6:  begin den[31:0] <= wdata; d_m1 <= wdata[31] && w_o31; d_zl <= !wdata[31] && w_z31; end
                     4'd7:  begin den[63:32] <= wdata; d_zh <= !wdata[31] && w_z31; end
-                    4'd14: param[31:0] <= wdata;
-                    4'd15: param[63:32]<= wdata;
                     default: ;
                 endcase
                 if (wa[3:2] == 2'b01 && w32) divcnt[15] <= 1'b1;
@@ -218,7 +227,7 @@ module sys_math #(
                 dcnt <= ((wa == 4'd0 ? wdata[1:0] == 2'd0 : m0) ? 6'd18 : 6'd34) - 6'(tick);
             end
             if (sqrt_start) begin
-                sst  <= S_ITER;
+                sst  <= S_PRE;
                 scnt <= 5'd13 - 5'(tick);
                 sit  <= (wa == 4'd12 ? wdata[0] : sqrtcnt[0]) ? 4'd15 : 4'd7;
             end

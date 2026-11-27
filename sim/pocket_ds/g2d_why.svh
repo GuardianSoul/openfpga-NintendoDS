@@ -122,3 +122,17 @@
             end
         end
     end
+// +g2dwr=FIRST: from DS frame FIRST for 3 frames, W,<frame>,<vcount>,<view>,<blk> per CPU/DMA write through a
+// BG/OBJ view (vc_addr[22:5], view = vc_addr[22:21]) and F,<frame>,<vcount>,<eng>,<cache>,<blk> per BG block fill
+    integer gw_wr0 = -1, gw_dsf = 0;
+    initial if (!$value$plusargs("g2dwr=%d", gw_wr0)) gw_wr0 = -1;
+    always @(posedge dut.clk_sys) if (gw_fd != 0 && gw_wr0 >= 0) begin
+        if (dut.ds.line_start && dut.ds.vcount == 9'd0) gw_dsf++;
+        if (gw_dsf >= gw_wr0 && gw_dsf < gw_wr0 + 3) begin
+            if (`GW_T.vc_req && `GW_T.vc_we && `GW_T.vc_ack && !`GW_T.vc_cpu && !`GW_T.vc_addr[23])
+                $fdisplay(gw_fd, "W,%0d,%0d,%0d,%0d", gw_dsf, dut.ds.vcount, `GW_T.vc_addr[22:21], `GW_T.vc_addr[22:5]);
+            if ((|`GW_D.u_gpu2d.u_bg.fill_we[2:0]) && `GW_D.u_gpu2d.u_bg.fill_first)
+                $fdisplay(gw_fd, "F,%0d,%0d,%0d,%0d,%0d", gw_dsf, dut.ds.vcount, `GW_D.u_gpu2d.ld_eng,
+                    `GW_D.u_gpu2d.u_bg.fill_we[0] ? 0 : `GW_D.u_gpu2d.u_bg.fill_we[1] ? 1 : 2, `GW_D.u_gpu2d.u_bg.fill_fblk);
+        end
+    end

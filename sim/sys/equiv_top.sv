@@ -36,7 +36,7 @@ module sys_equiv #(
         .m_req(n_mreq), .m_we(n_mwe), .m_cpu(n_mcpu), .m_size32(n_m32), .m_addr(n_maddr),
         .m_wdata(n_mwd), .m_unit(n_munit), .m_dst(n_mdst), .m_more(n_more), .m_ack, .m_rdata, .dma_busy(n_busy), .irq_ext9, .irq_ext7,
         .irq9(n_i9), .irq7(n_i7), .wake7(n_w7), .math_late(), .dbg_dma_run(), .dma_lat_lost());
-    old_nds_sys #(.DMA_FAST(FAST)) u_old (.clk, .rst, .tick, .io_req, .io_pre(io_req), .tmr_oh(tmr_oh), .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
+    old_nds_sys #(.DMA_FAST(FAST)) u_old (.clk, .rst, .tick, .io_req, .io_pre(io_req), .io_tmr, .tmr_oh(tmr_oh), .io_cpu, .io_we, .io_be, .io_addr, .io_wdata,
         .io_rdata(old_rdata), .io_hit(o_hit), .dma_trig9, .dma_gx_low, .dma_stop9, .dma_trig7,
         .m_req(o_mreq), .m_we(o_mwe), .m_cpu(o_mcpu), .m_size32(o_m32), .m_addr(o_maddr),
         .m_wdata(o_mwd), .m_unit(o_munit), .m_dst(o_mdst), .m_more(o_more), .m_ack, .m_rdata, .dma_busy(o_busy), .irq_ext9, .irq_ext7,

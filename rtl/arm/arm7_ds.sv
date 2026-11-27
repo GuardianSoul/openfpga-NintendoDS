@@ -10,7 +10,7 @@
 // Ports as arm_cpu's ARM7 side: a request is answered (data, ok) at the next clock edge; ok = 0 asks for it again.
 // Halt: an accepted store of 0x80 to HALTCNT (0x04000301) stops it until wake or fiq.
 module arm7_ds import arm_pkg::*; #(
-  parameter bit SP_M10K = 1'b1   // 1: the SPSRs in an M10K, read a clock late (docs/rc8-packing.md row 13; every SPSR user starts clocks after a mode change or SPSR write)
+  parameter bit SP_M10K = 1'b0   // 1: the SPSRs in an M10K, read a clock late (docs/rc8-packing.md row 13; every SPSR user starts clocks after a mode change or SPSR write); 0: in an MLAB, read without a clock (rel15 RAM chain: the M10K goes to the 3D early depth; the same cycles)
 ) (
   input  logic        clk,
   input  logic        rst,
@@ -50,7 +50,8 @@ module arm7_ds import arm_pkg::*; #(
 
   // ---------------------------------------------------------------- state
   (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] rf [0:31];   // physical registers (arm_pkg::phys_reg)
-  (* ramstyle = "M10K, no_rw_check" *) logic [12:0] spsr [0:4];  // (not reset: only an SPSR read before any write can tell; SP_M10K 0: read without a clock, so not an M10K)
+  localparam string SP_STYLE = SP_M10K ? "M10K, no_rw_check" : "MLAB, no_rw_check";
+  (* ramstyle = SP_STYLE *) logic [12:0] spsr [0:4];  // (not reset: only an SPSR read before any write can tell; SP_M10K 0: read without a clock, so not an M10K)
   logic [31:1] pc_f;                       // the fetch address; r15 as E reads it
   logic [12:0] cpsr;                       // psr13: N Z C V Q I F T mode
   logic        ph;
@@ -178,29 +179,53 @@ module arm7_ds import arm_pkg::*; #(
   // ph 0's numbers from registers, taken with the instruction (a mode change flushes D, so it is E's mode): only the
   // choice and a block's next register are left in front of the RAM (es -> r0_n -> phys_reg -> RAM -> rotator -> sho, #1486/#1489)
   logic [4:0]  ra_rm, ra_rs, ra_rd, ra_br;                     // ra_br: br's, taken with br (its bank: bmode at ES_MEM)
-  wire  [4:0]  ra0 = e_rs ? ra_rs : (es == ES_MEM && !is_load) ? (e_blk ? ra_br : e_mem ? ra_rd : ra_rm) : ra_rm;
+  // ph 0's choice among the four as a registered one-hot (rs_q: Rs, br_q: the block's next register, rd_q: a store's
+  // data, none: Rm), set from the next values of E's registers at every edge (they change only at the edge ending
+  // ph 1), so es no longer selects in front of the MLAB (rel15 full chips: es -> ra0 -> MLAB -> rotator -> sho,
+  // #2723 -0.108, #2743 -0.487, #2757 -0.286, #2780 -0.438); the numbers stay their own registers
+  logic        rs_q, br_q, rd_q;
+  wire  [4:0]  ra0 = ({5{rs_q}} & ra_rs) | ({5{br_q}} & ra_br) | ({5{rd_q}} & ra_rd) | ({5{!rs_q && !br_q && !rd_q}} & ra_rm);
+  wire  [4:0]  ra0_c = e_rs ? ra_rs : (es == ES_MEM && !is_load) ? (e_blk ? ra_br : e_mem ? ra_rd : ra_rm) : ra_rm;   // (the select as it was: checked)
   wire [31:0] rq = rf[ph ? ra1_q : ra0];
 
   // ---------------------------------------------------------------- rotator (ph 0)
   logic [31:0] immv;
   logic        s_imm, s_pass;
-  always_comb begin
-    s_pass = 1'b0;                                              // through unrotated
-    s_imm  = 1'b0;
-    immv   = 32'h0;
-    case (k)
-      K_DP, K_MSR: if (ins[25]) begin s_imm = 1'b1; immv = {24'h0, ins[7:0]}; end else if (k == K_MSR) s_pass = 1'b1;
-      K_SDT: if (!ins[25]) begin s_imm = 1'b1; s_pass = 1'b1; immv = {20'h0, ins[11:0]}; end
-      K_HW: begin s_pass = 1'b1; if (ins[22]) begin s_imm = 1'b1; immv = {24'h0, ins[11:8], ins[3:0]}; end end
-      K_BLK: begin s_imm = 1'b1; s_pass = 1'b1; immv = {25'h0, bcnt, 2'b00}; end
-      K_B: begin s_imm = 1'b1; s_pass = 1'b1; immv = {{6{ins[23]}}, ins[23:0], 2'b00}; end
-      K_TB, K_TBL: begin s_imm = 1'b1; s_pass = 1'b1; immv = {{9{ins[21]}}, ins[21:0], 1'b0}; end
-      K_MRS: begin s_imm = 1'b1; s_pass = 1'b1; immv = ins[22] ? (has_spsr ? psr32(spsr_m) : 32'h0) : psr32({cpsr[12], z_now, cpsr[10:0]}); end
-      K_SWP: begin s_imm = 1'b1; s_pass = 1'b1; end
-      K_BX, K_MUL, K_MULL: s_pass = 1'b1;
+  // The kind's rotator controls are registered with the uop (they are functions of k and ins, which load together at
+  // D -> E): s_imm_q, s_pass_q and the immediate's source iv_q (one-hot: 0 rotated imm8, 1 imm12, 2 halfword imm8,
+  // 3 block count, 4 B offset, 5 Thumb branch offset, 6 PSR), so k no longer reaches the rotator (rel15f #2785 k -> sho
+  // -0.009). The decode as it was stays as the check below.
+  logic        s_imm_q, s_pass_q;
+  logic [6:0]  iv_q;
+  function automatic logic [8:0] kctl(input logic [3:0] kk, input logic [31:0] ii);   // {s_imm, s_pass, iv}
+    logic si, sp; logic [6:0] iv;
+    si = 1'b0; sp = 1'b0; iv = 7'd0;
+    case (kk)
+      K_DP, K_MSR: if (ii[25]) begin si = 1'b1; iv[0] = 1'b1; end else if (kk == K_MSR) sp = 1'b1;
+      K_SDT: if (!ii[25]) begin si = 1'b1; sp = 1'b1; iv[1] = 1'b1; end
+      K_HW: begin sp = 1'b1; if (ii[22]) begin si = 1'b1; iv[2] = 1'b1; end end
+      K_BLK: begin si = 1'b1; sp = 1'b1; iv[3] = 1'b1; end
+      K_B: begin si = 1'b1; sp = 1'b1; iv[4] = 1'b1; end
+      K_TB, K_TBL: begin si = 1'b1; sp = 1'b1; iv[5] = 1'b1; end
+      K_MRS: begin si = 1'b1; sp = 1'b1; iv[6] = 1'b1; end
+      K_SWP: begin si = 1'b1; sp = 1'b1; end
+      K_BX, K_MUL, K_MULL: sp = 1'b1;
       default: ;
     endcase
+    return {si, sp, iv};
+  endfunction
+  always_comb begin
+    s_imm = s_imm_q; s_pass = s_pass_q;
+    immv = ({32{iv_q[0]}} & {24'h0, ins[7:0]}) | ({32{iv_q[1]}} & {20'h0, ins[11:0]}) |
+           ({32{iv_q[2]}} & {24'h0, ins[11:8], ins[3:0]}) | ({32{iv_q[3]}} & {25'h0, bcnt, 2'b00}) |
+           ({32{iv_q[4]}} & {{6{ins[23]}}, ins[23:0], 2'b00}) | ({32{iv_q[5]}} & {{9{ins[21]}}, ins[21:0], 1'b0}) |
+           ({32{iv_q[6]}} & (ins[22] ? (has_spsr ? psr32(spsr_m) : 32'h0) : psr32({cpsr[12], z_now, cpsr[10:0]})));
   end
+`ifndef SYNTHESIS
+  // the decode as it was: the registered controls must match it whenever E holds a uop
+  always_ff @(posedge clk) if (!rst && e_v && {s_imm_q, s_pass_q, iv_q} !== kctl(k, ins))
+    $error("arm7_ds KCTL: registered rotator controls %b, not %b (k %0d)", {s_imm_q, s_pass_q, iv_q}, kctl(k, ins), k);
+`endif
   wire        i_rot = e_irot;                                    // the rotated immediate ((k == K_DP || k == K_MSR) && ins[25])
   wire [31:0] shv = s_imm ? immv : (es == ES_0 && rm == 4'hF) ? r15 : rq;
   wire [1:0]  sht = s_pass ? 2'b00 : i_rot ? 2'b11 : ins[6:5];
@@ -374,6 +399,26 @@ module arm7_ds import arm_pkg::*; #(
   wire        ld_pc_a = es == ES_MEM && d_ok && (e_ldpc || (e_blk && is_load && br == 4'hF));   // the loaded word is the target
   wire        w_t15   = es == ES_0 && (e_sr || ((e_mem || e_blk) && !is_load));    // PC + 12 to index 15
 
+  // ra0's select for the next clock (rs_q / br_q / rd_q above): a step keeps the uop and leaves ES_0 (es enters ES_MEM
+  // or not), an advance leaves es at ES_0 with the new uop's e_rs0 when D moves to E, else nothing of E changes
+  wire         dte      = adv && !exc && !irq_take && !brt && !msr;               // D -> E at this edge
+  wire         e_rs0_d  = dk == K_MUL || dk == K_MULL || (dk == K_DP && !d_ins[25] && d_ins[4]);
+  wire         es_mem_n = (es == ES_0 && !e_sr && !e_mul && !e_mull && !(e_blk && ins[24] == ins[23])) ||
+                          es == ES_BLK0 || (es == ES_MEM && (!d_ok || (e_blk && rl_n != 16'h0)));   // (under step)
+  always_ff @(posedge clk)
+    if (rst) begin rs_q <= e_rs0; br_q <= 1'b0; rd_q <= 1'b0; end                  // es <= ES_0, the rest kept
+    else if (step) begin
+      rs_q <= 1'b0; br_q <= es_mem_n && !is_load && e_blk; rd_q <= es_mem_n && !is_load && !e_blk && e_mem;
+    end else if (adv) begin
+      rs_q <= dte ? e_rs0_d : e_rs0; br_q <= 1'b0; rd_q <= 1'b0;
+    end
+`ifndef SYNTHESIS
+  logic chk_on = 1'b0;
+  always_ff @(posedge clk) chk_on <= 1'b1;
+  always_ff @(posedge clk) if (chk_on && ra0 !== ra0_c)
+    $error("arm7_ds RSEL: the registered select gives %0d, not %0d (es %0d)", ra0, ra0_c, es);
+`endif
+
   // the fetch adder: the next fetch; the instruction after E (a link, or where an interrupt or MSR continues); an interrupt's LR
   wire        pa_back = link || exc || msr || (!e_busy && irq_take);
   wire [31:1] pa      = pc_f + (x ? 31'd2 : pa_back ? (tbit ? 31'h7FFF_FFFF : 31'h7FFF_FFFE) : (tbit ? 31'd1 : 31'd2));
@@ -530,7 +575,7 @@ module arm7_ds import arm_pkg::*; #(
         end else begin
           // D -> E, F -> D
           e_v <= d_v;
-          ins <= d_ins; k <= dk; tk <= d_tk; tpcal <= d_pcal;
+          ins <= d_ins; k <= dk; tk <= d_tk; tpcal <= d_pcal; {s_imm_q, s_pass_q, iv_q} <= kctl(dk, d_ins);
           e_mem <= dk == K_SDT || dk == K_HW; e_blk <= dk == K_BLK; e_mul <= dk == K_MUL; e_mull <= dk == K_MULL;
           e_swp <= dk == K_SWP; e_sr <= dk == K_DP && !d_ins[25] && d_ins[4];   // shift by register: Rs first
           e_irot <= (dk == K_DP || dk == K_MSR) && d_ins[25];

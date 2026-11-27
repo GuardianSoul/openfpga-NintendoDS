@@ -67,6 +67,7 @@ module sys_dma #(
     output logic        m_cpu,
     output logic        m_size32,
     output logic [31:0] m_addr,
+    output logic [31:0] m_src,      // the source address register (m_addr whenever !m_we): nds_fabric's DMA hit test
     output logic        m_unit,     // FAST: m_addr is the source, m_dst the destination, one ack for both
     output logic [31:0] m_dst,
     output logic        m_more,     // FAST: the run reads past this unit's 16-byte quad (the fabric may read ahead)
@@ -175,6 +176,18 @@ module sys_dma #(
 `endif
     wire [20:0] rem_dec = rem_m1 & cmask;
     wire [6:0]  chk_dec = e_chunk - 7'd1;
+    // the last unit and the chunk's last, from the registers, not from the decrements: (x - 1) & (2^k - 1) == 0 exactly
+    // when x & (2^k - 1) == 1 (rel15 #2721 7asR: e_rem -> the DSP's decrement -> rem_dec == 0 -> est -0.405 ns)
+`ifdef DMA_REM1_MUT
+    wire        rem_last = (e_rem & cmask) == 21'd2;   // (mutant: one unit early)
+`else
+    wire        rem_last = (e_rem & cmask) == 21'd1;
+`endif
+    wire        chk_last = e_chunk == 7'd1;
+    // synthesis translate_off
+    always @(posedge clk) if (rem_last !== (rem_dec == 21'd0) || chk_last !== (chk_dec == 7'd0))
+        $display("sys_dma: ERROR: rem_last %b / chk_last %b differ from the decrements at %0t", rem_last, chk_last, $time);
+    // synthesis translate_on
 
     assign m_unit   = est == E_MRD && unit;
     assign m_dst    = e_dst;
@@ -185,6 +198,7 @@ module sys_dma #(
     assign m_cpu    = e_cpu;
     assign m_size32 = sz32;
     assign m_addr   = est == E_MWR ? e_dst : e_src;
+    assign m_src    = e_src;
     assign m_wdata  = sz32 ? e_data : {e_data[15:0], e_data[15:0]};
 
     logic [7:0] fin_irq;
@@ -246,8 +260,8 @@ module sys_dma #(
                     // (a unit's source is main RAM: its low 22 bits, mirrors beyond)
                     e_src[21:2] <= e_src[21:2] + 20'd1; e_dst <= {4'd0, anext};
                     e_rem <= rem_dec; e_chunk <= chk_dec;
-                    if (rem_dec == 21'd0)            begin e_why <= 2'd2; est <= E_SAVE; end
-                    else if (gx && chk_dec == 7'd0)  begin e_why <= 2'd1; est <= E_SAVE; end
+                    if (rem_last)            begin e_why <= 2'd2; est <= E_SAVE; end
+                    else if (gx && chk_last)  begin e_why <= 2'd1; est <= E_SAVE; end
                     else if (higher)                 begin e_why <= 2'd0; est <= E_SAVE; end
                 end else if (m_ack) begin
                     e_data <= m_rdata; e_src <= {4'd0, anext}; est <= E_MWR;
@@ -256,8 +270,8 @@ module sys_dma #(
                 E_MWR: if (m_ack) begin
                     e_dst <= {4'd0, anext};
                     e_rem <= rem_dec; e_chunk <= chk_dec;
-                    if (rem_dec == 21'd0)            begin e_why <= 2'd2; est <= E_SAVE; end
-                    else if (gx && chk_dec == 7'd0)  begin e_why <= 2'd1; est <= E_SAVE; end
+                    if (rem_last)            begin e_why <= 2'd2; est <= E_SAVE; end
+                    else if (gx && chk_last)  begin e_why <= 2'd1; est <= E_SAVE; end
                     else if (higher)                 begin e_why <= 2'd0; est <= E_SAVE; end
                     else est <= FILL1 && e_fv ? E_MWR : E_MRD;
                 end
